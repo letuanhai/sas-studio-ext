@@ -1290,18 +1290,21 @@ Add a prefix to the path for different option:
         return disabled;
       }
 
-      function minimize(dialog) {
+      function minimize(dialog, cancelCb) {
         installSingleRunGuard();
 
         // Re-enable at run end: success tears the dialog down via destroy()
         // (hideBusyDialog), the error path via submitDialog.hide() - wrap both
         // on the instance, run-once.
         const disabledButtons = disableRunButtons();
+        let runTabNode = null; // the running tab's button, marked below
         let reenabled = false;
         function reenable() {
           if (reenabled) return;
           reenabled = true;
           disabledButtons.forEach((btn) => btn.set("disabled", false));
+          restoreStatusBar();
+          if (runTabNode) runTabNode.classList.remove("ssf-running");
         }
         ["hide", "destroy"].forEach((name) => {
           const orig = dialog[name].bind(dialog);
@@ -1321,50 +1324,71 @@ Add a prefix to the path for different option:
         // _DialogLevelManager.hide, #9944/#10705 out-of-order-removal path).
         dijit.Dialog._DialogLevelManager.hide(dialog);
 
-        // Neutralize dijit's own re-centering (viewport resize etc.) so the
-        // pin survives viewport resizes; the box stays draggable.
+        // Hide the dialog outright - no floating box. SAS already writes live
+        // run status ("SAS Program running (DATASTEP running).") to the bottom
+        // status-bar message; we just tint that bar amber and add a Cancel link
+        // next to it, so the run is signalled without covering or blocking the
+        // app. Neutralize dijit's re-centering so the hidden node doesn't
+        // reappear on a viewport resize.
         dialog._position = function () {};
+        dialog.domNode.style.display = "none";
 
-        // Compact restyle: drop the title bar and the spinner, show a single
-        // "Running..." line beside the Cancel button on a yellow box.
-        if (dialog.titleBar) dialog.titleBar.style.display = "none";
-        const content = document.getElementById("busyDialog_contentArea");
-        if (content) {
-          content.textContent = "Running..."; // wipes the spinner widget's DOM
-          content.style.cssText =
-            "margin:0;padding:0 0 0 8px;background:transparent;white-space:nowrap;font-weight:regular;";
+        // Amber tint on the status bar + a Cancel link wired to the same
+        // callback the dialog's own Cancel button used (postBusyDialog's _cb).
+        const bar = document.getElementById("studio_status_bar");
+        // !important - dijit's .statusBar rule sets the background !important,
+        // so a plain inline style loses to it.
+        if (bar) bar.style.setProperty("background", "#ffe9a8", "important");
+        if (bar && cancelCb) {
+          // Cancel floated to the right side of the bar, leaving SAS's own
+          // status text on the left untouched.
+          const link = document.createElement("a");
+          link.id = "ssf-run-cancel";
+          link.href = "#";
+          link.textContent = "Cancel";
+          link.style.cssText =
+            "float:right;margin-right:12px;color:#0b5cab;font-weight:bold;cursor:pointer;text-decoration:underline;";
+          link.onclick = function (e) {
+            e.preventDefault();
+            cancelCb();
+          };
+          bar.appendChild(link);
         }
 
-        // Hiding the title bar removed dijit's drag handle - repoint the
-        // existing Moveable at the whole box (reusing its constructor so we
-        // don't need the dojo/dnd/Moveable module). skip:true keeps clicks on
-        // the Cancel button from starting a drag.
-        if (dialog._moveable) {
-          const Moveable = dialog._moveable.constructor;
-          dialog._moveable.destroy();
-          dialog._moveable = new Moveable(dialog.domNode, {
-            handle: dialog.domNode,
-            skip: true,
-          });
+        // Mark the running tab with an animated spinner icon + amber label so
+        // you can see WHICH open script is executing. The run is initiated from
+        // the focused code tab (Run button / F3 both require it active), so
+        // that's the running one; cleared in reenable() at run end.
+        injectRunStyle();
+        const runTab = window.appDMS.tabs.getFocusedTab();
+        const node =
+          runTab && runTab.tab && runTab.tab.controlButton && runTab.tab.controlButton.domNode;
+        if (node) {
+          node.classList.add("ssf-running");
+          runTabNode = node;
         }
-        // "Running..." and the Cancel button share one row.
-        dialog.containerNode.style.cssText =
-          "display:flex;align-items:center;gap:12px;padding:8px 12px;";
-        const actionBar = document.getElementById("busyDialog_actionBar");
-        if (actionBar) actionBar.style.cssText = "margin:0;padding:0;border:0;";
+      }
 
-        // Pin to the top center via computed top/left, not right/bottom:
-        // Moveable moves the node by setting top/left, and a leftover
-        // right/bottom anchor would make a drag stretch the box instead of
-        // moving it.
-        const s = dialog.domNode.style;
-        s.width = "auto";
-        s.zIndex = 1000;
-        const width = dialog.domNode.offsetWidth || 200;
-        s.top = "4px";
-        s.left = Math.max(0, (window.innerWidth - width) / 2) + "px";
-        s.right = "";
-        s.bottom = "";
+      function restoreStatusBar() {
+        const bar = document.getElementById("studio_status_bar");
+        if (bar) bar.style.removeProperty("background");
+        const link = document.getElementById("ssf-run-cancel");
+        if (link) link.remove();
+      }
+
+      // Spinner-icon + amber-label animation for the running tab, injected once.
+      function injectRunStyle() {
+        if (document.getElementById("ssf-run-style")) return;
+        const st = document.createElement("style");
+        st.id = "ssf-run-style";
+        st.textContent =
+          "@keyframes ssf-spin{to{transform:rotate(360deg)}}" +
+          ".dijitTab.ssf-running .dijitTabButtonIcon{background-image:none!important;position:relative}" +
+          ".dijitTab.ssf-running .dijitTabButtonIcon::after{content:'';position:absolute;left:1px;top:1px;" +
+          "width:12px;height:12px;box-sizing:border-box;border:2px solid #c8a000;border-top-color:transparent;" +
+          "border-radius:50%;animation:ssf-spin .7s linear infinite}" +
+          ".dijitTab.ssf-running{background:#ffe9a8!important}";
+        document.head.appendChild(st);
       }
 
       const o_postBusyDialog = dialogs.postBusyDialog;
@@ -1386,7 +1410,7 @@ Add a prefix to the path for different option:
           // that dialog is auto-minimized; other busy dialogs stay modal.
           if (args[1]) {
             window.__ssfRunDialog = dialog;
-            minimize(dialog);
+            minimize(dialog, args[1]);
           }
         } catch (e) {
           console.error("[SS Ext] minimizeBusyDialog: failed to auto-minimize:", e);

@@ -1,2 +1,0 @@
-- [x] vim ex command `:w <path>` use ss-ext save as tool to save file at specified path, `:w` and `:wq` still keep existing function
-- [x] add ss-ext actions to execute current sas script/selection (like SAS Studio F3 hotkey). also change vim ex command `:x` to the execution action
