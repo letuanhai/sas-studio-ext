@@ -172,6 +172,12 @@
       and <code>unmap</code>/<code>nunmap</code>/<code>iunmap</code>/<code>vunmap &lt;lhs&gt;</code>. Anything else is
       skipped with a console warning. Removing a line here doesn't undo the mapping until the page is reloaded.
     </p>
+    <p class="note">
+      Custom ex-commands (work in both code tabs and text-view tabs):
+      <code>:w</code> save, <code>:w &lt;path&gt;</code> save-as,
+      <code>:q</code> close tab, <code>:wq</code> save &amp; close,
+      <code>:x</code> <strong>run</strong> the program/selection (like F3, not vim's save-and-close).
+    </p>
     <textarea id="vimrc-editor" spellcheck="false"></textarea>
     <button id="save-vimrc">Save vim config</button>
     <span id="vimrc-save-status"></span>
