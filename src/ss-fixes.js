@@ -655,12 +655,29 @@ Add a prefix to the path for different option:
   // the tree by hand, then complete the save exactly as clicking the dialog's Save
   // button would - so tab rename/uri update/dirty-clearing etc. all go through SAS
   // Studio's own code, not a reimplementation of it.
-  function saveFileAtPath() {
+  function saveFocusedFileAtPath(targetPath) {
     const editor = window.appDMS.tabs.getFocusedTab()?.editor;
     if (!editor || typeof editor.saveFileAs !== "function") {
       showNotification({ message: "No saveable file is currently focused", isError: true });
       return;
     }
+    const resolved = resolveFilePath(targetPath);
+    const dirPath = resolved.split("/").slice(0, -1).join("/");
+    const fileName = resolved.split("/").slice(-1)[0];
+
+    editor.saveFileAs(false);
+    return waitForSaveAsDialog()
+      .then((saveAsDialog) =>
+        scrollTreeToPath(dirPath, "destination").then(() => {
+          saveAsDialog._onDestTreeClick(saveAsDialog.tree);
+          saveAsDialog.fileNameTextBox.set("value", fileName);
+          saveAsDialog.okButton.onClick();
+        }),
+      )
+      .catch((err) => showNotification({ message: err.message, isError: true }));
+  }
+
+  function saveFileAtPath() {
     showInputDialog(
       {
         title: "Save File At Path",
@@ -670,22 +687,21 @@ Add a prefix to the path for different option:
       },
       function (userInput) {
         if (!userInput) return;
-        const targetPath = resolveFilePath(userInput);
-        const dirPath = targetPath.split("/").slice(0, -1).join("/");
-        const fileName = targetPath.split("/").slice(-1)[0];
-
-        editor.saveFileAs(false);
-        waitForSaveAsDialog()
-          .then((saveAsDialog) =>
-            scrollTreeToPath(dirPath, "destination").then(() => {
-              saveAsDialog._onDestTreeClick(saveAsDialog.tree);
-              saveAsDialog.fileNameTextBox.set("value", fileName);
-              saveAsDialog.okButton.onClick();
-            }),
-          )
-          .catch((err) => showNotification({ message: err.message, isError: true }));
+        saveFocusedFileAtPath(userInput);
       },
     );
+  }
+
+  function runCurrentProgram() {
+    const editor = window.appDMS.tabs.getFocusedTab()?.editor;
+    if (!editor || typeof editor.submitHandler !== "function") {
+      showNotification({ message: "No runnable SAS program is currently focused", isError: true });
+      return;
+    }
+    // submitHandler runs the selection if there is one, else the whole program
+    // (DMSEditor.js:6551), and honors the single-run/minimize guards since it's
+    // the prototype-wrapped method. No event arg needed (setPreventDefault no-ops).
+    editor.submitHandler();
   }
 
   function scrollTreeToCurrentTabItem() {
@@ -850,6 +866,7 @@ Add a prefix to the path for different option:
     createNewFile: { fn: createNewFile },
     openUserInputTarget: { fn: openUserInputTarget },
     saveFileAtPath: { fn: saveFileAtPath },
+    runCurrentProgram: { fn: runCurrentProgram },
     scrollTreeToCurrentTabItem: { fn: scrollTreeToCurrentTabItem },
     scrollTreeToInputPath: { fn: scrollTreeToInputPath },
     scrollTreeToSelectedNode: { fn: () => scrollTreeToSelectedNode() },
@@ -1492,5 +1509,5 @@ Add a prefix to the path for different option:
     }
   }
 
-  window.__ssf = { init, run };
+  window.__ssf = { init, run, saveFocusedFileAtPath };
 })();

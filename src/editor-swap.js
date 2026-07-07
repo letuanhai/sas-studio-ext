@@ -1260,10 +1260,20 @@
         vimSave(ctx);
         vimClose(ctx);
       };
-      Vim.defineEx("write", "w", (cm) => vimSave(resolveAceContext(cm.ace)));
+      Vim.defineEx("write", "w", (cm, params) => {
+        const path = params && params.argString && params.argString.trim();
+        if (path) {
+          if (window.__ssf && window.__ssf.saveFocusedFileAtPath) window.__ssf.saveFocusedFileAtPath(path);
+          else console.warn("[SS Ext] :w <path> unavailable (ss-fixes not loaded)");
+          return;
+        }
+        vimSave(resolveAceContext(cm.ace));
+      });
       Vim.defineEx("quit", "q", (cm) => vimClose(resolveAceContext(cm.ace)));
       Vim.defineEx("wq", "wq", saveAndClose);
-      Vim.defineEx("xit", "x", saveAndClose);
+      Vim.defineEx("xit", "x", () => {
+        if (window.__ssf && window.__ssf.run) window.__ssf.run("runCurrentProgram");
+      });
 
       const vimrcText = (ssExt.aceConfig && ssExt.aceConfig.vimrc) || "";
       vimrcText.split("\n").forEach((line) => applyVimrcLine(Vim, line));

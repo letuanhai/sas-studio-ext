@@ -49,6 +49,13 @@ Add a prefix to the path for different option:
       hotkey: { key: "S", altKey: true, shiftKey: true },
     },
     {
+      name: "runCurrentProgram",
+      kind: "action",
+      label: "Run program / selection",
+      title: "Submit the current SAS program, or the selected code if there's a selection (like F3)",
+      hotkey: null,
+    },
+    {
       name: "scrollTreeToCurrentTabItem",
       kind: "action",
       label: "Focus tree on current tab item",
