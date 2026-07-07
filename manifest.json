@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SS Ext",
-  "version": "0.4",
+  "version": "0.5",
   "description": "Extension for SAS Studio",
   "icons": {
     "16": "assets/icon16.png",

@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.5
 
+- Options page now documents the custom vim ex-commands (`:w` save,
+  `:w <path>` save-as, `:q` close tab, `:wq` save & close, `:x` run) as a
+  static note in the Vim config section.
 - LSP line limit (`aceConfig.lspMaxLines`, default 500, 0 = no limit): skips SAS
   language server registration for files longer than N lines, re-checked on
   `setText` since the code editor's real content arrives after construction.
