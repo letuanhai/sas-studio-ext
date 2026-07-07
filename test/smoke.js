@@ -676,6 +676,125 @@ function check(name, ok, detail) {
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await page.waitForTimeout(300);
 
+  // -- Minimizable run-progress dialog + single-run guard -------------------------
+  const busyDialogState = await page.evaluate(async () => {
+    // Pick a pre-existing code tab whose Run button is enabled - minimizing
+    // must disable it (that's what blocks Run/F3 for tabs whose handlers were
+    // dojo.hitch'd to the original submitHandler at construction), and run end
+    // must re-enable it.
+    const runTab = window.appDMS.tabs
+      .getAllTabObjects()
+      .find((t) => t.editor && t.editor.submitButton && !t.editor.submitButton.get("disabled"));
+    // Background submits run in separate SAS sessions - their button must NOT
+    // be disabled by minimizing (only the foreground run is single-run).
+    const bgTab = window.appDMS.tabs
+      .getAllTabObjects()
+      .find((t) => t.editor && t.editor.backgroundSubmitButton && !t.editor.backgroundSubmitButton.get("disabled"));
+
+    const dialog = window.appDMS.dialogs.postBusyDialog("Submitting SAS Code", () => {});
+    // dijit._underlay.open is the authoritative flag (DialogUnderlay.show/hide);
+    // its domNode is a wrapper separate from the .dijitDialogUnderlay inner node.
+    const underlayBlockedBefore = !!(dijit._underlay && dijit._underlay.open);
+
+    const btn = dialog.titleBar && dialog.titleBar.querySelector(".ssf-busy-dialog-minimize");
+    if (!btn) return { hasMinimizeButton: false };
+    btn.click();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const runButtonDisabledAfterMinimize = runTab ? runTab.editor.submitButton.get("disabled") === true : null;
+    const bgButtonStillEnabledAfterMinimize = bgTab ? bgTab.editor.backgroundSubmitButton.get("disabled") === false : null;
+
+    const underlayHiddenAfter = !dijit._underlay || dijit._underlay.open === false;
+    const dialogStillInDom = !!document.getElementById(dialog.id);
+    const dialogPinned = getComputedStyle(dialog.domNode).position === "fixed";
+
+    // Single-run guard: a submitHandler on any open code tab must now refuse
+    // to run (appDMS.dialogs.busyDialog is still set - the dialog is only
+    // minimized, not destroyed) - verified via the specific client note the
+    // guard sends instead of calling through to the real submit flow (which
+    // would try to hit the network).
+    const tabObj = window.appDMS.tabs.getAllTabObjects().find((t) => t.editor && t.editor.submitHandler);
+    let guardRefused = null;
+    if (tabObj) {
+      let note = null;
+      const origNote = window.appDMS.sendClientNoteMessage;
+      window.appDMS.sendClientNoteMessage = (msg) => (note = msg);
+      try {
+        tabObj.editor.submitHandler();
+      } finally {
+        window.appDMS.sendClientNoteMessage = origNote;
+      }
+      guardRefused = typeof note === "string" && /already running/i.test(note);
+    }
+
+    // Destroy the (minimized) busy dialog, same as hideBusyDialog() at run end,
+    // and confirm a later modal dialog still gets a working underlay - the
+    // early DialogLevelManager.hide() call at minimize time must not have left
+    // the shared stack/underlay singleton in a broken state.
+    dialog.destroy();
+    window.appDMS.dialogs.busyDialog = null;
+    await new Promise((r) => setTimeout(r, 100));
+
+    const runButtonReenabledAfterDestroy = runTab ? runTab.editor.submitButton.get("disabled") === false : null;
+
+    const otherDialog = new dijit.Dialog({ title: "SS Ext smoke: post-minimize modality check" });
+    otherDialog.show();
+    await new Promise((r) => setTimeout(r, 200));
+    const otherUnderlayShown = !!(dijit._underlay && dijit._underlay.open);
+    otherDialog.destroy();
+
+    return {
+      hasMinimizeButton: true,
+      underlayBlockedBefore,
+      underlayHiddenAfter,
+      dialogStillInDom,
+      dialogPinned,
+      hasTabToTestGuard: !!tabObj,
+      guardRefused,
+      hasRunTab: !!runTab,
+      hasBgTab: !!bgTab,
+      runButtonDisabledAfterMinimize,
+      bgButtonStillEnabledAfterMinimize,
+      runButtonReenabledAfterDestroy,
+      otherUnderlayShown,
+    };
+  });
+  check("busy dialog gets a minimize button in its title bar", busyDialogState.hasMinimizeButton, busyDialogState);
+  if (busyDialogState.hasMinimizeButton) {
+    check("busy dialog underlay blocks the app before minimizing", busyDialogState.underlayBlockedBefore, busyDialogState);
+    check("minimizing releases the modal underlay", busyDialogState.underlayHiddenAfter, busyDialogState);
+    check("minimized dialog stays visible (pinned) instead of closing", busyDialogState.dialogStillInDom && busyDialogState.dialogPinned, busyDialogState);
+    check(
+      busyDialogState.hasTabToTestGuard
+        ? "single-run guard blocks submitHandler while busyDialog is set"
+        : "single-run guard blocks submitHandler while busyDialog is set (skipped: no code tab open)",
+      !busyDialogState.hasTabToTestGuard || busyDialogState.guardRefused === true,
+      busyDialogState,
+    );
+    check(
+      busyDialogState.hasRunTab
+        ? "minimizing disables pre-existing tabs' Run buttons (blocks Run/F3 via DMSEditor's own disabled check)"
+        : "minimizing disables pre-existing tabs' Run buttons (skipped: no enabled Run button open)",
+      !busyDialogState.hasRunTab || busyDialogState.runButtonDisabledAfterMinimize === true,
+      busyDialogState,
+    );
+    check(
+      busyDialogState.hasBgTab
+        ? "minimizing leaves background-submit buttons enabled (background runs stay allowed)"
+        : "minimizing leaves background-submit buttons enabled (skipped: none enabled)",
+      !busyDialogState.hasBgTab || busyDialogState.bgButtonStillEnabledAfterMinimize === true,
+      busyDialogState,
+    );
+    check(
+      busyDialogState.hasRunTab
+        ? "run end (dialog destroy) re-enables the Run buttons it disabled"
+        : "run end (dialog destroy) re-enables the Run buttons it disabled (skipped: no enabled Run button open)",
+      !busyDialogState.hasRunTab || busyDialogState.runButtonReenabledAfterDestroy === true,
+      busyDialogState,
+    );
+    check("a later modal dialog still gets a working underlay after the busy dialog is destroyed", busyDialogState.otherUnderlayShown, busyDialogState);
+  }
+
   await ctx.close();
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed");
   process.exit(failures ? 1 : 0);

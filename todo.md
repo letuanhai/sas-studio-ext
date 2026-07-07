@@ -1,0 +1,2 @@
+- [x] add config in options page to disable sas-lsp entirely and an option to disable sas-lsp with files longer than 500 lines (configurable)
+- [x] when sas studio is running a program, the running progress dialog will block the whole app from interaction, add option to minimize that dialog to a corner so we can continue to use SAS Studio, just block execution of any other sas script (only 1 run at a time)

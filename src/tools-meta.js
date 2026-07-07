@@ -248,5 +248,11 @@ Add a prefix to the path for different option:
       label: "Maximize editor cleanup",
       title: "Clean up stray widgets and resize properly when maximizing/restoring the editor view",
     },
+    {
+      name: "minimizeBusyDialog",
+      kind: "patch",
+      label: "Minimizable run-progress dialog",
+      title: "Add a minimize button to the run-progress dialog so the app stays usable while a program runs (only one run at a time)",
+    },
   ];
 })();

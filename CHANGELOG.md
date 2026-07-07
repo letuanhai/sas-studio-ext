@@ -7,6 +7,14 @@
   `setText` since the code editor's real content arrives after construction.
   Configurable in the options page next to the existing "SAS language server"
   checkbox.
+- Minimizable run-progress dialog (`minimizeBusyDialog` patch): adds a minimize
+  button to the run-progress dialog's title bar so the app stays usable while a
+  program runs, and refuses to start a second foreground run while one is in
+  progress (`DMSEditor.prototype.submitHandler`/`interactiveSubmitHandler`
+  guarded on `appDMS.dialogs.busyDialog`, plus every open tab's Run button
+  disabled while minimized — that's what blocks Run/F3 in pre-existing tabs,
+  whose handlers were hitched to the original function — and re-enabled at run
+  end). Background submits stay allowed (separate SAS sessions).
 
 ## 0.4
 

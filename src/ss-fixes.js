@@ -1159,6 +1159,144 @@ Add a prefix to the path for different option:
         window.dispatchEvent(new Event("resize"));
       };
     },
+
+    minimizeBusyDialog: function () {
+      // The run-progress dialog (DMSEditor.submitHandler ->
+      // appDMS.dialogs.postBusyDialog) is a modal dijit Dialog whose shared
+      // underlay singleton blocks the whole app until the run finishes. Add a
+      // minimize button to its title bar that releases modality and pins it to
+      // a corner, plus a single-run guard so a second submit can't be started
+      // while one is already in flight (minimized or not).
+      const dialogs = window.appDMS.dialogs;
+
+      // Lazily installed at minimize time, not patch-init time - a code tab
+      // (and so a DMSEditor instance to grab the class off of) is only
+      // guaranteed to exist once something has actually been submitted.
+      function installSingleRunGuard() {
+        if (window.__ssfSingleRunGuardInstalled) return;
+
+        let DMSEditor = null;
+        (window.appDMS.tabs.getAllTabObjects() || []).some((t) => {
+          if (t.editor) {
+            DMSEditor = t.editor.constructor;
+            return true;
+          }
+          return false;
+        });
+        if (!DMSEditor) {
+          console.warn("[SS Ext] minimizeBusyDialog: could not find DMSEditor class to patch");
+          return;
+        }
+
+        window.__ssfSingleRunGuardInstalled = true;
+        ["submitHandler", "interactiveSubmitHandler"].forEach((name) => {
+          const orig = DMSEditor.prototype[name];
+          if (typeof orig !== "function") return;
+          DMSEditor.prototype[name] = function (...args) {
+            if (window.appDMS.dialogs.busyDialog != null) {
+              window.appDMS.sendClientNoteMessage(
+                "A program is already running - wait for it to finish before starting another.",
+              );
+              return;
+            }
+            return orig.apply(this, args);
+          };
+        });
+      }
+
+      // Disable every open tab's Run buttons while the run is in progress. The
+      // prototype wrap above doesn't cover pre-existing tabs: their Run button
+      // and F3 were wired with dojo.hitch(this, this.submitHandler) at tab
+      // construction (DMSEditor.js:4234/5017), which captured the ORIGINAL
+      // function - the wrap is never hit. But that original checks
+      // `if (this.submitButton.get("disabled") == true) return;`
+      // (DMSEditor.js:6502 - SAS Studio's own comment says it exists "to take
+      // care of key 'F3'"), so disabling the button blocks both the click and
+      // F3 with no re-wiring. Only buttons we actually disabled here get
+      // re-enabled at run end - never ones the app disabled for its own
+      // reasons (e.g. read-only tabs). backgroundSubmitButton is deliberately
+      // left alone: background submits run in separate SAS sessions (their
+      // hitch targets submitBackgroundHandler, an independent method the
+      // prototype guard doesn't wrap either) and SAS Studio supports several
+      // at once - only the foreground run is single-run.
+      function disableRunButtons() {
+        const disabled = [];
+        (window.appDMS.tabs.getAllTabObjects() || []).forEach((t) => {
+          const btn = t.editor && t.editor.submitButton;
+          if (btn && !btn.get("disabled")) {
+            btn.set("disabled", true);
+            disabled.push(btn);
+          }
+        });
+        return disabled;
+      }
+
+      function minimize(dialog) {
+        installSingleRunGuard();
+
+        // Re-enable at run end: success tears the dialog down via destroy()
+        // (hideBusyDialog), the error path via submitDialog.hide() - wrap both
+        // on the instance, run-once.
+        const disabledButtons = disableRunButtons();
+        let reenabled = false;
+        function reenable() {
+          if (reenabled) return;
+          reenabled = true;
+          disabledButtons.forEach((btn) => btn.set("disabled", false));
+        }
+        ["hide", "destroy"].forEach((name) => {
+          const orig = dialog[name].bind(dialog);
+          dialog[name] = function (...args) {
+            reenable();
+            return orig(...args);
+          };
+        });
+
+        // Release modality. DialogLevelManager.hide() pops this dialog off the
+        // shared dialog stack and hides (or, if another dialog is still under
+        // it, re-adjusts) the shared underlay singleton - exactly what would
+        // happen on destroy(). Safe to call early: Dialog.prototype.destroy()
+        // calls this same function again when the run actually finishes, and
+        // its "dialog isn't the top of the stack anymore" branch is a no-op
+        // for an entry that's already been removed (dijit/Dialog.js's
+        // _DialogLevelManager.hide, #9944/#10705 out-of-order-removal path).
+        dijit.Dialog._DialogLevelManager.hide(dialog);
+
+        // Neutralize dijit's own re-centering (viewport resize etc.) and pin
+        // the dialog to the bottom-right corner instead.
+        dialog._position = function () {};
+        const s = dialog.domNode.style;
+        s.position = "fixed";
+        s.top = "";
+        s.left = "";
+        s.right = "12px";
+        s.bottom = "12px";
+        s.width = "220px";
+        s.zIndex = 1000;
+      }
+
+      function addMinimizeButton(dialog) {
+        if (!dialog || !dialog.titleBar) return;
+        const btn = document.createElement("span");
+        btn.textContent = "–"; // "-"
+        btn.title = "Minimize";
+        btn.className = "ssf-busy-dialog-minimize";
+        btn.style.cssText = "cursor:pointer;float:right;padding:0 6px;font-weight:bold;user-select:none;";
+        btn.addEventListener("click", () => minimize(dialog));
+        dialog.titleBar.appendChild(btn);
+      }
+
+      const o_postBusyDialog = dialogs.postBusyDialog;
+      dialogs.postBusyDialog = function (...args) {
+        const dialog = o_postBusyDialog.apply(this, args);
+        try {
+          addMinimizeButton(dialog);
+        } catch (e) {
+          console.error("[SS Ext] minimizeBusyDialog: failed to add minimize button:", e);
+        }
+        return dialog;
+      };
+    },
   };
 
   // ==========================================================================
