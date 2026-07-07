@@ -1163,11 +1163,52 @@ Add a prefix to the path for different option:
     minimizeBusyDialog: function () {
       // The run-progress dialog (DMSEditor.submitHandler ->
       // appDMS.dialogs.postBusyDialog) is a modal dijit Dialog whose shared
-      // underlay singleton blocks the whole app until the run finishes. Add a
-      // minimize button to its title bar that releases modality and pins it to
-      // a corner, plus a single-run guard so a second submit can't be started
-      // while one is already in flight (minimized or not).
+      // underlay singleton blocks the whole app until the run finishes. While
+      // this patch is enabled (the options-page checkbox is the only config -
+      // unchecked leaves SAS Studio untouched), the run dialog is
+      // auto-minimized to the bottom-right corner the moment it appears, plus
+      // a single-run guard so a second submit can't be started while one is
+      // already in flight. Non-run busy dialogs (short-lived: "Reading file",
+      // server switch, ...) keep their stock modal behavior.
       const dialogs = window.appDMS.dialogs;
+
+      // In-page notification (top-left) - SAS Studio's own toaster truncates
+      // longer messages. One element, re-used: a later message replaces the
+      // text. Sticky rather than timed: it describes a state that's true
+      // exactly as long as the run lasts, so it's cleared when the busy
+      // dialog closes (and click-to-dismiss before that).
+      function busyNotice(msg, warn) {
+        let el = document.getElementById("ssf-busy-notice");
+        if (!el) {
+          el = document.createElement("div");
+          el.id = "ssf-busy-notice";
+          el.title = "Click to dismiss";
+          el.style.cssText =
+            "position:fixed;top:12px;left:12px;z-index:2000;max-width:420px;" +
+            "padding:10px 14px;border-radius:4px;font:13px/1.4 sans-serif;color:#333;" +
+            "box-shadow:0 2px 8px rgba(0,0,0,0.3);cursor:pointer;";
+          el.addEventListener("click", () => el.remove());
+          document.body.appendChild(el);
+        }
+        el.style.background = warn ? "#ffd54f" : "#e3f2fd";
+        el.textContent = msg;
+      }
+      function clearBusyNotice() {
+        const el = document.getElementById("ssf-busy-notice");
+        if (el) el.remove();
+      }
+
+      // "A foreground run is in progress." Tracked via the run's own dialog
+      // (postBusyDialog callers pass a cancel callback only on the submit
+      // paths - DMSEditor.js:6569/6663), NOT via dialogs.busyDialog != null:
+      // every run-end path tears down with submitDialog.hide(), never
+      // hideBusyDialog(), so dialogs.busyDialog stays a stale non-null
+      // reference after every completed run. dijit sets .open synchronously
+      // in show()/hide(); destroy() sets _destroyed without flipping .open.
+      function runActive() {
+        const d = window.__ssfRunDialog;
+        return !!(d && d.open && !d._destroyed);
+      }
 
       // Lazily installed at minimize time, not patch-init time - a code tab
       // (and so a DMSEditor instance to grab the class off of) is only
@@ -1193,9 +1234,10 @@ Add a prefix to the path for different option:
           const orig = DMSEditor.prototype[name];
           if (typeof orig !== "function") return;
           DMSEditor.prototype[name] = function (...args) {
-            if (window.appDMS.dialogs.busyDialog != null) {
-              window.appDMS.sendClientNoteMessage(
+            if (runActive()) {
+              busyNotice(
                 "A program is already running - wait for it to finish before starting another.",
+                true,
               );
               return;
             }
@@ -1263,38 +1305,131 @@ Add a prefix to the path for different option:
         dijit.Dialog._DialogLevelManager.hide(dialog);
 
         // Neutralize dijit's own re-centering (viewport resize etc.) and pin
-        // the dialog to the bottom-right corner instead.
+        // the dialog to the bottom-right corner. Pin via computed top/left,
+        // not right/bottom: dijit's title-bar drag (dojo/dnd Moveable) moves
+        // the node by setting top/left, and a leftover right/bottom anchor
+        // would make a drag stretch the box instead of moving it.
         dialog._position = function () {};
         const s = dialog.domNode.style;
-        s.position = "fixed";
-        s.top = "";
-        s.left = "";
-        s.right = "12px";
-        s.bottom = "12px";
         s.width = "220px";
         s.zIndex = 1000;
-      }
-
-      function addMinimizeButton(dialog) {
-        if (!dialog || !dialog.titleBar) return;
-        const btn = document.createElement("span");
-        btn.textContent = "–"; // "-"
-        btn.title = "Minimize";
-        btn.className = "ssf-busy-dialog-minimize";
-        btn.style.cssText = "cursor:pointer;float:right;padding:0 6px;font-weight:bold;user-select:none;";
-        btn.addEventListener("click", () => minimize(dialog));
-        dialog.titleBar.appendChild(btn);
+        const width = dialog.domNode.offsetWidth || 220;
+        const height = dialog.domNode.offsetHeight || 100;
+        s.top = Math.max(0, window.innerHeight - height - 12) + "px";
+        s.left = Math.max(0, window.innerWidth - width - 12) + "px";
+        s.right = "";
+        s.bottom = "";
       }
 
       const o_postBusyDialog = dialogs.postBusyDialog;
       dialogs.postBusyDialog = function (...args) {
         const dialog = o_postBusyDialog.apply(this, args);
         try {
-          addMinimizeButton(dialog);
+          // Any busy notice describes "while this run lasts" - clear it when
+          // the dialog goes away (destroy() at run end, hide() on the error
+          // path).
+          ["hide", "destroy"].forEach((name) => {
+            const orig = dialog[name].bind(dialog);
+            dialog[name] = function (...a) {
+              clearBusyNotice();
+              return orig(...a);
+            };
+          });
+          // Only the submit paths pass a cancel callback - that's what marks
+          // this dialog as THE foreground-run dialog (runActive()), and only
+          // that dialog is auto-minimized; other busy dialogs stay modal.
+          if (args[1]) {
+            window.__ssfRunDialog = dialog;
+            minimize(dialog);
+          }
         } catch (e) {
-          console.error("[SS Ext] minimizeBusyDialog: failed to add minimize button:", e);
+          console.error("[SS Ext] minimizeBusyDialog: failed to auto-minimize:", e);
         }
         return dialog;
+      };
+
+      // "View file as text" (tree context menu, browse_ss Ctrl+Enter, or just
+      // opening a .txt/.log/.lst) can't be allowed while a run is in progress.
+      // Its open chain fires SYNCHRONOUS xhrs against the busy session (e.g.
+      // getModifiedTime, AppDMS.js:3424, `sync: true` to /workspace/modified/),
+      // which the server answers only at run end - freezing the entire JS
+      // thread, not just showing a modal (that's also why a notice written
+      // just before the sync call only paints after the run: the thread
+      // blocks before the browser can render). So the block must sit at the
+      // very entry of the chain: handleWebOneEvent, which every path goes
+      // through - the tree context menu sends "FileOpenWithTextViewer"
+      // (DMSProjects.js:1746), tree double-click sends "FileOpen"
+      // (DMSProjects.js:3191), and browse_ss sends both (ext-browse_ss.js
+      // openItemInSs). TXT/LOG/LST is exactly the text-view branch's type set
+      // (AppDMS.js:3756-3764 vs 3797-3801); SAS-type files take the editor
+      // branch (no sync xhr when the tree item carries modifiedDate, reading
+      // dialog skipped in practice) and stay allowed - their tab fills in
+      // when the run ends.
+      function blocksTextViewWhileRunning(action, item) {
+        if (!runActive() || !item) return false;
+        if (action === "FileOpenWithTextViewer") return true;
+        return (
+          action === "FileOpen" &&
+          ["TXT", "LOG", "LST"].indexOf(window.appDMS.getFileType(item)) !== -1
+        );
+      }
+      const textViewBlockedMsg =
+        "A program is running - viewing files as text is blocked until it finishes (SAS Studio's file reader would freeze the app).";
+      const o_handleWebOneEvent = window.appDMS.handleWebOneEvent;
+      window.appDMS.handleWebOneEvent = function (action, item, ...rest) {
+        try {
+          if (blocksTextViewWhileRunning(action, item)) {
+            busyNotice(textViewBlockedMsg, true);
+            return;
+          }
+        } catch (e) {
+          console.error("[SS Ext] minimizeBusyDialog: text-view block check failed:", e);
+        }
+        return o_handleWebOneEvent.call(this, action, item, ...rest);
+      };
+      // Defense in depth for open paths that reach perspectiveFileOpen without
+      // handleWebOneEvent - its own text branch (AppDMS.js:3921-3936) posts an
+      // uncancelable "Reading file" modal that queues behind the busy session.
+      const o_perspectiveFileOpen = window.appDMS.perspectiveFileOpen;
+      window.appDMS.perspectiveFileOpen = function (item, target) {
+        try {
+          if (runActive() && item && ["TXT", "LOG", "LST"].indexOf(window.appDMS.getFileType(item)) !== -1) {
+            busyNotice(textViewBlockedMsg, true);
+            return;
+          }
+        } catch (e) {
+          console.error("[SS Ext] minimizeBusyDialog: text-view block check failed:", e);
+        }
+        return o_perspectiveFileOpen.call(this, item, target);
+      };
+
+      // Session-bound requests (file open/save, dir listings - anything hitting
+      // /sasexec/sessions/<id>/workspace/) fired while a program runs are queued
+      // SERVER-side: the workspace session is single-threaded and answers them
+      // only when the run finishes. With the dialog minimized that looks like a
+      // hang (empty new tab), so post a status note when one is fired. All
+      // dojo.xhrGet/Post/etc. delegate to dojo.xhr at call time, so one wrap
+      // covers every request path.
+      // ponytail: only /workspace/ URLs are matched - other session-bound
+      // endpoints (if any) just won't get the note.
+      let lastQueuedNote = 0;
+      const o_xhr = dojo.xhr;
+      dojo.xhr = function (method, xhrArgs, hasBody) {
+        try {
+          if (
+            runActive() &&
+            xhrArgs &&
+            typeof xhrArgs.url === "string" &&
+            xhrArgs.url.indexOf("/workspace/") !== -1 &&
+            Date.now() - lastQueuedNote > 3000
+          ) {
+            lastQueuedNote = Date.now();
+            busyNotice("A program is running - this request is queued until it finishes.", false);
+          }
+        } catch (e) {
+          /* never break the request over a status note */
+        }
+        return o_xhr.call(this, method, xhrArgs, hasBody);
       };
     },
   };

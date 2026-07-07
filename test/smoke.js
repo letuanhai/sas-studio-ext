@@ -676,9 +676,9 @@ function check(name, ok, detail) {
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await page.waitForTimeout(300);
 
-  // -- Minimizable run-progress dialog + single-run guard -------------------------
+  // -- Auto-minimized run-progress dialog + single-run guard ----------------------
   const busyDialogState = await page.evaluate(async () => {
-    // Pick a pre-existing code tab whose Run button is enabled - minimizing
+    // Pick a pre-existing code tab whose Run button is enabled - auto-minimize
     // must disable it (that's what blocks Run/F3 for tabs whose handlers were
     // dojo.hitch'd to the original submitHandler at construction), and run end
     // must re-enable it.
@@ -691,14 +691,9 @@ function check(name, ok, detail) {
       .getAllTabObjects()
       .find((t) => t.editor && t.editor.backgroundSubmitButton && !t.editor.backgroundSubmitButton.get("disabled"));
 
+    // A run dialog (cancel callback present) is auto-minimized on creation -
+    // no button, no click.
     const dialog = window.appDMS.dialogs.postBusyDialog("Submitting SAS Code", () => {});
-    // dijit._underlay.open is the authoritative flag (DialogUnderlay.show/hide);
-    // its domNode is a wrapper separate from the .dijitDialogUnderlay inner node.
-    const underlayBlockedBefore = !!(dijit._underlay && dijit._underlay.open);
-
-    const btn = dialog.titleBar && dialog.titleBar.querySelector(".ssf-busy-dialog-minimize");
-    if (!btn) return { hasMinimizeButton: false };
-    btn.click();
     await new Promise((r) => setTimeout(r, 100));
 
     const runButtonDisabledAfterMinimize = runTab ? runTab.editor.submitButton.get("disabled") === true : null;
@@ -706,26 +701,79 @@ function check(name, ok, detail) {
 
     const underlayHiddenAfter = !dijit._underlay || dijit._underlay.open === false;
     const dialogStillInDom = !!document.getElementById(dialog.id);
-    const dialogPinned = getComputedStyle(dialog.domNode).position === "fixed";
+    // Pinned via computed top/left (not right/bottom anchors, which would make
+    // dijit's title-bar drag stretch the box) into the bottom-right quadrant.
+    const rect = dialog.domNode.getBoundingClientRect();
+    const dialogPinned =
+      dialog.domNode.style.top !== "" &&
+      dialog.domNode.style.left !== "" &&
+      dialog.domNode.style.right === "" &&
+      dialog.domNode.style.bottom === "" &&
+      rect.left > window.innerWidth / 2 &&
+      rect.top > window.innerHeight / 2;
 
     // Single-run guard: a submitHandler on any open code tab must now refuse
     // to run (appDMS.dialogs.busyDialog is still set - the dialog is only
-    // minimized, not destroyed) - verified via the specific client note the
-    // guard sends instead of calling through to the real submit flow (which
-    // would try to hit the network).
+    // minimized, not destroyed) - verified via the ss-ext busy notice the
+    // guard shows (a top-left in-page element; SAS Studio's own toaster
+    // truncates longer messages) instead of calling through to the real
+    // submit flow (which would try to hit the network).
     const tabObj = window.appDMS.tabs.getAllTabObjects().find((t) => t.editor && t.editor.submitHandler);
     let guardRefused = null;
+    let guardNoticeIsWarnStyled = null;
     if (tabObj) {
-      let note = null;
-      const origNote = window.appDMS.sendClientNoteMessage;
-      window.appDMS.sendClientNoteMessage = (msg) => (note = msg);
-      try {
-        tabObj.editor.submitHandler();
-      } finally {
-        window.appDMS.sendClientNoteMessage = origNote;
-      }
-      guardRefused = typeof note === "string" && /already running/i.test(note);
+      tabObj.editor.submitHandler();
+      const notice = document.getElementById("ssf-busy-notice");
+      guardRefused = !!notice && /already running/i.test(notice.textContent);
+      guardNoticeIsWarnStyled = !!notice && /255, 213, 79|#ffd54f/i.test(notice.style.background);
     }
+
+    // Text-view block: opening a file as text while a run is active would fire
+    // SYNCHRONOUS xhrs against the busy session (freezing the whole JS thread
+    // until run end) and post SAS Studio's uncancelable "Reading file" modal -
+    // the patch refuses it with a warn notice at the chain's entry point,
+    // handleWebOneEvent (what the tree context menu, tree double-click, and
+    // browse_ss all call), plus a perspectiveFileOpen backstop.
+    const probeItem = { name: "__ssext_smoke_probe.txt", uri: "/tmp/__ssext_smoke_probe.txt", type: "FILE" };
+    let textViewBlocked = null;
+    let textViewEntryBlocked = null;
+    try {
+      const ret = window.appDMS.handleWebOneEvent("FileOpenWithTextViewer", probeItem);
+      const notice = document.getElementById("ssf-busy-notice");
+      // If the block failed, the busy dialog would have been replaced by a
+      // "Reading file" dialog (postBusyDialog destroys the previous one).
+      textViewEntryBlocked =
+        ret === undefined &&
+        !!notice &&
+        /blocked/i.test(notice.textContent) &&
+        window.appDMS.dialogs.busyDialog === dialog;
+    } catch (e) {
+      textViewEntryBlocked = false;
+    }
+    try {
+      const ret = window.appDMS.perspectiveFileOpen(probeItem, null);
+      const notice = document.getElementById("ssf-busy-notice");
+      textViewBlocked = ret === undefined && !!notice && /blocked/i.test(notice.textContent);
+    } catch (e) {
+      textViewBlocked = false; // a throw means it wasn't intercepted (null target)
+    }
+
+    // Queued-request note: session-bound (/workspace/) requests fired while the
+    // busy dialog exists are queued server-side; the patch shows the busy
+    // notice so a stalled file open reads as "waiting", not "broken". The
+    // probe URL 404s harmlessly - the notice fires on request start, not on
+    // the response. It replaces the guard notice above in the same element.
+    dojo.xhrGet({
+      url:
+        window.appDMS.baseURL +
+        "/sasexec/sessions/" +
+        window.appDMS.sessionId +
+        "/workspace/__ssext_smoke_probe.txt",
+      handleAs: "text",
+      error: () => {},
+    });
+    const queuedEl = document.getElementById("ssf-busy-notice");
+    const queuedNoteSent = !!queuedEl && /queued/i.test(queuedEl.textContent);
 
     // Destroy the (minimized) busy dialog, same as hideBusyDialog() at run end,
     // and confirm a later modal dialog still gets a working underlay - the
@@ -736,39 +784,59 @@ function check(name, ok, detail) {
     await new Promise((r) => setTimeout(r, 100));
 
     const runButtonReenabledAfterDestroy = runTab ? runTab.editor.submitButton.get("disabled") === false : null;
+    const noticeClearedAfterDestroy = !document.getElementById("ssf-busy-notice");
 
     const otherDialog = new dijit.Dialog({ title: "SS Ext smoke: post-minimize modality check" });
     otherDialog.show();
     await new Promise((r) => setTimeout(r, 200));
     const otherUnderlayShown = !!(dijit._underlay && dijit._underlay.open);
     otherDialog.destroy();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // A NON-run busy dialog (no cancel callback) must keep stock modal
+    // behavior - not be auto-minimized.
+    const readingDialog = window.appDMS.dialogs.postBusyDialog("SS Ext smoke: reading probe");
+    await new Promise((r) => setTimeout(r, 100));
+    const nonRunStaysModal =
+      !!(dijit._underlay && dijit._underlay.open) && readingDialog.domNode.style.width !== "220px";
+    readingDialog.destroy();
+    window.appDMS.dialogs.busyDialog = null;
 
     return {
-      hasMinimizeButton: true,
-      underlayBlockedBefore,
       underlayHiddenAfter,
       dialogStillInDom,
       dialogPinned,
       hasTabToTestGuard: !!tabObj,
       guardRefused,
+      guardNoticeIsWarnStyled,
       hasRunTab: !!runTab,
       hasBgTab: !!bgTab,
       runButtonDisabledAfterMinimize,
       bgButtonStillEnabledAfterMinimize,
       runButtonReenabledAfterDestroy,
       otherUnderlayShown,
+      nonRunStaysModal,
+      queuedNoteSent,
+      textViewBlocked,
+      textViewEntryBlocked,
+      noticeClearedAfterDestroy,
     };
   });
-  check("busy dialog gets a minimize button in its title bar", busyDialogState.hasMinimizeButton, busyDialogState);
-  if (busyDialogState.hasMinimizeButton) {
-    check("busy dialog underlay blocks the app before minimizing", busyDialogState.underlayBlockedBefore, busyDialogState);
-    check("minimizing releases the modal underlay", busyDialogState.underlayHiddenAfter, busyDialogState);
-    check("minimized dialog stays visible (pinned) instead of closing", busyDialogState.dialogStillInDom && busyDialogState.dialogPinned, busyDialogState);
+  {
+    check("run dialog is auto-minimized: no modal underlay", busyDialogState.underlayHiddenAfter, busyDialogState);
+    check("auto-minimized dialog stays visible (pinned) instead of closing", busyDialogState.dialogStillInDom && busyDialogState.dialogPinned, busyDialogState);
     check(
       busyDialogState.hasTabToTestGuard
         ? "single-run guard blocks submitHandler while busyDialog is set"
         : "single-run guard blocks submitHandler while busyDialog is set (skipped: no code tab open)",
       !busyDialogState.hasTabToTestGuard || busyDialogState.guardRefused === true,
+      busyDialogState,
+    );
+    check(
+      busyDialogState.hasTabToTestGuard
+        ? "single-run guard notice is warn-styled (yellow)"
+        : "single-run guard notice is warn-styled (yellow) (skipped: no code tab open)",
+      !busyDialogState.hasTabToTestGuard || busyDialogState.guardNoticeIsWarnStyled === true,
       busyDialogState,
     );
     check(
@@ -793,6 +861,11 @@ function check(name, ok, detail) {
       busyDialogState,
     );
     check("a later modal dialog still gets a working underlay after the busy dialog is destroyed", busyDialogState.otherUnderlayShown, busyDialogState);
+    check("non-run busy dialogs (no cancel callback) keep stock modal behavior", busyDialogState.nonRunStaysModal, busyDialogState);
+    check("session-bound (/workspace/) requests fired while busy get a queued-request note", busyDialogState.queuedNoteSent, busyDialogState);
+    check("handleWebOneEvent(FileOpenWithTextViewer) while a run is active is refused with a notice", busyDialogState.textViewEntryBlocked, busyDialogState);
+    check("perspectiveFileOpen backstop refuses a text-view (TXT) open while a run is active", busyDialogState.textViewBlocked, busyDialogState);
+    check("busy notice is cleared when the busy dialog is destroyed", busyDialogState.noticeClearedAfterDestroy, busyDialogState);
   }
 
   await ctx.close();

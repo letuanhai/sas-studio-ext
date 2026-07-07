@@ -251,8 +251,8 @@ Add a prefix to the path for different option:
     {
       name: "minimizeBusyDialog",
       kind: "patch",
-      label: "Minimizable run-progress dialog",
-      title: "Add a minimize button to the run-progress dialog so the app stays usable while a program runs (only one run at a time)",
+      label: "Auto-minimize run-progress dialog",
+      title: "Minimize the run-progress dialog to the bottom-right corner so the app stays usable while a program runs (one foreground run at a time; opening files as text is blocked during a run). Uncheck to leave SAS Studio's dialog untouched.",
     },
   ];
 })();

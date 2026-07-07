@@ -7,14 +7,24 @@
   `setText` since the code editor's real content arrives after construction.
   Configurable in the options page next to the existing "SAS language server"
   checkbox.
-- Minimizable run-progress dialog (`minimizeBusyDialog` patch): adds a minimize
-  button to the run-progress dialog's title bar so the app stays usable while a
-  program runs, and refuses to start a second foreground run while one is in
+- Auto-minimized run-progress dialog (`minimizeBusyDialog` patch, on by
+  default, checkbox in the options page - unchecked leaves SAS Studio
+  untouched): the run-progress dialog is minimized to the bottom-right corner
+  the moment a program starts, so the app stays usable while it runs (other
+  busy dialogs keep their stock modal behavior). Refuses to start a second foreground run while one is in
   progress (`DMSEditor.prototype.submitHandler`/`interactiveSubmitHandler`
   guarded on `appDMS.dialogs.busyDialog`, plus every open tab's Run button
   disabled while minimized — that's what blocks Run/F3 in pre-existing tabs,
   whose handlers were hitched to the original function — and re-enabled at run
-  end). Background submits stay allowed (separate SAS sessions).
+  end). Background submits stay allowed (separate SAS sessions). Session-bound
+  requests (file open/save, dir listings) fired during a run are queued by the
+  server until the run ends; a status note now says so, so an empty new tab
+  reads as "waiting", not "broken". Notices use an ss-ext top-left in-page
+  element (yellow for the run-refusal warning), sticky until the run ends or
+  clicked away - SAS Studio's own toaster truncates longer messages.
+  Opening a file as text (TXT/LOG/LST) during a run is refused with a notice:
+  SAS Studio's text-view path posts an uncancelable "Reading file" modal that
+  would hang the whole app behind the queued read until the run ends.
 
 ## 0.4
 
