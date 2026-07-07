@@ -8,6 +8,25 @@
  * Needs the `playwright` module resolvable (npx playwright / NODE_PATH / local install)
  * and at least one closable FILE tab open in the SAS Studio session.
  *
+ * If `playwright` isn't installed and `npx playwright ...` can't reach the network
+ * either, check under `~/.npm/_npx/` (one subdir per past npx invocation) for a
+ * `node_modules/playwright` left by a previous run and point NODE_PATH at that
+ * node_modules dir. Then set CHROME_BIN to a matching Chromium build found under
+ * `~/.cache/ms-playwright/` (look for a `chromium-<build>/chrome-linux64/chrome`)
+ * (playwright's own launcher hardcodes a build number - a version mismatch between
+ * the npx-cached `playwright` and whatever's in that cache dir makes the default
+ * `chromium.launch()`/`executablePath()` point at a build that isn't actually there).
+ * Don't use a real Chrome (e.g. `google-chrome-stable`) as CHROME_BIN: unlike
+ * playwright's bundled Chromium, it silently fails to load `--load-extension` in
+ * headless mode (chrome://extensions comes up empty, no error) even with
+ * `--disable-extensions-except` and `ignoreDefaultArgs: ["--disable-extensions"]`.
+ *
+ * Also needs `lib/ace/src-noconflict/ace.js` and `lib/ace-linters/*.js` present
+ * (the fast, network-only part of `./build_lib.sh` - its `npm pack` calls for
+ * ace-builds/ace-linters) or the Ace-activation tests fail on a 404. The slow
+ * `lib/sas-lsp` clone+webpack build is only needed for the LSP-specific checks;
+ * everything else degrades gracefully (one console warning) without it.
+ *
  * Middle-clicks are sent as raw CDP input (trusted, full event pipeline) - this is
  * what caught the dojo/touch.js dojoClick suppression bug that synthetic
  * dispatchEvent-based tests can't see.
@@ -354,8 +373,36 @@ function check(name, ok, detail) {
         afterReload,
       );
 
-      await page.evaluate((tabId) => window.appDMS.tabs.closeTab(dijit.byId(tabId)), viewer.newTabId);
-      await page.waitForTimeout(1500);
+      // Dirty text viewer closed via the tab's own "x" (tab.onClose, what
+      // _onTabClose gates - not the programmatic tabs.closeTab used below) must
+      // prompt with the stock save/don't-save/cancel dialog, same as a real
+      // code editor tab.
+      await page.evaluate((tabId) => {
+        const entry = window.__ssExt._textViewers.find(
+          (e) => e.tabHolder === dijit.byId(tabId).tabHolder,
+        );
+        entry.adapter.aceEditor.insert("y");
+      }, viewer.newTabId);
+      await page.waitForTimeout(200);
+      const closeConfirm = await page.evaluate((tabId) => {
+        const tabObj = window.appDMS.tabs.getAllTabObjects().find((t) => t.tab.id === tabId);
+        tabObj.tab.onClose();
+        const dialog = Object.values(dijit.registry._hash || {}).find(
+          (w) => w.id && w.id.indexOf("tabsFileCloseConfirmation_") === 0,
+        );
+        return { dialogShown: !!dialog, stillOpen: !!dijit.byId(tabId), dialogId: dialog && dialog.id };
+      }, viewer.newTabId);
+      check("dirty text viewer close prompts confirmation dialog", closeConfirm.dialogShown, closeConfirm);
+      check("tab stays open until the dialog is answered", closeConfirm.stillOpen, closeConfirm);
+      if (closeConfirm.dialogShown) {
+        await page.evaluate((dialogId) => {
+          dijit.byId(dialogId + "_dontSaveBtn").onClick();
+        }, closeConfirm.dialogId);
+        await page.waitForTimeout(500);
+      }
+      const afterConfirmClose = await page.evaluate((tabId) => !dijit.byId(tabId), viewer.newTabId);
+      check("Don't Save closes the tab", afterConfirmClose, { afterConfirmClose });
+
       const afterClose = await page.evaluate(() => window.__ssExt._textViewers.length);
       check("registry entry cleaned up on tab close", afterClose === 0, { afterClose });
     }

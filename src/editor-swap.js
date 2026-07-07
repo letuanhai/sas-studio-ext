@@ -822,6 +822,7 @@
     installCreateFileViewPatch();
 
     const tabs = appDMS.getCurrentPerspectiveSASStudioTabs();
+    installTextViewerCloseConfirm(tabs);
     let DMSEditor = null;
     if (tabs && tabs.mainTabs) {
       for (const tab of tabs.mainTabs) {
@@ -954,6 +955,34 @@
       return tabHolder;
     };
     ssExt._createFileViewPatched = true;
+  }
+
+  // Text viewers never get a `.editor` on their tab object (only DMSEditor.js's
+  // real code editor sets that - AppDMS.createFileView doesn't), so SASStudioTabs'
+  // own _getCloseAdapter/_onTabClose never see them as dirty and close them
+  // without asking, unlike a real code editor tab. Patch the shared prototype
+  // method once to check our own _textViewers dirty tracking and, if dirty, show
+  // the same stock save/don't-save/cancel dialog the code editor uses.
+  function installTextViewerCloseConfirm(tabs) {
+    if (ssExt._closeConfirmPatched) return;
+    const proto = Object.getPrototypeOf(tabs);
+    if (typeof proto._onTabClose !== "function") return;
+
+    const original = proto._onTabClose;
+    proto._onTabClose = function (tabObj) {
+      const entry = ssExt._textViewers.find((e) => e.tabHolder === tabObj.tab.tabHolder);
+      if (entry && entry.dirty) {
+        this._postFileCloseConfirmation(tabObj.tab, {
+          isDirty: () => entry.dirty,
+          isRunning: () => false,
+          resetDirty: () => setViewerDirty(entry, false),
+          save: () => saveTextViewer(entry, () => this.closeTab(tabObj)),
+        });
+        return false;
+      }
+      return original.call(this, tabObj);
+    };
+    ssExt._closeConfirmPatched = true;
   }
 
   function convertTextViewerToAce(item, tabHolder) {
@@ -1097,7 +1126,7 @@
   // ~6791-6976) - just the plain "workspace" save path. No autosave/backup
   // cleanup (viewers never created a backup file), no MVS/ftp/CTK/CPK branches,
   // since text viewers only ever come from plain workspace files.
-  function saveTextViewer(entry) {
+  function saveTextViewer(entry, onSaved) {
     const uri = entry.item && entry.item.uri;
     if (!uri) {
       console.error("[SS Ext] Cannot save text viewer: no item.uri", entry.item);
@@ -1124,11 +1153,13 @@
       preventCache: true,
       load: () => {
         setViewerDirty(entry, false);
+        if (onSaved) onSaved();
       },
       error: (err) => {
         // DMSEditor treats HTTP 499 as a successful save too.
         if (err && err.status === 499) {
           setViewerDirty(entry, false);
+          if (onSaved) onSaved();
           return;
         }
         try {
