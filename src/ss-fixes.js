@@ -1321,19 +1321,48 @@ Add a prefix to the path for different option:
         // _DialogLevelManager.hide, #9944/#10705 out-of-order-removal path).
         dijit.Dialog._DialogLevelManager.hide(dialog);
 
-        // Neutralize dijit's own re-centering (viewport resize etc.) and pin
-        // the dialog to the bottom-right corner. Pin via computed top/left,
-        // not right/bottom: dijit's title-bar drag (dojo/dnd Moveable) moves
-        // the node by setting top/left, and a leftover right/bottom anchor
-        // would make a drag stretch the box instead of moving it.
+        // Neutralize dijit's own re-centering (viewport resize etc.) so the
+        // pin survives viewport resizes; the box stays draggable.
         dialog._position = function () {};
+
+        // Compact restyle: drop the title bar and the spinner, show a single
+        // "Running..." line beside the Cancel button on a yellow box.
+        if (dialog.titleBar) dialog.titleBar.style.display = "none";
+        const content = document.getElementById("busyDialog_contentArea");
+        if (content) {
+          content.textContent = "Running..."; // wipes the spinner widget's DOM
+          content.style.cssText =
+            "margin:0;padding:0 0 0 8px;background:transparent;white-space:nowrap;font-weight:regular;";
+        }
+
+        // Hiding the title bar removed dijit's drag handle - repoint the
+        // existing Moveable at the whole box (reusing its constructor so we
+        // don't need the dojo/dnd/Moveable module). skip:true keeps clicks on
+        // the Cancel button from starting a drag.
+        if (dialog._moveable) {
+          const Moveable = dialog._moveable.constructor;
+          dialog._moveable.destroy();
+          dialog._moveable = new Moveable(dialog.domNode, {
+            handle: dialog.domNode,
+            skip: true,
+          });
+        }
+        // "Running..." and the Cancel button share one row.
+        dialog.containerNode.style.cssText =
+          "display:flex;align-items:center;gap:12px;padding:8px 12px;";
+        const actionBar = document.getElementById("busyDialog_actionBar");
+        if (actionBar) actionBar.style.cssText = "margin:0;padding:0;border:0;";
+
+        // Pin to the top center via computed top/left, not right/bottom:
+        // Moveable moves the node by setting top/left, and a leftover
+        // right/bottom anchor would make a drag stretch the box instead of
+        // moving it.
         const s = dialog.domNode.style;
-        s.width = "220px";
+        s.width = "auto";
         s.zIndex = 1000;
-        const width = dialog.domNode.offsetWidth || 220;
-        const height = dialog.domNode.offsetHeight || 100;
-        s.top = Math.max(0, window.innerHeight - height - 12) + "px";
-        s.left = Math.max(0, window.innerWidth - width - 12) + "px";
+        const width = dialog.domNode.offsetWidth || 200;
+        s.top = "4px";
+        s.left = Math.max(0, (window.innerWidth - width) / 2) + "px";
         s.right = "";
         s.bottom = "";
       }
