@@ -54,6 +54,7 @@ function mergeAceConfig(stored) {
     // Unset -> default; a saved value wins even when empty (user cleared it).
     vimrc: typeof stored.vimrc === "string" ? stored.vimrc : DEFAULT_ACE_CONFIG.vimrc,
     lsp: typeof stored.lsp === "boolean" ? stored.lsp : DEFAULT_ACE_CONFIG.lsp,
+    lspMaxLines: typeof stored.lspMaxLines === "number" ? stored.lspMaxLines : DEFAULT_ACE_CONFIG.lspMaxLines,
   };
 }
 

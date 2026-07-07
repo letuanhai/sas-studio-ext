@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- LSP line limit (`aceConfig.lspMaxLines`, default 500, 0 = no limit): skips SAS
+  language server registration for files longer than N lines, re-checked on
+  `setText` since the code editor's real content arrives after construction.
+  Configurable in the options page next to the existing "SAS language server"
+  checkbox.
+
 ## 0.4
 
 - SAS language server integration (Phase 4): `ace/mode/sas` editors get LSP-backed

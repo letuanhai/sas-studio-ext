@@ -169,45 +169,65 @@
       // types opened as text get no LSP, matching the server's languageId.
       this._disposed = false;
       this._lspRegistered = false;
-      if (resolvedMode === "ace/mode/sas") {
-        ensureLsp().then((provider) => {
-          if (!provider || this._disposed) return;
-          try {
-            provider.registerEditor(this.aceEditor);
-            this._lspRegistered = true;
-            // Workaround for ace-linters 2.2.0 with completion.overwriteCompleters:
-            // false - the LSP completer is merged in alongside ace's own
-            // text/keyword/snippet completers, and the popup sorts by score, so
-            // push the default completers' scores down so LSP entries list first.
-            this.aceEditor.completers = (this.aceEditor.completers || []).map((completer) =>
-              Object.assign({}, completer, {
-                getCompletions: (ed, session, pos, prefix, callback) => {
-                  completer.getCompletions(ed, session, pos, prefix, (err, results) => {
-                    (results || []).forEach((r) => {
-                      r.score = (r.score || 0) - 1e6;
-                    });
-                    callback(err, results);
+      this._lspRegistering = false;
+      this._resolvedMode = resolvedMode;
+      this._maybeRegisterLsp();
+    }
+
+    // Eligible when the mode is SAS and the current line count is within
+    // aceConfig.lspMaxLines (0/unset = no limit). Called from the constructor
+    // (empty new-program editors) and from setText (real content, which for
+    // the code editor arrives after construction - see setText below).
+    _lspEligible() {
+      if (this._resolvedMode !== "ace/mode/sas") return false;
+      const maxLines = getAceConfig().lspMaxLines;
+      return !maxLines || maxLines <= 0 || this.aceEditor.session.getLength() <= maxLines;
+    }
+
+    _maybeRegisterLsp() {
+      if (this._lspRegistered || this._lspRegistering) return;
+      if (!this._lspEligible()) return;
+      this._lspRegistering = true;
+      ensureLsp().then((provider) => {
+        this._lspRegistering = false;
+        if (!provider || this._disposed) return;
+        // Re-check: a big setText() may have landed while this promise was in flight.
+        if (!this._lspEligible()) return;
+        try {
+          provider.registerEditor(this.aceEditor);
+          this._lspRegistered = true;
+          // Workaround for ace-linters 2.2.0 with completion.overwriteCompleters:
+          // false - the LSP completer is merged in alongside ace's own
+          // text/keyword/snippet completers, and the popup sorts by score, so
+          // push the default completers' scores down so LSP entries list first.
+          this.aceEditor.completers = (this.aceEditor.completers || []).map((completer) =>
+            Object.assign({}, completer, {
+              getCompletions: (ed, session, pos, prefix, callback) => {
+                completer.getCompletions(ed, session, pos, prefix, (err, results) => {
+                  (results || []).forEach((r) => {
+                    r.score = (r.score || 0) - 1e6;
                   });
-                },
-              }),
-            );
-            // The semanticTokens/full request ace-linters fires on registration
-            // races the server's didOpen handling and fails once; kick a refresh
-            // after the server's had time to open the document so the initial
-            // view is styled without needing an edit/scroll first.
-            setTimeout(() => {
-              if (this._disposed) return;
-              try {
-                provider.$getSessionLanguageProvider(this.aceEditor.session).getSemanticTokens();
-              } catch (e) {
-                console.warn("[SS Ext] semantic token kick failed:", e);
-              }
-            }, 2000);
-          } catch (e) {
-            console.error("[SS Ext] LSP registration failed:", e);
-          }
-        });
-      }
+                  callback(err, results);
+                });
+              },
+            }),
+          );
+          // The semanticTokens/full request ace-linters fires on registration
+          // races the server's didOpen handling and fails once; kick a refresh
+          // after the server's had time to open the document so the initial
+          // view is styled without needing an edit/scroll first.
+          setTimeout(() => {
+            if (this._disposed) return;
+            try {
+              provider.$getSessionLanguageProvider(this.aceEditor.session).getSemanticTokens();
+            } catch (e) {
+              console.warn("[SS Ext] semantic token kick failed:", e);
+            }
+          }, 2000);
+        } catch (e) {
+          console.error("[SS Ext] LSP registration failed:", e);
+        }
+      });
     }
 
     setupAceEventBindings() {
@@ -242,6 +262,26 @@
     }
     setText(content) {
       this.aceEditor.setValue(content || "", -1);
+      // The code editor is constructed with empty content and its real text
+      // arrives here later (unlike text viewers/toggle conversion, which pass
+      // content at construction) - re-check LSP eligibility against the line
+      // limit now that real content is in.
+      // ponytail: only checked on setText, not on every keystroke - typing
+      // growth past the limit isn't monitored; a page reload (or another
+      // setText) is needed to pick it up.
+      if (this._lspRegistered && !this._lspEligible()) {
+        if (ssExt._lspProvider) {
+          try {
+            ssExt._lspProvider.unregisterEditor(this.aceEditor, true);
+          } catch (e) {
+            console.error("[SS Ext] LSP unregister failed:", e);
+          }
+        }
+        this._lspRegistered = false;
+        console.log("[SS Ext] LSP: file exceeds lspMaxLines, skipping for this editor");
+      } else if (!this._lspRegistered) {
+        this._maybeRegisterLsp();
+      }
     }
     insert(text) {
       this.aceEditor.insert(text);
@@ -484,6 +524,11 @@
         { fontSize: 15, keyboardHandler: "ace/keyboard/vim", useSoftTabs: true, tabSize: 4 },
         cfg.options || {},
       ),
+      // Both read by ensureLsp()/_maybeRegisterLsp - lsp was missing here
+      // entirely before (ensureLsp's `.lsp === false` check always saw
+      // undefined), fixed alongside adding lspMaxLines.
+      lsp: typeof cfg.lsp === "boolean" ? cfg.lsp : true,
+      lspMaxLines: typeof cfg.lspMaxLines === "number" ? cfg.lspMaxLines : 500,
     };
   }
 

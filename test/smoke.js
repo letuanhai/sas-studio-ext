@@ -195,6 +195,54 @@ function check(name, ok, detail) {
     lspState,
   );
 
+  // -- LSP line limit (aceConfig.lspMaxLines) --------------------------------------
+  // With the limit set below the content's line count, a fresh SAS adapter must
+  // not register with the LSP provider; with the limit disabled (0), it must.
+  const lspMaxLinesState = await page.evaluate(async () => {
+    const manyLines = Array.from({ length: 10 }, (_, i) => `/* line ${i} */`).join("\n");
+
+    window.__ssExt.aceConfig = { lsp: true, lspMaxLines: 1 };
+    const divOver = document.createElement("div");
+    divOver.id = "ssext_smoke_lsp_over";
+    document.body.appendChild(divOver);
+    const overAdapter = new window.__ssExt.AceEditorAdapter(divOver.id, manyLines, "sas");
+    // Eligibility is checked synchronously before ensureLsp() is even called,
+    // so no polling needed here - it never starts registering.
+    const overRegistered = overAdapter._lspRegistered;
+    overAdapter.dispose();
+    divOver.remove();
+
+    window.__ssExt.aceConfig = { lsp: true, lspMaxLines: 0 };
+    const divUnlimited = document.createElement("div");
+    divUnlimited.id = "ssext_smoke_lsp_unlimited";
+    document.body.appendChild(divUnlimited);
+    const unlimitedAdapter = new window.__ssExt.AceEditorAdapter(divUnlimited.id, manyLines, "sas");
+    let unlimitedRegistered = false;
+    for (let i = 0; i < 40; i++) {
+      if (unlimitedAdapter._lspRegistered) {
+        unlimitedRegistered = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    unlimitedAdapter.dispose();
+    divUnlimited.remove();
+
+    return { overRegistered, unlimitedRegistered };
+  });
+  check(
+    "lspMaxLines below the file's line count skips LSP registration",
+    lspMaxLinesState.overRegistered === false,
+    lspMaxLinesState,
+  );
+  check(
+    lspState.hasProvider
+      ? "lspMaxLines: 0 (no limit) still registers LSP"
+      : "lspMaxLines: 0 (no limit) still registers LSP (skipped: no LSP provider, see above)",
+    !lspState.hasProvider || lspMaxLinesState.unlimitedRegistered === true,
+    lspMaxLinesState,
+  );
+
   // Pick a real, non-empty file that isn't already open as a tab - opening an
   // already-open uri just re-focuses that tab instead of creating a viewer.
   // Enumerate the workspace root folder (entries with a `size` are files).

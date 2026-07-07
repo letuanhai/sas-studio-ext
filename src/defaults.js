@@ -70,4 +70,8 @@ var DEFAULT_ACE_CONFIG = {
   // the server bundle isn't built (./build_lib.sh) or the worker
   // fails, the editor just works as before.
   lsp: true,
+  // Skip LSP registration for files longer than this many lines (0 = no limit).
+  // Keeps the worker from choking on huge programs; see editor-swap.js's
+  // _maybeRegisterLsp.
+  lspMaxLines: 500,
 };

@@ -139,7 +139,7 @@
 
   function mergeAceConfig(stored) {
     stored = stored || {};
-    const defaults = window.DEFAULT_ACE_CONFIG || { darkTheme: "ace/theme/gruvbox", lightTheme: "ace/theme/iplastic", options: {}, vimrc: "", lsp: true };
+    const defaults = window.DEFAULT_ACE_CONFIG || { darkTheme: "ace/theme/gruvbox", lightTheme: "ace/theme/iplastic", options: {}, vimrc: "", lsp: true, lspMaxLines: 500 };
     return {
       darkTheme: stored.darkTheme || defaults.darkTheme,
       lightTheme: stored.lightTheme || defaults.lightTheme,
@@ -147,6 +147,7 @@
       // Unset -> default; a saved value wins even when empty (user cleared it).
       vimrc: typeof stored.vimrc === "string" ? stored.vimrc : defaults.vimrc,
       lsp: typeof stored.lsp === "boolean" ? stored.lsp : defaults.lsp,
+      lspMaxLines: typeof stored.lspMaxLines === "number" ? stored.lspMaxLines : defaults.lspMaxLines,
     };
   }
 
@@ -200,6 +201,7 @@
     const darkSelect = document.getElementById("ace-dark-theme");
     const lightSelect = document.getElementById("ace-light-theme");
     const lspCheckbox = document.getElementById("ace-lsp");
+    const lspMaxLinesInput = document.getElementById("ace-lsp-max-lines");
     const vimrcEditor = document.getElementById("vimrc-editor");
 
     themes.forEach((t) => {
@@ -240,6 +242,7 @@
       darkSelect.value = current.darkTheme;
       lightSelect.value = current.lightTheme;
       lspCheckbox.checked = current.lsp !== false;
+      lspMaxLinesInput.value = current.lspMaxLines;
       vimrcEditor.value = current.vimrc || "";
     }
 
@@ -268,6 +271,12 @@
     });
     lspCheckbox.addEventListener("change", () => {
       current.lsp = lspCheckbox.checked;
+      persist();
+    });
+    lspMaxLinesInput.addEventListener("change", () => {
+      const n = parseInt(lspMaxLinesInput.value, 10);
+      current.lspMaxLines = Number.isNaN(n) || n < 0 ? 0 : n;
+      lspMaxLinesInput.value = current.lspMaxLines;
       persist();
     });
 
