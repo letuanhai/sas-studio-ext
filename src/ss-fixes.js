@@ -741,6 +741,14 @@ Add a prefix to the path for different option:
 
     if (treeId === "library") targetPath = targetPath.replace(/[.~]/g, "/");
 
+    // The destination tree is destroyed and recreated by appDMS.projects.
+    // cleanDestinationTree() every time the Save As dialog opens (DMSProjects.js),
+    // so its rootNode (set inside the async model.getRoot() callback in dijit
+    // Tree._load) may not exist yet when we get here right after the dialog opens.
+    // Wait for it before recursing, else _expandNode(undefined) throws reading
+    // '_expandNodeDeferred'. onLoadDeferred resolves once the root is loaded.
+    if (!tree.rootNode && tree.onLoadDeferred) await tree.onLoadDeferred;
+
     // dojo provide tree.set('path',...) for this purpose but it does not work
     // => because DMSProject modified the method ._expandNode(), making it return undefined instead of a Promise
     // DMSProject backup the original method as ._expandNodeStash() but sometimes it messes up, likely during refreshes
