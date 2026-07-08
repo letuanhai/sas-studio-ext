@@ -1,7 +1,16 @@
 # Changelog
 
-## 0.5
+## 0.6
 
+- Save As at path (`saveFileAtPath` action / `:w <path>`): await the destination
+  tree's load before expanding it. The Save As dialog rebuilds the tree on every
+  open and sets its `rootNode` async, so on the 3.82 prod instance `_expandNode`
+  could fire before `rootNode` existed and throw; warm trees skip the wait.
+- Removed the two scroll-tree-to-input-path / scroll-tree-to-current-tab actions
+  (browse_ss covers the same navigation) and the now-unused `resolveTablePath`
+  helper. The surviving `scrollDestinationTreeToProjectSelectedNode` action moved
+  off its default `Ctrl+Alt+F5` hotkey (swallowed by Linux as a VT switch, so it
+  never fired) to `Alt+F6`, and now guards against an empty selection.
 - Command palette / browse_ss now keep keyboard focus when a SAS Studio
   dijit dialog (e.g. Save As) opens over them. dijit's `show()` autofocus and
   the `focus.watch("curNode")` trap (which yanks focus back inside the top
@@ -20,7 +29,6 @@
   order (deduped — moved up, not repeated), so the last-run command is the
   pre-selected first row on reopen; per-server localStorage, and editor-only
   commands from the history never show in the global (unfocused) palette.
-
 - Browse prompts (files/library; the tab browser has neither): bookmarks
   (`Ctrl+B` toggles on the selected entry — Ctrl on mac too, Alt+B is flaky
   there — stored per-server in localStorage next to the history, preserving
@@ -34,6 +42,9 @@
   never hit, so its recorded history was invisible. Directory listings now show
   an inline `⭐` next to any bookmarked entry. A dim placeholder hint (the keybinding legend)
   appears in the same empty-prompt state instead of always being shown.
+
+## 0.5
+
 - Options page now documents the custom vim ex-commands (`:w` save,
   `:w <path>` save-as, `:q` close tab, `:wq` save & close, `:x` run) as a
   static note in the Vim config section.
@@ -60,6 +71,8 @@
   Opening a file as text (TXT/LOG/LST) during a run is refused with a notice:
   SAS Studio's text-view path posts an uncancelable "Reading file" modal that
   would hang the whole app behind the queued read until the run ends.
+- Text viewer: closing a dirty (edited) text-viewer tab now prompts for
+  confirmation, matching the code editor's behavior.
 
 ## 0.4
 
@@ -90,9 +103,6 @@
 
 - In-page hotkeys for editor/native-mouse toggles, badge bridge, browser-command cleanup.
 - Re-vendored pristine ace 1.43.3; fork changes reproduced at runtime (`src/ace-patches.js`).
-- browse_ss in-page hotkeys + SS-Ext palette entries for files/library/tabs.
-- Hotkeys capture, display, and match the Shift modifier.
-- browse_ss: Ctrl+Enter opens file as text.
 - Popup: show the SAS Studio auth cookies (path `/SASStudio`, httpOnly) with a copy button.
 
 ## 0.1
