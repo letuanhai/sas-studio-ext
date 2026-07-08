@@ -704,13 +704,6 @@ Add a prefix to the path for different option:
     editor.submitHandler();
   }
 
-  function scrollTreeToCurrentTabItem() {
-    const uri = window.appDMS.tabs.getFocusedTab().uri;
-    const targetTreeId = uri.startsWith("libraries~") ? "library" : getCurrentTargetTree(["destination", "projects"]).id.split(".")[0];
-    selectTreePane(targetTreeId);
-    scrollTreeToPath(uri, targetTreeId);
-  }
-
   function scrollTreeToSelectedNode(targetTree) {
     const tree = targetTree ?? getCurrentTargetTree();
     selectTreePane(tree.id.split(".")[0]);
@@ -723,7 +716,11 @@ Add a prefix to the path for different option:
   }
 
   function scrollDestinationTreeToProjectSelectedNode() {
-    const uri = window.dijit.byId(`projects.tree`).get("selectedNode").item.uri;
+    const uri = window.dijit.byId(`projects.tree`).get("selectedNode")?.item?.uri;
+    if (!uri) {
+      showNotification({ message: "No node selected in the file tree", isError: true });
+      return;
+    }
     scrollTreeToPath(uri, "destination");
   }
 
@@ -768,29 +765,6 @@ Add a prefix to the path for different option:
     });
   }
 
-  function scrollTreeToInputPath() {
-    showInputDialog(
-      {
-        title: "Focus Path in Tree",
-        message: `Enter file path to focus.
-Add a prefix to the path for different option:
-- 'tbl:' followed by a table identifier to open a table from library`,
-        placeholder: "/path/to/file.sas",
-        inputName: "ssf-focus-path",
-      },
-      function (userInput) {
-        if (!userInput) return;
-
-        // Target destination tree (for moveTo/saveAs dialog) if visible
-        const targetTreeId = userInput.startsWith("tbl:") ? "library" : getCurrentTargetTree().id.split(".")[0];
-        const userInputPath = userInput.startsWith("tbl:") ? userInput.slice(4) : userInput;
-        const targetPath = targetTreeId === "library" ? resolveTablePath(userInputPath) : resolveFilePath(userInputPath);
-        selectTreePane(targetTreeId);
-        scrollTreeToPath(targetPath, targetTreeId);
-      },
-    );
-  }
-
   function selectTreePane(targetTreeId) {
     const paneId = `${targetTreeId}Pane`;
     const accContainer = window.dijit.byId("accContainer");
@@ -812,21 +786,6 @@ Add a prefix to the path for different option:
     // Don't trim path because there can be spaces in file/folder name
     // Remove trailing slashes at the end
     let outPath = inPath.match(/(.+?)(?:\/*)$/)[1];
-    if (!outPath.startsWith("/")) outPath = "/" + outPath;
-    if (!outPath.startsWith(rootPath)) outPath = rootPath + outPath;
-    return outPath;
-  }
-
-  /**
-   * resolve inPath to absolute library path
-   * @param {String} inPath
-   * @returns {String}
-   */
-  function resolveTablePath(inPath) {
-    const rootPath = "libraries";
-    let outPath = inPath.trim().replace(/[.~]/g, "/");
-    // if library name starts with upper case then keep case
-    if (!/^[A-Z]/.test(outPath)) outPath = outPath.toUpperCase();
     if (!outPath.startsWith("/")) outPath = "/" + outPath;
     if (!outPath.startsWith(rootPath)) outPath = rootPath + outPath;
     return outPath;
@@ -867,8 +826,6 @@ Add a prefix to the path for different option:
     openUserInputTarget: { fn: openUserInputTarget },
     saveFileAtPath: { fn: saveFileAtPath },
     runCurrentProgram: { fn: runCurrentProgram },
-    scrollTreeToCurrentTabItem: { fn: scrollTreeToCurrentTabItem },
-    scrollTreeToInputPath: { fn: scrollTreeToInputPath },
     scrollTreeToSelectedNode: { fn: () => scrollTreeToSelectedNode() },
     scrollDestinationTreeToProjectSelectedNode: { fn: scrollDestinationTreeToProjectSelectedNode },
     collapseCurrentTree: { fn: collapseCurrentTree },

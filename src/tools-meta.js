@@ -56,20 +56,6 @@ Add a prefix to the path for different option:
       hotkey: null,
     },
     {
-      name: "scrollTreeToCurrentTabItem",
-      kind: "action",
-      label: "Focus tree on current tab item",
-      title: "Scroll to the item in current focused tab in the containing tree",
-      hotkey: { key: "F5", altKey: true },
-    },
-    {
-      name: "scrollTreeToInputPath",
-      kind: "action",
-      label: "Focus tree on input path",
-      title: "Scroll tree to input path",
-      hotkey: { key: "F6", altKey: true },
-    },
-    {
       name: "scrollTreeToSelectedNode",
       kind: "action",
       label: "Focus tree on selected node",
@@ -81,7 +67,8 @@ Add a prefix to the path for different option:
       kind: "action",
       label: "Scroll destination tree",
       title: "Focus destination tree on selected node of project tree",
-      hotkey: { key: "F5", altKey: true, ctrlKey: true },
+      // Ctrl+Alt+F5 was swallowed by Linux (VT switch); Alt+F6 is safe.
+      hotkey: { key: "F6", altKey: true },
     },
     {
       name: "collapseCurrentTree",
