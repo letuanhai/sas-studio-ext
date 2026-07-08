@@ -2,6 +2,13 @@
 
 ## 0.5
 
+- Command palette / browse_ss now keep keyboard focus when a SAS Studio
+  dijit dialog (e.g. Save As) opens over them. dijit's `show()` autofocus and
+  the `focus.watch("curNode")` trap (which yanks focus back inside the top
+  dialog whenever it leaves) are both suppressed while an SS-Ext prompt
+  (`.ace_prompt_container` / `.ace_browse_ss_container`) is open — previously
+  opening Save As over the palette would instantly steal focus to the dialog's
+  first field, freezing the palette.
 - Browse prompts: long truncated paths now reveal their tail two ways — the
   focused row's caption auto-scrolls (a linear ~100px/s slide to the end,
   snapping back when focus moves on; refiltering while typing jumps straight

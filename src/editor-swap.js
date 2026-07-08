@@ -654,6 +654,7 @@
     ssExt.newLib = { ace: window.ace };
     ssExt.newAceLoaded = true;
 
+    installDialogFocusPriorityPatch();
     installSettingsMenuPersistence();
     // Register vim :w/:q/:wq/:x once the new ace (and its vim module) is available.
     installVimExCommands();
@@ -1522,6 +1523,52 @@
   // that's the one showSettingsMenu's exec actually instantiates, so patching
   // this module's prototype (rather than a separately-loaded ext-options.js copy)
   // is what the stock panel is guaranteed to go through. Every user change funnels
+  // SAS Studio's dijit.Dialog has two focus-grabbing paths that override an
+  // open SS-Ext prompt (the command palette's ace_prompt_container and
+  // browse_ss's ace_browse_ss_container - both z-index overlays without a
+  // native focus trap, so dijit's trap wins):
+  //   1. show()'s fadeIn onEnd autofocus: focus.focus(this._firstFocusItem) when
+  //      this.autofocus && isTop - moves focus into a dialog that just opened
+  //      behind our prompt.
+  //   2. focus.watch("curNode") trap in dijit/Dialog: when focus moves to a node
+  //      outside the top dialog's domNode, it calls dialog.focus() to yank it
+  //      back - so the moment our cmdLine takes focus, the dialog steals it.
+  // Suppress both while an SS-Ext prompt is open: skip show's autofocus, and
+  // no-op dialog.focus() when the live focus is already inside our prompt.
+  function installDialogFocusPriorityPatch() {
+    if (ssExt._dialogFocusPatched) return;
+    if (typeof dijit === "undefined" || !dijit.Dialog || !dijit.Dialog.prototype) return;
+    ssExt._dialogFocusPatched = true;
+    const PROMPT_SEL = ".ace_prompt_container, .ace_browse_ss_container";
+    const promptOpen = () => !!document.querySelector(PROMPT_SEL);
+    const focusInPrompt = () => {
+      const ae = document.activeElement;
+      return !!(ae && ae.closest && ae.closest(PROMPT_SEL));
+    };
+    try {
+      const origShow = dijit.Dialog.prototype.show;
+      dijit.Dialog.prototype.show = function () {
+        if (promptOpen()) {
+          const origAutofocus = this.autofocus;
+          this.autofocus = false;
+          const ret = origShow.apply(this, arguments);
+          const restore = () => { this.autofocus = origAutofocus; };
+          if (ret && typeof ret.then === "function") ret.then(restore, restore);
+          else restore();
+          return ret;
+        }
+        return origShow.apply(this, arguments);
+      };
+      const origFocus = dijit.Dialog.prototype.focus;
+      dijit.Dialog.prototype.focus = function () {
+        if (focusInPrompt()) return; // don't yank focus out of an SS-Ext prompt
+        return origFocus.apply(this, arguments);
+      };
+    } catch (e) {
+      console.error("[SS Ext] dialog focus-priority patch failed:", e);
+    }
+  }
+
   // through OptionPanel.prototype.setOption, which already _signal("setOption")s
   // after running - patch once, after the original, and persist as the default
   // for new editors (live-applied to open ones too). Theme/mode are skipped: the
