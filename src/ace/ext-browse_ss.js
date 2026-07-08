@@ -369,10 +369,19 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             const history = getHistory().filter(h => !bookmarks.some(b => b.value === h.value))
                 .map(h => Object.assign(h, { message: 'Recent' }));
             const entries = getFilteredCompletions([...bookmarks, ...history], filterText);
+            // Only label the first item of each category; the rest inherit it by position.
+            let seenBookmark = false, seenRecent = false;
             entries.forEach(item => {
                 item.uri = item.value;
                 item.value = (item.prefix ?? '') + item.uri;
                 item.meta = item.meta?.endsWith('>') ? '>' : '';
+                if (item.message === '⭐ Bookmark') {
+                    if (seenBookmark) item.message = '';
+                    else seenBookmark = true;
+                } else if (item.message === 'Recent') {
+                    if (seenRecent) item.message = '';
+                    else seenRecent = true;
+                }
             });
             return entries;
         }

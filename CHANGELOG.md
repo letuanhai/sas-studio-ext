@@ -18,7 +18,7 @@
   (`Ctrl+B` toggles on the selected entry — Ctrl on mac too, Alt+B is flaky
   there — stored per-server in localStorage next to the history, preserving
   the current selection instead of jumping back to the top) and a recent-items
-  history are shown (tagged `⭐ Bookmark` / `Recent`, stripped of
+  history are shown (tagged `⭐ Bookmark` / `Recent` on the first item of each category only; items below inherit the label by position, stripped of
   size/modified-time metadata) when the prompt is empty (`Ctrl+L` clears it —
   the full list) and, filtered by what you've typed, whenever the typed text
   doesn't point into the loaded folder (type a path fragment to jump to a

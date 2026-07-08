@@ -150,7 +150,7 @@ placeholder legend is also shown under the prompt while it's empty):
 | `↑` `↓` `PgUp` `PgDn` `Ctrl+↑`/`Home` `Ctrl+↓`/`End` | Move the selection |
 
 The file and library browsers keep per-server (localStorage) bookmarks and a
-recent-items history, tagged `⭐ Bookmark` / `Recent` and shown without
+recent-items history, tagged `⭐ Bookmark` / `Recent` on the first item of each category (items below inherit the label by position) and shown without
 size/modified-time metadata. They appear when the prompt is empty (`Ctrl+L`
 clears it) — the full saved list — and whenever what you've typed doesn't point
 into the currently-loaded folder, in which case the saved list is **filtered**
