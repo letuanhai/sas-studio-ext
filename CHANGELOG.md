@@ -2,6 +2,19 @@
 
 ## 0.5
 
+- Browse prompts (files/library; the tab browser has neither): bookmarks
+  (`Ctrl+B` toggles on the selected entry — Ctrl on mac too, Alt+B is flaky
+  there — stored per-server in localStorage next to the history, preserving
+  the current selection instead of jumping back to the top) and a recent-items
+  history are shown (tagged `⭐ Bookmark` / `Recent`, stripped of
+  size/modified-time metadata) when the prompt is empty (`Ctrl+L` clears it —
+  the full list) and, filtered by what you've typed, whenever the typed text
+  doesn't point into the loaded folder (type a path fragment to jump to a
+  saved item). Previously history only rendered when the typed path wasn't
+  loaded, a state the library browser (which opens pre-filled with `libraries/`)
+  never hit, so its recorded history was invisible. Directory listings now show
+  an inline `⭐` next to any bookmarked entry. A dim placeholder hint (the keybinding legend)
+  appears in the same empty-prompt state instead of always being shown.
 - Options page now documents the custom vim ex-commands (`:w` save,
   `:w <path>` save-as, `:q` close tab, `:wq` save & close, `:x` run) as a
   static note in the Vim config section.

@@ -132,7 +132,7 @@ rebindable in the options page like any other action, and listed as
 `SS-Ext: Browse …` entries in the command palette.
 
 Once a browse prompt is open, these keys act on the selected entry (a compact
-legend is also shown at the bottom of the prompt):
+placeholder legend is also shown under the prompt while it's empty):
 
 | Key | Action |
 |-----|--------|
@@ -141,12 +141,26 @@ legend is also shown at the bottom of the prompt):
 | `Shift+Enter` | Reveal the selected item in the tree |
 | `Tab` | Fill the prompt with the selected item's name |
 | `Shift+Space` | Go to the parent directory |
+| `Ctrl+B` | Bookmark / un-bookmark the selected item (files/library only) |
 | `Ctrl+L` | Clear the prompt |
 | `Esc` | Drop the last path segment; close when already empty / at a folder |
 | `Shift+Esc` | Close the prompt |
 | `Alt+C` | Copy the item's name |
 | `Alt+Ctrl+C` | Copy the item's full path |
 | `↑` `↓` `PgUp` `PgDn` `Ctrl+↑`/`Home` `Ctrl+↓`/`End` | Move the selection |
+
+The file and library browsers keep per-server (localStorage) bookmarks and a
+recent-items history, tagged `⭐ Bookmark` / `Recent` and shown without
+size/modified-time metadata. They appear when the prompt is empty (`Ctrl+L`
+clears it) — the full saved list — and whenever what you've typed doesn't point
+into the currently-loaded folder, in which case the saved list is **filtered**
+by what you typed (so you can jump to a bookmark/recent by typing a fragment of
+its path). While you're browsing inside a loaded folder, the listing is that
+folder's contents instead, with an inline `⭐` marker on any entry that's
+bookmarked. Accepting any entry records it in the history; `Ctrl+B` (Ctrl on
+mac too — Alt+B is flaky there) pins/unpins the selected entry as a bookmark
+without losing your place in the list. The tab browser has neither (open tabs
+are already the whole list).
 
 Under the hood, `window.__ssExt.browse(kind, libPath, snippetsText)` only loads
 the new Ace library if needed — it does not activate the editor replacement, so

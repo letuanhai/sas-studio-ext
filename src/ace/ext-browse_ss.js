@@ -78,10 +78,15 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         el.appendChild(promptTextContainer);
         promptTextContainer.hidden = false;
 
-        // Static keybinding legend (see README "Browsing" for the full table).
+        // Placeholder-style keybinding legend (see README "Browsing" for the
+        // full table): shown only while the prompt is empty (and not while
+        // promptTextContainer is showing "Loading..."/an error), same moment
+        // the saved history/bookmarks view (see updateCompletions) appears.
         const hint = dom.buildDom(["div", { class: "ace_browse_ss_hint" },
             "Enter open · Ctrl+Enter as text · Shift+Enter reveal · Tab fill · " +
-            "Shift+Space parent · Alt+C / Alt+Ctrl+C copy name / path · Esc back · Shift+Esc close"]);
+            "Shift+Space parent · " + (options.historyKey ? "Ctrl+B bookmark · " : "") +
+            "Alt+C / Alt+Ctrl+C copy name / path · Esc back · Shift+Esc close"]);
+        hint.hidden = true;
         el.appendChild(hint);
 
         // Initialize data model
@@ -112,6 +117,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             }
         });
         el.appendChild(popup.container);
+
         // Call updateCompletions() regardless of success/failure so a failed initial
         // load still shows the error entry in the popup (see updateCompletions()).
         curCollectionPromise.then(() => updateCompletions(), () => updateCompletions());
@@ -169,6 +175,10 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             },
             "PageUp": function () { popup.gotoPageUp(); },
             "PageDown": function () { popup.gotoPageDown(); },
+            // Toggle bookmark on selected item (Ctrl on mac too - Alt+B is flaky there)
+            "Ctrl-B": function () {
+                toggleBookmark(popup.getData(popup.getRow()));
+            },
             // Copy item name
             "Alt-C": function () {
                 /** @type {DataItem} */
@@ -196,6 +206,8 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         openPrompt = {
             close: done,
         };
+        // Debug/test handle (same spirit as the other _browseSs* globals)
+        window._browseSsLastPrompt = { popup, cmdLine };
 
 
         /**
@@ -221,26 +233,82 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             localStorage.setItem(options.historyKey, JSON.stringify(filteredHistory.slice(0, options.maxHistory ?? MAX_HISTORY)));
         }
 
-        function updateCompletions() {
-            /**
-             * @param {Partial<DataItem>[]} itemList
-             * @param {String?} filterText
-             * @returns {Partial<DataItem>[]}
-             */
-            function getFilteredCompletions(itemList, filterText) {
-                const resultItems = JSON.parse(JSON.stringify(itemList));
-                const filtered = new FilteredList(resultItems);
-                return filtered.filterCompletions(resultItems, filterText);
-            }
+        const bookmarkKey = options.historyKey ? options.historyKey + 'Bookmarks' : null;
+
+        /**
+         * Get bookmark list @returns {Partial<DataItem>[]} */
+        function getBookmarks() {
+            if (!bookmarkKey) return [];
+            return JSON.parse(localStorage.getItem(bookmarkKey) ?? '[]');
+        }
+
+        /**
+         * Add/remove selected item to/from bookmarks @param {DataItem=} item */
+        function toggleBookmark(item) {
+            if (!bookmarkKey || !item || item.error || item.uri == null) return;
+            const uri = Utils.normalizeItemPath(item.uri);
+            const bookmarks = getBookmarks();
+            const remaining = bookmarks.filter(b => b.value !== uri);
+            if (remaining.length === bookmarks.length)
+                remaining.unshift({ value: uri, meta: item.meta, prefix: item.prefix });
+            localStorage.setItem(bookmarkKey, JSON.stringify(remaining));
+            // Capture the row synchronously (before setData resets selection to 0)
+            // so toggling a bookmark doesn't jump the list back to the top.
+            updateCompletions(popup.getRow());
+        }
+
+        /**
+         * @param {Partial<DataItem>[]} itemList
+         * @param {String?} filterText
+         * @returns {Partial<DataItem>[]}
+         */
+        function getFilteredCompletions(itemList, filterText) {
+            const resultItems = JSON.parse(JSON.stringify(itemList));
+            const filtered = new FilteredList(resultItems);
+            return filtered.filterCompletions(resultItems, filterText);
+        }
+
+        /**
+         * Bookmark + history entries matching filterText, completion-ready
+         * (stored entries hold the bare path in `value`; rendered entries get
+         * `uri` + a prefixed display value, same shape as directory children).
+         * Size/modified-time metadata is stripped - only '>' (collection, for
+         * navigation) survives into `meta`, everything else renders blank.
+         * @param {String} filterText
+         * @returns {Partial<DataItem>[]}
+         */
+        function savedCompletions(filterText) {
+            if (!options.historyKey) return [];
+            const bookmarks = getBookmarks().map(b => Object.assign(b, { message: '⭐ Bookmark' }));
+            const history = getHistory().filter(h => !bookmarks.some(b => b.value === h.value))
+                .map(h => Object.assign(h, { message: 'Recent' }));
+            const entries = getFilteredCompletions([...bookmarks, ...history], filterText);
+            entries.forEach(item => {
+                item.uri = item.value;
+                item.value = (item.prefix ?? '') + item.uri;
+                item.meta = item.meta?.endsWith('>') ? '>' : '';
+            });
+            return entries;
+        }
+
+        /** @param {Number=} keepRow row to reselect after popup.setData resets it to 0 */
+        function updateCompletions(keepRow) {
+            const cmdLineValue = cmdLine.getValue().trimStart();
+            // Placeholder hint + saved (history/bookmarks) view only make sense
+            // while the prompt is empty, and only once loading/error text isn't
+            // already occupying the description area.
+            hint.hidden = cmdLineValue !== '' || !promptTextContainer.hidden;
 
             curCollectionPromise.then(curCollection => {
-
-                const cmdLineValue = cmdLine.getValue().trimStart();
                 const curDirPath = Utils.getCurCollPath(cmdLineValue);
 
+                if (cmdLineValue === '' && options.historyKey) {
+                    // Nothing typed: show saved bookmarks/recents only (empty if none).
+                    popup.setData(savedCompletions(''), '');
+                }
                 // Get completions using curDirItem if loaded
                 // Also get completions in case history is not saved (with SsTabs)
-                if (curDirPath === Utils.normalizeItemPath(curCollection.uri ?? '') || !options.historyKey) {
+                else if (curDirPath === Utils.normalizeItemPath(curCollection.uri ?? '') || !options.historyKey) {
                     // Get the input value to update completions
                     // Only use the last component of the path for completions
                     const filterText = cmdLineValue.split('/').at(-1);
@@ -253,34 +321,35 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
                             keepPrompt: true,
                         },
                     ];
-                    popup.setData(completions, filterText);
-                }
-                // Else prompt to load curDirItem and load history
-                else {
-                    const history = getHistory();
-                    /** * @type {Partial<DataItem>[]} */
-                    let filteredCompletions = [];
-                    if (history.length > 0) {
-                        filteredCompletions = getFilteredCompletions(history, cmdLineValue);
-                        if (filteredCompletions.length > 0) filteredCompletions[0].message = 'Recent';
-                        filteredCompletions.forEach(item => {
-                            item.uri = item.value;
-                            item.value = (item.prefix ?? '') + item.uri;
+                    // Inline ⭐ marker on listed items that are bookmarked.
+                    if (options.historyKey) {
+                        const marked = new Set(getBookmarks().map(b => b.value));
+                        completions.forEach(child => {
+                            if (child.uri && marked.has(Utils.normalizeItemPath(child.uri))) child.message = '⭐';
                         });
                     }
-                    const completions = [{
+                    popup.setData(completions, filterText);
+                }
+                // Else: what's typed doesn't point into the loaded folder, so
+                // there's nothing to list from the server yet. Offer to load it,
+                // and below that show the saved bookmarks/history FILTERED by
+                // what's typed - this is how you filter/pick a saved item by
+                // typing a fragment of its path.
+                else {
+                    popup.setData([{
                         uri: curDirPath,
                         value: '⬇️ Load content...',
                         meta: '>',
                         keepPrompt: true,
-                    }, ...filteredCompletions];
-                    popup.setData(completions, cmdLineValue);
+                    }, ...savedCompletions(cmdLineValue)], cmdLineValue);
                 }
+                if (keepRow != null) popup.setRow(keepRow);
                 popup.resize(true);
             }).catch(() => {
                 // Query failed: replace stale popup data with a single non-selectable
                 // error entry. Reuses the `error` flag the click handler already checks.
                 popup.setData([{ value: '❌ Error loading data', error: true, keepPrompt: true, meta: '' }], '');
+                if (keepRow != null) popup.setRow(keepRow);
                 popup.resize(true);
             })
         }

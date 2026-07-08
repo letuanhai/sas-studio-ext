@@ -490,6 +490,31 @@ function check(name, ok, detail) {
   await page.waitForTimeout(600);
   const browseOpened = await page.evaluate(() => !!document.querySelector(".ace_browse_ss_container"));
   check("browseFiles action opens the file browser prompt", browseOpened, { browseOpened });
+
+  // Bookmarks: Ctrl+B toggles a bookmark on the selected entry (localStorage,
+  // key = historyKey + "Bookmarks"). Wait for the popup to have data via the
+  // _browseSsLastPrompt debug handle; setData leaves the first row selected,
+  // so only press Down when nothing is selected (pressing it on a selected
+  // last row would wrap the selection back to -1, ace's stock popup behavior).
+  await page
+    .waitForFunction(() => window._browseSsLastPrompt?.popup?.data?.length > 0, null, { timeout: 10000 })
+    .catch(() => {});
+  await page.evaluate(() => localStorage.removeItem("BrowseSsFilesHistoryBookmarks"));
+  const selectRowThen = async (key) => {
+    const rowSelected = await page.evaluate(() => window._browseSsLastPrompt.popup.getRow() >= 0);
+    if (!rowSelected) await page.keyboard.press("ArrowDown");
+    await page.keyboard.press(key);
+  };
+  await selectRowThen("Control+b");
+  const bookmarkCount = () =>
+    page.evaluate(() => JSON.parse(localStorage.getItem("BrowseSsFilesHistoryBookmarks") ?? "[]").length);
+  const afterAdd = await bookmarkCount();
+  check("Ctrl+B bookmarks the selected browse entry", afterAdd === 1, { afterAdd });
+  await page.waitForTimeout(300); // toggle refreshes the popup async
+  await selectRowThen("Control+b");
+  const afterRemove = await bookmarkCount();
+  check("Ctrl+B again removes the bookmark", afterRemove === 0, { afterRemove });
+
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await page.waitForTimeout(300);
 
@@ -691,8 +716,18 @@ function check(name, ok, detail) {
       .getAllTabObjects()
       .find((t) => t.editor && t.editor.backgroundSubmitButton && !t.editor.backgroundSubmitButton.get("disabled"));
 
+    // Focus the run tab so the run-start "running tab" marker (ssf-running,
+    // applied to the focused code tab) lands deterministically on it.
+    if (runTab) {
+      window.appDMS.tabs.selectTab(runTab);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
     // A run dialog (cancel callback present) is auto-minimized on creation -
-    // no button, no click.
+    // no floating box: the dialog is display:none'd, the bottom status bar is
+    // tinted amber with a Cancel link, and the running tab gets a spinner +
+    // amber background (the old design pinned a small box bottom-right; that
+    // was replaced by the status-bar treatment).
     const dialog = window.appDMS.dialogs.postBusyDialog("Submitting SAS Code", () => {});
     await new Promise((r) => setTimeout(r, 100));
 
@@ -701,16 +736,16 @@ function check(name, ok, detail) {
 
     const underlayHiddenAfter = !dijit._underlay || dijit._underlay.open === false;
     const dialogStillInDom = !!document.getElementById(dialog.id);
-    // Pinned via computed top/left (not right/bottom anchors, which would make
-    // dijit's title-bar drag stretch the box) into the bottom-right quadrant.
-    const rect = dialog.domNode.getBoundingClientRect();
-    const dialogPinned =
-      dialog.domNode.style.top !== "" &&
-      dialog.domNode.style.left !== "" &&
-      dialog.domNode.style.right === "" &&
-      dialog.domNode.style.bottom === "" &&
-      rect.left > window.innerWidth / 2 &&
-      rect.top > window.innerHeight / 2;
+    const statusBar = document.getElementById("studio_status_bar");
+    // Run start: dialog hidden, status bar tinted amber (#ffe9a8 =
+    // rgb(255, 233, 168)) with a Cancel link, running tab marked.
+    const dialogHidden = dialog.domNode.style.display === "none";
+    const statusBarTinted =
+      !!statusBar && /255,\s*233,\s*168|#ffe9a8/i.test(statusBar.style.getPropertyValue("background"));
+    const cancelLinkShown = !!document.getElementById("ssf-run-cancel");
+    const runTabMarked = runTab
+      ? runTab.tab.controlButton.domNode.classList.contains("ssf-running")
+      : null;
 
     // Single-run guard: a submitHandler on any open code tab must now refuse
     // to run (appDMS.dialogs.busyDialog is still set - the dialog is only
@@ -785,6 +820,14 @@ function check(name, ok, detail) {
 
     const runButtonReenabledAfterDestroy = runTab ? runTab.editor.submitButton.get("disabled") === false : null;
     const noticeClearedAfterDestroy = !document.getElementById("ssf-busy-notice");
+    // Run end (reenable) also un-tints the status bar, drops the Cancel link,
+    // and clears the running-tab marker.
+    const statusBarRestoredAfterDestroy =
+      !statusBar || !/255,\s*233,\s*168|#ffe9a8/i.test(statusBar.style.getPropertyValue("background"));
+    const cancelLinkRemovedAfterDestroy = !document.getElementById("ssf-run-cancel");
+    const runTabUnmarkedAfterDestroy = runTab
+      ? !runTab.tab.controlButton.domNode.classList.contains("ssf-running")
+      : null;
 
     const otherDialog = new dijit.Dialog({ title: "SS Ext smoke: post-minimize modality check" });
     otherDialog.show();
@@ -805,7 +848,13 @@ function check(name, ok, detail) {
     return {
       underlayHiddenAfter,
       dialogStillInDom,
-      dialogPinned,
+      dialogHidden,
+      statusBarTinted,
+      cancelLinkShown,
+      runTabMarked,
+      statusBarRestoredAfterDestroy,
+      cancelLinkRemovedAfterDestroy,
+      runTabUnmarkedAfterDestroy,
       hasTabToTestGuard: !!tabObj,
       guardRefused,
       guardNoticeIsWarnStyled,
@@ -824,7 +873,15 @@ function check(name, ok, detail) {
   });
   {
     check("run dialog is auto-minimized: no modal underlay", busyDialogState.underlayHiddenAfter, busyDialogState);
-    check("auto-minimized dialog stays visible (pinned) instead of closing", busyDialogState.dialogStillInDom && busyDialogState.dialogPinned, busyDialogState);
+    check("run start hides the dialog (no floating box)", busyDialogState.dialogStillInDom && busyDialogState.dialogHidden, busyDialogState);
+    check("run start tints the status bar and adds a Cancel link", busyDialogState.statusBarTinted && busyDialogState.cancelLinkShown, busyDialogState);
+    check(
+      busyDialogState.hasRunTab
+        ? "run start marks the running (focused code) tab"
+        : "run start marks the running tab (skipped: no code tab focused)",
+      !busyDialogState.hasRunTab || busyDialogState.runTabMarked === true,
+      busyDialogState,
+    );
     check(
       busyDialogState.hasTabToTestGuard
         ? "single-run guard blocks submitHandler while busyDialog is set"
@@ -866,6 +923,18 @@ function check(name, ok, detail) {
     check("handleWebOneEvent(FileOpenWithTextViewer) while a run is active is refused with a notice", busyDialogState.textViewEntryBlocked, busyDialogState);
     check("perspectiveFileOpen backstop refuses a text-view (TXT) open while a run is active", busyDialogState.textViewBlocked, busyDialogState);
     check("busy notice is cleared when the busy dialog is destroyed", busyDialogState.noticeClearedAfterDestroy, busyDialogState);
+    check(
+      "run end un-tints the status bar and removes the Cancel link",
+      busyDialogState.statusBarRestoredAfterDestroy && busyDialogState.cancelLinkRemovedAfterDestroy,
+      busyDialogState,
+    );
+    check(
+      busyDialogState.hasRunTab
+        ? "run end clears the running-tab marker"
+        : "run end clears the running-tab marker (skipped: no code tab focused)",
+      !busyDialogState.hasRunTab || busyDialogState.runTabUnmarkedAfterDestroy === true,
+      busyDialogState,
+    );
   }
 
   await ctx.close();
