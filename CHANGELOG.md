@@ -2,6 +2,13 @@
 
 ## 0.5
 
+- Browse prompts: long truncated paths now reveal their tail two ways — the
+  focused row's caption auto-scrolls (a linear ~100px/s slide to the end,
+  snapping back when focus moves on; refiltering while typing jumps straight
+  to the end instead of replaying the animation), and hovering any row shows
+  the full value in a native tooltip (ace's `pointer-events:none` layer CSS,
+  a Safari workaround irrelevant in a Chromium extension, is overridden for
+  this popup's rows — without that the tooltips never show).
 - Command palette: the 5 most recently run commands lead the list in MRU
   order (deduped — moved up, not repeated), so the last-run command is the
   pre-selected first row on reopen; per-server localStorage, and editor-only

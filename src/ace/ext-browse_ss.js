@@ -118,6 +118,92 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         });
         el.appendChild(popup.container);
 
+        // Long item values truncate on the right (ace's per-span ellipsis);
+        // a native title tooltip on each rendered row reveals the full value on
+        // hover. Set on every visible row after each render — ace recycles row
+        // DOM nodes, so a focused-row-only title would go stale on recycled
+        // nodes and show the wrong tooltip.
+        popup.renderer.on("afterRender", function () {
+            const tl = popup.renderer.$textLayer;
+            tl.element.childNodes.forEach((/** @type {HTMLElement} */ node, /** @type {number} */ i) => {
+                const data = popup.getData(tl.config.firstRow + i);
+                node.title = (data && !data.error && data.value) || "";
+            });
+        });
+
+        // --- Focused-item caption auto-scroll -------------------------------
+        // Long item values truncate on the right (ace's autocomplete CSS gives
+        // each caption span overflow:hidden + text-overflow:ellipsis). When a
+        // row gains focus we wrap ALL its caption spans (everything before the
+        // .ace_completion-spacer) into one clipped box whose inner box we
+        // translate left to reveal the tail; on focus moving to a different row
+        // the previous row snaps back to the start (no animation). After the ace
+        // renderer rebuilds row DOM (every setData/resize), we re-wrap the
+        // focused row: a row change animates to the end, a same-row rebuild
+        // (typing) jumps to the end without animating so refiltering doesn't
+        // replay the scroll each keystroke.
+        const SCROLL_SPEED_PX_PER_S = 100; // ~5s for 600px of overflow
+        /** @type {number} */ let ssRow = -1;
+        /** @type {HTMLElement|null} */ let ssPrevInner = null;
+        /** @param {number} row @returns {HTMLElement|null} */
+        function rowNode(row) {
+            const tl = popup.renderer.$textLayer;
+            if (row < tl.config.firstRow || row > tl.config.lastRow) return null;
+            return /** @type {HTMLElement?} */ (tl.element.childNodes[row - tl.config.firstRow]);
+        }
+        /** @param {HTMLElement} node @returns {HTMLElement|null} */
+        function wrapCaption(node) {
+            const spacer = node.querySelector(".ace_completion-spacer");
+            if (!spacer) return null;
+            const prev = spacer.previousElementSibling;
+            if (prev && /** @type {Element} */ (prev).classList.contains("ace_browse_ss_caption-wrap"))
+                return /** @type {HTMLElement} */ (prev.firstChild);
+            const wrap = document.createElement("span");
+            wrap.className = "ace_browse_ss_caption-wrap";
+            const inner = document.createElement("span");
+            inner.className = "ace_browse_ss_caption-inner";
+            let n = node.firstChild;
+            while (n && n !== spacer) { const nx = n.nextSibling; inner.appendChild(n); n = nx; }
+            wrap.appendChild(inner);
+            node.insertBefore(wrap, spacer);
+            return inner;
+        }
+        /** @param {HTMLElement} inner */ function resetInner(inner) {
+            inner.style.transition = "none";
+            inner.style.transform = "translateX(0)";
+            void inner.offsetWidth; // commit the no-transition reset before re-adding a transition
+        }
+        /** @param {HTMLElement} inner @param {number} dist */ function animateInner(inner, dist) {
+            if (dist <= 0) return;
+            const dur = Math.max(300, Math.min(6000, dist / SCROLL_SPEED_PX_PER_S * 1000));
+            inner.style.transition = `transform ${dur}ms linear`;
+            inner.style.transform = `translateX(${-dist}px)`;
+        }
+        function applyCaptionScroll() {
+            const row = popup.getRow();
+            const prevRow = ssRow;
+            ssRow = row;
+            if (row !== prevRow && ssPrevInner) resetInner(ssPrevInner);
+            const node = row >= 0 ? rowNode(row) : null;
+            if (!node) { ssPrevInner = null; return; }
+            // Same row and its wrap survived this render: the DOM wasn't rebuilt,
+            // so leave the in-flight animation (or resting position) alone.
+            if (row === prevRow && node.querySelector(".ace_browse_ss_caption-inner")) return;
+            const inner = wrapCaption(node);
+            if (!inner) { ssPrevInner = null; return; }
+            resetInner(inner);
+            const dist = Math.max(0, inner.scrollWidth - (inner.parentElement?.clientWidth ?? 0));
+            ssPrevInner = inner;
+            if (row !== prevRow) {
+                // focus moved to a new row: animate to the end, and leave it there
+                requestAnimationFrame(() => animateInner(inner, dist));
+            } else {
+                // same row rebuilt (keystroke/refilter): jump to the end, no animation
+                inner.style.transform = `translateX(${-dist}px)`;
+            }
+        }
+        popup.renderer.on("afterRender", applyCaptionScroll);
+
         // Call updateCompletions() regardless of success/failure so a failed initial
         // load still shows the error entry in the popup (see updateCompletions()).
         curCollectionPromise.then(() => updateCompletions(), () => updateCompletions());
@@ -419,6 +505,34 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         font-size: 11px;
         color: #888;
         line-height: 1.5;
+        }
+        /* Ace sets pointer-events:none on all .ace_layer (a Safari wheel-scroll
+        workaround we don't need in a Chromium extension), so row nodes never
+        become the hover hit target and their title tooltips never show.
+        Re-enable pointer events on this popup's rows only. */
+        .ace_browse_ss_container .ace_autocomplete .ace_text-layer > .ace_line {
+        pointer-events: auto;
+        }
+        /* Caption auto-scroll: the focused row's caption spans are grouped into
+        one clipped wrapper (so the clip lives on one box, not per span), and the
+        individual caption spans stop self-clipping/ellipsis so the inner box can
+        slide. Selector scope under .ace_browse_ss_container + .ace_autocomplete
+        (4 classes) outranks ace's .ace_autocomplete .ace_line .ace_ (3). */
+        .ace_browse_ss_container .ace_autocomplete .ace_line .ace_browse_ss_caption-wrap .ace_ {
+        overflow: visible;
+        text-overflow: clip;
+        flex: 0 0 auto;
+        }
+        .ace_browse_ss_container .ace_autocomplete .ace_line .ace_browse_ss_caption-wrap {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        display: inline-flex;
+        }
+        .ace_browse_ss_container .ace_autocomplete .ace_line .ace_browse_ss_caption-inner {
+        display: inline-flex;
+        white-space: nowrap;
+        will-change: transform;
         }`,
         "browse_ss.css",
         false

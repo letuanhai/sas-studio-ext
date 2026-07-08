@@ -162,6 +162,10 @@ mac too — Alt+B is flaky there) pins/unpins the selected entry as a bookmark
 without losing your place in the list. The tab browser has neither (open tabs
 are already the whole list).
 
+Long paths truncate on the right of the box; the selected row's text
+auto-scrolls to reveal the hidden tail (and snaps back when you move on), and
+hovering any row shows its full value in a tooltip.
+
 Under the hood, `window.__ssExt.browse(kind, libPath, snippetsText)` only loads
 the new Ace library if needed — it does not activate the editor replacement, so
 browse prompts work even while the built-in editor is still in use.
