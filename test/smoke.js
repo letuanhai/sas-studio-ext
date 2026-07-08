@@ -485,6 +485,35 @@ function check(name, ok, detail) {
   const paletteClosedAfterEsc = await page.evaluate(() => !document.querySelector(".ace_prompt_container"));
   check("command palette closes on Esc", paletteClosedAfterEsc, { paletteClosedAfterEsc });
 
+  // Command history: recently-used commands are moved to the front of the
+  // list in MRU order (deduped - moved, not copied); editor-only commands in
+  // the history (here "gotoline") don't show up in the unfocused/global
+  // palette, whose entries never include them.
+  await page.evaluate((lp) => {
+    localStorage.setItem(
+      "SsCmdPaletteHistory",
+      JSON.stringify(["ssext:browseTabs", "gotoline", "ssext:browseFiles"]),
+    );
+    window.__ssExt.commandPalette(lp);
+  }, libPath);
+  await page.waitForTimeout(500);
+  const paletteHistoryState = await page.evaluate(() => {
+    const list = window.__ssCmdPalette_lastList || [];
+    const popup = document.querySelector(".ace_prompt_container");
+    return {
+      mruOrder: list[0]?.command === "ssext:browseTabs" && list[1]?.command === "ssext:browseFiles",
+      deduped: list.filter((c) => c.command === "ssext:browseTabs").length === 1,
+      noEditorCommand: !list.some((c) => c.command === "gotoline"),
+      firstRowIsRecent: !!(popup && (popup.querySelector(".ace_line") || {}).textContent?.includes("Browse tabs")),
+    };
+  });
+  check("command palette recent commands lead in MRU order", paletteHistoryState.mruOrder, paletteHistoryState);
+  check("command palette recent commands are deduped", paletteHistoryState.deduped, paletteHistoryState);
+  check("command palette (no focus) hides editor commands from history", paletteHistoryState.noEditorCommand, paletteHistoryState);
+  check("command palette last-run command renders first", paletteHistoryState.firstRowIsRecent, paletteHistoryState);
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
+  await page.waitForTimeout(300);
+
   // browseFiles action opens the browse_ss prompt (its own container).
   await page.evaluate(() => window.__ssf.run("browseFiles"));
   await page.waitForTimeout(600);

@@ -1658,6 +1658,33 @@
     return commandsByName;
   }
 
+  // The most recent palette commands (MRU list of entry.command keys in
+  // localStorage) are moved to the front of the entries array, so the last-run
+  // command is the pre-selected first row when the palette reopens. Only
+  // reorders entries that exist in the current list — editor commands aren't
+  // built when no editor is focused, so they can't leak into the global
+  // palette from history. The popup displays getCompletions' return order
+  // (FilteredList.filterCompletions filters without sorting), so recents stay
+  // on top while typing too, as long as they match.
+  const CMD_HISTORY_KEY = "SsCmdPaletteHistory";
+  const CMD_HISTORY_MAX = 5;
+
+  function getCommandHistory() {
+    try {
+      return JSON.parse(localStorage.getItem(CMD_HISTORY_KEY) || "[]");
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function recordCommandUse(command) {
+    const history = getCommandHistory().filter((c) => c !== command);
+    history.unshift(command);
+    try {
+      localStorage.setItem(CMD_HISTORY_KEY, JSON.stringify(history.slice(0, CMD_HISTORY_MAX)));
+    } catch (e) {}
+  }
+
   // Builds the palette's entries (plain data, JSON-clonable - prompt.commands'
   // getCompletions clones them) plus a side-table of runners keyed by
   // entry.command, since functions don't survive that clone.
@@ -1683,6 +1710,18 @@
       });
     }
 
+    // Least-recent first, so the most recent ends up unshifted to index 0.
+    getCommandHistory()
+      .reverse()
+      .forEach((cmd) => {
+        const i = entries.findIndex((e) => e.command === cmd);
+        if (i !== -1) {
+          const item = entries.splice(i, 1)[0];
+          item.message = "recent";
+          entries.unshift(item);
+        }
+      });
+
     return { entries, runners };
   }
 
@@ -1698,6 +1737,7 @@
       onAccept: function (data) {
         const runner = data.item && data.item.command && runners[data.item.command];
         if (!runner) return;
+        recordCommandUse(data.item.command);
         try {
           runner();
         } catch (e) {

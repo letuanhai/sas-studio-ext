@@ -2,6 +2,11 @@
 
 ## 0.5
 
+- Command palette: the 5 most recently run commands lead the list in MRU
+  order (deduped — moved up, not repeated), so the last-run command is the
+  pre-selected first row on reopen; per-server localStorage, and editor-only
+  commands from the history never show in the global (unfocused) palette.
+
 - Browse prompts (files/library; the tab browser has neither): bookmarks
   (`Ctrl+B` toggles on the selected entry — Ctrl on mac too, Alt+B is flaky
   there — stored per-server in localStorage next to the history, preserving
