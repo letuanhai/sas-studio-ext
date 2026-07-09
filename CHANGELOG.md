@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7
+
+- Keep focus in the editor after saving a code file (`keepFocusAfterSave`
+  patch, on by default). A regular save fires `DMSEditor.successfulSave` →
+  `projects.onRefresh`, which destroys and recreates the file tree; the new
+  tree's `focusNode` then steals focus from the editor. The patch re-focuses
+  the saved editor once `onRefresh` resolves — without `gotoLine`, so the
+  cursor stays put (unlike SAS Studio's own commented-out SASSTUDIO-13593 fix,
+  which reset the cursor to line 1). Gated on the exact refresh condition
+  `successfulSave` uses, so autosave and Save As never trigger a stray
+  refocus; works for both the stock editor and the Ace adapter.
+
 ## 0.6
 
 - Save As at path (`saveFileAtPath` action / `:w <path>`): await the destination
