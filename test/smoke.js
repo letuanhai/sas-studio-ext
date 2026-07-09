@@ -608,6 +608,56 @@ function check(name, ok, detail) {
     await page.waitForTimeout(300);
   }
 
+  // -- keepFocusAfterSave: editor keeps focus across the post-save tree reload ----
+  // Reuses an already-open, real (non-virgin) Ace code tab; a virgin "Program N"
+  // tab would route saveFile() through the Save As dialog and isn't a valid
+  // subject. Saving posts the unchanged text back (a no-op write), so it's safe
+  // to repeat. Asserts the OUTCOME (focus not stolen to the tree, cursor not
+  // jumped to line 1) regardless of the patch internals.
+  const saveFocus = await page.evaluate(async () => {
+    const tabObj = window.appDMS.tabs
+      .getAllTabObjects()
+      .find(
+        (t) => t.editor && t.editor.editor && t.editor.editor.aceEditor && t.uri && !t.editor.isVirgin(),
+      );
+    if (!tabObj) return { skipped: true };
+    window.appDMS.tabs.selectTab(tabObj);
+    const adapter = tabObj.editor.editor;
+    adapter.focus();
+    await new Promise((r) => setTimeout(r, 150));
+    // Park the cursor away from line 1 so a setInitialFocus-style jump (the old,
+    // commented-out SAS Studio approach that also reset the cursor) would show
+    // up as a distinct regression from "focus came back".
+    const len = adapter.aceEditor.session.getLength() || 1;
+    adapter.aceEditor.gotoLine(Math.min(5, len));
+    await new Promise((r) => setTimeout(r, 50));
+    const cursorBefore = adapter.aceEditor.getCursorPosition();
+    const focusedBefore = adapter.aceEditor.isFocused();
+    // Save the unchanged file; wait out the tree reload + the patch's deferred
+    // refocus (onRefresh's promise resolves ~1s after the call, refocus then).
+    tabObj.editor.saveFile();
+    await new Promise((r) => setTimeout(r, 3000));
+    const cursorAfter = adapter.aceEditor.getCursorPosition();
+    return {
+      skipped: false,
+      focusedBefore,
+      focusedAfter: adapter.aceEditor.isFocused(),
+      cursorUnchanged: cursorBefore.row === cursorAfter.row && cursorBefore.column === cursorAfter.column,
+      activeInTree: !!(
+        window.appDMS.projects &&
+        window.appDMS.projects.tree &&
+        window.appDMS.projects.tree.domNode &&
+        window.appDMS.projects.tree.domNode.contains(document.activeElement)
+      ),
+    };
+  });
+  if (saveFocus.skipped) {
+    check("keepFocusAfterSave (skipped: no non-virgin Ace code tab open)", false, saveFocus);
+  } else {
+    check("editor stays focused after save (focus not stolen by the tree reload)", saveFocus.focusedAfter, saveFocus);
+    check("focus return doesn't jump the cursor to line 1", saveFocus.cursorUnchanged, saveFocus);
+  }
+
   // -- Persistent Ace editor configuration -----------------------------------------
   // (a) a freshly-constructed adapter picks up whatever's seeded on ssExt.aceConfig
   // (mirrors sw.js's onUpdated seed) - probed directly against a scratch div rather

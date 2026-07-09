@@ -248,5 +248,11 @@ Add a prefix to the path for different option:
       label: "Auto-minimize run-progress dialog",
       title: "Minimize the run-progress dialog to the bottom-right corner so the app stays usable while a program runs (one foreground run at a time; opening files as text is blocked during a run). Uncheck to leave SAS Studio's dialog untouched.",
     },
+    {
+      name: "keepFocusAfterSave",
+      kind: "patch",
+      label: "Keep focus in editor after save",
+      title: "After saving a code file, SAS Studio reloads the file tree, which steals focus from the editor. This re-focuses the editor (without moving the cursor) once the tree finishes reloading.",
+    },
   ];
 })();
