@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8
+
+- Browse_ss/command palette history moves from page `localStorage` to
+  `chrome.storage.local`, relayed through `window.postMessage` <-> `relay.js`
+  (with a MAIN-world cache), so it survives "clear site data". Browse history
+  keys are per-host namespaced (`browseSs:<host>:<name>`) to keep servers
+  isolated; old `localStorage` data is migrated on first read. Palette
+  history stays global by design.
+
 ## 0.7
 
 - Keep focus in the editor after saving a code file (`keepFocusAfterSave`

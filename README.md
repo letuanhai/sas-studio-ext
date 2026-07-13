@@ -2,8 +2,7 @@
 
 A browser extension that toggles SAS Studio 3.8's built-in editor for a modern Ace
 editor at runtime (SAS syntax highlighting, configurable snippets), plus various
-independent UX fixes for the rest of SAS Studio. No Tampermonkey install needed —
-everything lives in the extension.
+independent UX fixes for the rest of SAS Studio.
 
 ## Features
 
