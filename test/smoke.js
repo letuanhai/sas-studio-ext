@@ -490,16 +490,27 @@ function check(name, ok, detail) {
   // the history (here "gotoline") don't show up in the unfocused/global
   // palette, whose entries never include them.
   await page.evaluate((lp) => {
-    localStorage.setItem(
+    window._browseSsStore.set(
       "SsCmdPaletteHistory",
-      JSON.stringify(["ssext:browseTabs", "gotoline", "ssext:browseFiles"]),
+      ["ssext:browseTabs", "gotoline", "ssext:browseFiles"],
     );
     window.__ssExt.commandPalette(lp);
   }, libPath);
-  await page.waitForTimeout(500);
+  // getCompletions renders async (prompt's FilteredList pass) - wait for the
+  // first completion row to actually reflect the MRU reorder rather than a
+  // fixed sleep. ".ace_autocomplete .ace_line" (not just ".ace_line", which
+  // also matches the empty cmdLine text-input's own line) - the completion
+  // popup and the cmdLine are separate nested Ace editors.
+  await page
+    .waitForFunction(
+      () => document.querySelector(".ace_prompt_container .ace_autocomplete .ace_line")?.textContent?.includes("Browse tabs"),
+      null,
+      { timeout: 3000 },
+    )
+    .catch(() => {});
   const paletteHistoryState = await page.evaluate(() => {
     const list = window.__ssCmdPalette_lastList || [];
-    const popup = document.querySelector(".ace_prompt_container");
+    const popup = document.querySelector(".ace_prompt_container .ace_autocomplete");
     return {
       mruOrder: list[0]?.command === "ssext:browseTabs" && list[1]?.command === "ssext:browseFiles",
       deduped: list.filter((c) => c.command === "ssext:browseTabs").length === 1,
@@ -520,15 +531,19 @@ function check(name, ok, detail) {
   const browseOpened = await page.evaluate(() => !!document.querySelector(".ace_browse_ss_container"));
   check("browseFiles action opens the file browser prompt", browseOpened, { browseOpened });
 
-  // Bookmarks: Ctrl+B toggles a bookmark on the selected entry (localStorage,
-  // key = historyKey + "Bookmarks"). Wait for the popup to have data via the
-  // _browseSsLastPrompt debug handle; setData leaves the first row selected,
-  // so only press Down when nothing is selected (pressing it on a selected
-  // last row would wrap the selection back to -1, ace's stock popup behavior).
+  // Bookmarks: Ctrl+B toggles a bookmark on the selected entry (persisted in
+  // chrome.storage via relay.js, key = historyKey + "Bookmarks"). Wait for the
+  // popup to have data via the _browseSsLastPrompt debug handle; setData leaves
+  // the first row selected, so only press Down when nothing is selected
+  // (pressing it on a selected last row would wrap the selection back to -1,
+  // ace's stock popup behavior). The in-memory cache (_browseSsStore) is
+  // populated by then (updateCompletions awaits it before setData).
   await page
     .waitForFunction(() => window._browseSsLastPrompt?.popup?.data?.length > 0, null, { timeout: 10000 })
     .catch(() => {});
-  await page.evaluate(() => localStorage.removeItem("BrowseSsFilesHistoryBookmarks"));
+  await page.evaluate(() =>
+    window._browseSsStore.set(`browseSs:${location.host}:BrowseSsFilesHistoryBookmarks`, [])
+  );
   const selectRowThen = async (key) => {
     const rowSelected = await page.evaluate(() => window._browseSsLastPrompt.popup.getRow() >= 0);
     if (!rowSelected) await page.keyboard.press("ArrowDown");
@@ -536,7 +551,9 @@ function check(name, ok, detail) {
   };
   await selectRowThen("Control+b");
   const bookmarkCount = () =>
-    page.evaluate(() => JSON.parse(localStorage.getItem("BrowseSsFilesHistoryBookmarks") ?? "[]").length);
+    page.evaluate(
+      () => (window._browseSsStore?.get(`browseSs:${location.host}:BrowseSsFilesHistoryBookmarks`) ?? []).length
+    );
   const afterAdd = await bookmarkCount();
   check("Ctrl+B bookmarks the selected browse entry", afterAdd === 1, { afterAdd });
   await page.waitForTimeout(300); // toggle refreshes the popup async

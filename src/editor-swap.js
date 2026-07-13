@@ -634,6 +634,13 @@
 
     await loadScript(`${libPath}/ext-language_tools.js`);
     await loadScript(`${srcAcePath}/ext-browse_ss.js`);
+    // Warm the command-history cache now (fire-and-forget - "SsCmdPaletteHistory",
+    // inlined since CMD_HISTORY_KEY is defined later in this closure but not yet
+    // in scope here). The adapter's in-editor Alt-Shift-P command opens the
+    // palette without awaiting readiness (unlike commandPalette()'s explicit
+    // await below), so without this a fresh page's first in-editor palette open
+    // would see an empty history and overwrite the persisted MRU list.
+    window._browseSsStore.ready("SsCmdPaletteHistory");
     await loadScript(`${libPath}/ext-prompt.js`);
     await loadScript(`${libPath}/ext-statusbar.js`);
 
@@ -1706,7 +1713,7 @@
   }
 
   // The most recent palette commands (MRU list of entry.command keys in
-  // localStorage) are moved to the front of the entries array, so the last-run
+  // chrome.storage via window._browseSsStore) are moved to the front of the entries array, so the last-run
   // command is the pre-selected first row when the palette reopens. Only
   // reorders entries that exist in the current list — editor commands aren't
   // built when no editor is focused, so they can't leak into the global
@@ -1716,20 +1723,21 @@
   const CMD_HISTORY_KEY = "SsCmdPaletteHistory";
   const CMD_HISTORY_MAX = 5;
 
+  // Command history persists in chrome.storage.local (via the same
+  // window._browseSsStore relay as browse_ss history) so it survives "clear
+  // site data". The store is created by ext-browse_ss.js, which loadNewAce()
+  // loads before the palette can open.
   function getCommandHistory() {
-    try {
-      return JSON.parse(localStorage.getItem(CMD_HISTORY_KEY) || "[]");
-    } catch (e) {
-      return [];
-    }
+    const store = window._browseSsStore;
+    return store ? store.get(CMD_HISTORY_KEY) || [] : [];
   }
 
   function recordCommandUse(command) {
+    const store = window._browseSsStore;
+    if (!store) return;
     const history = getCommandHistory().filter((c) => c !== command);
     history.unshift(command);
-    try {
-      localStorage.setItem(CMD_HISTORY_KEY, JSON.stringify(history.slice(0, CMD_HISTORY_MAX)));
-    } catch (e) {}
+    store.set(CMD_HISTORY_KEY, history.slice(0, CMD_HISTORY_MAX));
   }
 
   // Builds the palette's entries (plain data, JSON-clonable - prompt.commands'
@@ -1816,6 +1824,9 @@
     }
     await loadNewAce(ssExt.libPath);
     applySnippets(ssExt.userSnippets);
+    // Ensure the command-history cache is loaded from chrome.storage before
+    // buildPaletteEntries reads it (first palette open on a fresh page).
+    if (window._browseSsStore) await window._browseSsStore.ready(CMD_HISTORY_KEY);
 
     openCommandPalette(focusedEditor);
   }

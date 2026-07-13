@@ -33,12 +33,68 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
     const PLACEHOLDER_TEXT = 'Enter a path to browse';
     const MAX_HISTORY = 50;
 
+    // --- Persistent store (chrome.storage via relay.js) ---------------------
+    // History/bookmarks persist in chrome.storage.local (extension-scoped -
+    // survives "clear site data"/clearing the page cache) instead of the page's
+    // localStorage. MAIN-world code can't call chrome.storage, so reads/writes
+    // relay through window.postMessage <-> relay.js. An in-memory cache keeps
+    // reads synchronous once a key has been loaded; updateCompletions awaits
+    // ready() before touching the cache so the first render has the persisted
+    // data. State lives on window._browseSsStore so the _reloadBrowseSs() dev
+    // helper (which re-runs this factory) reuses the same cache + listener
+    // instead of orphaning the first one's closure.
+    if (!window._browseSsStore) {
+        /** @type {Record<string, any[]>} */
+        const store = Object.create(null);
+        /** @type {Record<string, Function[]>} */
+        const waiters = Object.create(null);
+        window._browseSsStore = {
+            get: (/** @type {string} */ k) => store[k],
+            set: (/** @type {string} */ k, /** @type {any[]} */ v) => {
+                store[k] = v;
+                window.postMessage({ __ssextBrowseSet: { [k]: v } }, "*");
+            },
+            ready: (/** @type {string} */ k) =>
+                k in store ? Promise.resolve() : new Promise((res) => {
+                    (waiters[k] ||= []).push(res);
+                    window.postMessage({ __ssextBrowseGet: [k] }, "*");
+                }),
+        };
+        window.addEventListener("message", (event) => {
+            if (event.source !== window || !event.data || !event.data.__ssextBrowseData) return;
+            const obj = event.data.__ssextBrowseData;
+            for (const k of Object.keys(obj)) {
+                let v = obj[k];
+                // A set() that landed while this get() was in flight already put
+                // the fresh value in the cache - don't clobber it with a stale reply.
+                if (!(k in store)) {
+                    if (v == null) {
+                        // One-time migration: chrome.storage empty but the page still
+                        // has old (un-namespaced) localStorage data -> adopt and persist it.
+                        const lsKey = k.startsWith('browseSs:') ? k.split(':').slice(2).join(':') : k;
+                        const ls = localStorage.getItem(lsKey);
+                        try {
+                            v = ls ? JSON.parse(ls) : [];
+                        } catch (e) {
+                            v = [];
+                        }
+                        if (ls) window.postMessage({ __ssextBrowseSet: { [k]: v } }, "*");
+                    }
+                    store[k] = v || [];
+                }
+                const cbs = waiters[k];
+                delete waiters[k];
+                if (cbs) cbs.forEach((cb) => cb());
+            }
+        });
+    }
+
     /**
      * @typedef  PromptOptions
      * @property {String=} startPath                  Starting path, default to DEFAULT_PATH
      * @property {String=} placeholder                Placeholder text, default to PLACEHOLDER_TEXT
      * @property {Number=} maxHistory                 Maximum number of history entries, default to MAX_HISTORY
-     * @property {String=} historyKey                 Key to store history items in localStorage, disable history if blank or null
+     * @property {String=} historyKey                 Key to store history items in chrome.storage (relayed), disable history if blank or null
      * @property {(item: DataItem, ...options: any[]) => void} openItem  Function to open the selected item
      * @property {(itemPath: String) => Promise<Partial<DataItem>>} queryItemPath Function to query item path for DataItem
      * @property {Function} scrollTreeToItem          Function to scroll the tree to the selected item
@@ -49,6 +105,11 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
      * @param {PromptOptions} options  Cusomizable options for this prompt.
      * */
     function browse_ss(options) {
+        // chrome.storage is extension-global (unlike the old per-origin
+        // localStorage), so namespace by host to keep different SAS servers'
+        // history/bookmarks from clobbering each other.
+        const historyKey = options.historyKey ? `browseSs:${location.host}:${options.historyKey}` : null;
+
         // If there is already existing browse_ss instance
         if (openPrompt) {
             window._browseSsDebugLog('browse_ss: already open');
@@ -84,7 +145,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // the saved history/bookmarks view (see updateCompletions) appears.
         const hint = dom.buildDom(["div", { class: "ace_browse_ss_hint" },
             "Enter open · Ctrl+Enter as text · Shift+Enter reveal · Tab fill · " +
-            "Shift+Space parent · " + (options.historyKey ? "Ctrl+B bookmark · " : "") +
+            "Shift+Space parent · " + (historyKey ? "Ctrl+B bookmark · " : "") +
             "Alt+C / Alt+Ctrl+C copy name / path · Esc back · Shift+Esc close"]);
         hint.hidden = true;
         el.appendChild(hint);
@@ -92,6 +153,14 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // Initialize data model
         let dataLoading = true;
         let curCollectionPromise = getDataItem(options.startPath ?? DEFAULT_PATH);
+
+        // History/bookmarks live in chrome.storage (relayed); ensure the cache
+        // is loaded before updateCompletions reads it. browse_tabs has no
+        // historyKey, so this is a no-op there.
+        const bookmarkKey = historyKey ? historyKey + 'Bookmarks' : null;
+        const storeReady = historyKey
+            ? Promise.all([window._browseSsStore.ready(historyKey), window._browseSsStore.ready(bookmarkKey)])
+            : Promise.resolve();
 
         // Initialize completions popup
         const popup = new AcePopup();
@@ -299,14 +368,14 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         /**
          * Get history list @returns {Partial<DataItem>[]} */
         function getHistory() {
-            if (!options.historyKey) return [];
-            return JSON.parse(localStorage.getItem(options.historyKey) ?? '[]');
+            if (!historyKey) return [];
+            return window._browseSsStore.get(historyKey) || [];
         }
 
         /**
          * Add new item to history @param {DataItem} item data item to add to history */
         function addToHistory(item) {
-            if (!options.historyKey) return;
+            if (!historyKey) return;
             const history = getHistory();
             const filteredHistory = history.filter(
                 data => data.value !== item.uri && data.value !== item.value
@@ -316,16 +385,14 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 meta: item.meta,
                 prefix: item.prefix,
             });
-            localStorage.setItem(options.historyKey, JSON.stringify(filteredHistory.slice(0, options.maxHistory ?? MAX_HISTORY)));
+            window._browseSsStore.set(historyKey, filteredHistory.slice(0, options.maxHistory ?? MAX_HISTORY));
         }
-
-        const bookmarkKey = options.historyKey ? options.historyKey + 'Bookmarks' : null;
 
         /**
          * Get bookmark list @returns {Partial<DataItem>[]} */
         function getBookmarks() {
             if (!bookmarkKey) return [];
-            return JSON.parse(localStorage.getItem(bookmarkKey) ?? '[]');
+            return window._browseSsStore.get(bookmarkKey) || [];
         }
 
         /**
@@ -337,7 +404,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             const remaining = bookmarks.filter(b => b.value !== uri);
             if (remaining.length === bookmarks.length)
                 remaining.unshift({ value: uri, meta: item.meta, prefix: item.prefix });
-            localStorage.setItem(bookmarkKey, JSON.stringify(remaining));
+            window._browseSsStore.set(bookmarkKey, remaining);
             // Capture the row synchronously (before setData resets selection to 0)
             // so toggling a bookmark doesn't jump the list back to the top.
             updateCompletions(popup.getRow());
@@ -364,7 +431,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
          * @returns {Partial<DataItem>[]}
          */
         function savedCompletions(filterText) {
-            if (!options.historyKey) return [];
+            if (!historyKey) return [];
             const bookmarks = getBookmarks().map(b => Object.assign(b, { message: '⭐ Bookmark' }));
             const history = getHistory().filter(h => !bookmarks.some(b => b.value === h.value))
                 .map(h => Object.assign(h, { message: 'Recent' }));
@@ -394,16 +461,16 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             // already occupying the description area.
             hint.hidden = cmdLineValue !== '' || !promptTextContainer.hidden;
 
-            curCollectionPromise.then(curCollection => {
+            Promise.all([curCollectionPromise, storeReady]).then(([curCollection]) => {
                 const curDirPath = Utils.getCurCollPath(cmdLineValue);
 
-                if (cmdLineValue === '' && options.historyKey) {
+                if (cmdLineValue === '' && historyKey) {
                     // Nothing typed: show saved bookmarks/recents only (empty if none).
                     popup.setData(savedCompletions(''), '');
                 }
                 // Get completions using curDirItem if loaded
                 // Also get completions in case history is not saved (with SsTabs)
-                else if (curDirPath === Utils.normalizeItemPath(curCollection.uri ?? '') || !options.historyKey) {
+                else if (curDirPath === Utils.normalizeItemPath(curCollection.uri ?? '') || !historyKey) {
                     // Get the input value to update completions
                     // Only use the last component of the path for completions
                     const filterText = cmdLineValue.split('/').at(-1);
@@ -417,7 +484,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
                         },
                     ];
                     // Inline ⭐ marker on listed items that are bookmarked.
-                    if (options.historyKey) {
+                    if (historyKey) {
                         const marked = new Set(getBookmarks().map(b => b.value));
                         completions.forEach(child => {
                             if (child.uri && marked.has(Utils.normalizeItemPath(child.uri))) child.message = '⭐';
