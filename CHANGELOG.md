@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9
+
+- Vim `:x` on a visual selection now submits only the selection: vim collapses
+  the Ace selection before the ex handler runs, so the handler re-selects
+  `params.line`/`lineEnd` before invoking `runCurrentProgram`.
+- browse_ss caption rows use `white-space: pre` instead of `nowrap`, which was
+  collapsing the trailing space after the item icon.
+
 ## 0.8
 
 - Browse_ss/command palette history moves from page `localStorage` to
