@@ -2,7 +2,7 @@
 # Deterministic halves of the release flow. Run from the repo root.
 #
 #   release.sh prepare [version]   validate + print the version to release
-#   release.sh finish  <version>   bump manifest, commit, tag, package
+#   release.sh finish  <version>   bump manifest, commit, tag
 #
 # The changelog is written by hand between the two.
 set -e
@@ -34,8 +34,6 @@ finish)
   git diff --cached --quiet && fail "nothing staged - did the changelog get updated?"
   git commit -qm "chore: release $version"
   git tag "v$version"
-  rm -rf dist
-  ./package.sh
   ;;
 *)
   fail "usage: release.sh prepare [version] | release.sh finish <version>"

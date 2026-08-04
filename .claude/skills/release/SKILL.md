@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a new release of the sas-studio-ext extension - bump the version, write and verify the changelog, commit, tag, and build the dist zip. Use when the user asks to "release", "cut a release", "make a new version", "bump the version", or runs /release (optionally with a version number like 1.0).
+description: Cut a new release of the sas-studio-ext extension - bump the version, write and verify the changelog, commit, and tag. Use when the user asks to "release", "cut a release", "make a new version", "bump the version", or runs /release (optionally with a version number like 1.0).
 ---
 
 # Release
@@ -24,13 +24,11 @@ the highest `v*` git tag (`v0.9` -> `0.10`).
    Purely internal churn (docs, test tweaks, refactors with no behaviour change)
    is deliberately omitted. Report what you left out.
 4. **Finish** — `scripts/release.sh finish <version>`: bumps `manifest.json`,
-   commits `chore: release <version>` (manifest + changelog only), tags
-   `v<version>`, wipes `dist/` and runs `./package.sh`. Report the zip path and
-   size from its output. Does not push.
+   commits `chore: release <version>` (manifest + changelog only) and tags
+   `v<version>`. Does not package, does not push.
 
 ## Notes
 
 - Versions are two-part (`0.9`), tags are `v`-prefixed. Keep both.
-- `package.sh` rebuilds the gitignored `lib/` if incomplete — that can take a
-  while (it clones and webpacks the SAS LSP); let it run.
+- Building the zip is not part of this skill; run `./package.sh` separately.
 - Pushing is never part of this skill; the user pushes when they want to.
