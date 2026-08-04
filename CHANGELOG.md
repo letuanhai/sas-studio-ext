@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.10
+
+- The `keepFocusAfterSave` patch is replaced by `noTreeFocusSteal` (settings
+  label "Stop the file/libraries trees stealing focus"). The old patch only
+  covered saves and raced the tree reload's timing; the new one wraps
+  `dijit.Tree.prototype.focusNode` so it keeps its selection/tabIndex
+  bookkeeping but skips the DOM focus whenever focus currently lives outside
+  that tree. Trees still take focus when you click or arrow-key into them, or
+  when an open dijit dialog places focus. Covers reloads after a run and after
+  any file operation, not just saves.
+- The vim normal-mode block cursor no longer disappears on some themes. Its
+  `.normal-mode .ace_cursor` rule is a two-class selector, so a theme sheet
+  loaded later at the same specificity wins — `theme-github_light_default`
+  sets `background: none`, `theme-ambiance` drops the cursor layer behind the
+  marker layer. Both are now overridden from our own sheet.
+- Stylesheets injected by SAS Studio's own bundled (1.x) ace are dropped
+  before the new ace loads. SAS uses that ace only as a tokenizer and
+  references no `.ace_*` class, but ace's `importCssString` dedupes by
+  `<style>` id, so any id SAS registered first silently discarded our version
+  of it.
+- New "Toggle maximized view" action (unbound by default — SAS Studio's own
+  Alt+F11 already does it), available from the command palette and bindable
+  like any other action.
+- The options page now flags hotkeys bound to more than one action in red.
+  Two actions on the same key silently race; saving is still allowed.
+
 ## 0.9
 
 - Vim `:x` on a visual selection now submits only the selection: vim collapses
