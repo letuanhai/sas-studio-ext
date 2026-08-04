@@ -58,6 +58,21 @@
     const { hotkeys } = await chrome.storage.local.get("hotkeys");
     const saved = hotkeys || {};
     const tbody = document.getElementById("hotkeys-list");
+    const cells = [];
+
+    // Warn (don't block) when two actions share a hotkey - which one wins is
+    // whatever ss-fixes.js binds last.
+    function flagDuplicates() {
+      const counts = {};
+      cells.forEach((c) => {
+        if (c.textContent !== "(unbound)") counts[c.textContent] = (counts[c.textContent] || 0) + 1;
+      });
+      cells.forEach((c) => {
+        const dup = counts[c.textContent] > 1;
+        c.classList.toggle("duplicate", dup);
+        c.title = dup ? "Duplicate: another action uses this hotkey" : "";
+      });
+    }
 
     window.SSF_TOOLS.filter((t) => t.kind === "action").forEach((tool) => {
       const current = Object.prototype.hasOwnProperty.call(saved, tool.name) ? saved[tool.name] : tool.hotkey;
@@ -73,6 +88,7 @@
       hotkeyCell.className = "hotkey-value";
       hotkeyCell.textContent = hotkeyLabel(current);
       row.appendChild(hotkeyCell);
+      cells.push(hotkeyCell);
 
       const actionsCell = document.createElement("td");
 
@@ -94,6 +110,7 @@
         updated[tool.name] = keymap;
         await chrome.storage.local.set({ hotkeys: updated });
         hotkeyCell.textContent = hotkeyLabel(keymap);
+        flagDuplicates();
       }
 
       clearBtn.addEventListener("click", () => saveHotkey(null));
@@ -121,6 +138,8 @@
         window.addEventListener("keydown", onKeydown, true);
       });
     });
+
+    flagDuplicates();
   }
 
   // -- Editor config (theme pair + keyboard handler + snippet editor) ---------------
