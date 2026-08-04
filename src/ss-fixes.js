@@ -1471,97 +1471,39 @@ Add a prefix to the path for different option:
       };
     },
 
-    keepFocusAfterSave: function () {
-      // After a regular save, DMSEditor.successfulSave fires
-      // appDMS.projects.onRefresh(), which destroys and recreates the file
-      // tree; the recreated tree then steals focus from the editor
-      // (createProjectsTree's onLoadDeferred.then -> tree.focusNode, or
-      // selectTreeNodeByIdNew -> focusNode). SAS Studio's own solution re-
-      // focused the editor in successfulSave's onRefresh().then but was
-      // commented out for SASSTUDIO-13593 because it called setInitialFocus,
-      // which also jumps the cursor to line 1. We re-focus only (no gotoLine)
-      // so the cursor stays and the tree doesn't keep focus. The flag is gated
-      // on the exact same condition successfulSave uses to decide to refresh
-      // (!endsWith(targetURI,"~") && typeof autoSave === "undefined"), so
-      // autosave (targetURI ends "~", never reaches onRefresh) and SaveAs
-      // (autoSave === false) never leave a stale flag for an unrelated later
-      // refresh (new folder, rename, delete ...). Works for both the stock
-      // editor and the AceEditorAdapter - both implement .focus().
-      let installed = false;
-      function ensureInstalled() {
-        if (installed) return;
-        let DMSEditor = null;
-        (window.appDMS.tabs.getAllTabObjects() || []).some((t) => {
-          if (t.editor && typeof t.editor.successfulSave === "function") {
-            DMSEditor = t.editor.constructor;
-            return true;
-          }
-          return false;
-        });
-        if (!DMSEditor) return; // no code tab yet - retry on first _newTab
-        installed = true;
-
-        const o_successfulSave = DMSEditor.prototype.successfulSave;
-        DMSEditor.prototype.successfulSave = function (targetURI, autoSave, cleanupAutoSaveURL) {
-          try {
-            const endsTilde = !!(targetURI && String(targetURI).endsWith("~"));
-            if (!endsTilde && typeof autoSave === "undefined") {
-              window.__ssfSaveFocusEditor = this.editor;
-            }
-          } catch (e) {
-            /* never break save over the focus flag */
-          }
-          return o_successfulSave.apply(this, arguments);
-        };
-
-        // projects.onRefresh persists across tree reloads (only this.tree is
-        // destroyed/recreated, never the projects widget), so one wrap lasts.
-        const projects = window.appDMS.projects;
-        const o_onRefresh = projects.onRefresh;
-        projects.onRefresh = function (...args) {
-          const p = o_onRefresh.apply(this, args);
-          const ed = window.__ssfSaveFocusEditor;
-          window.__ssfSaveFocusEditor = null; // consume even if we end up skipping
-          if (ed && p && typeof p.then === "function") {
-            // Refocus on onRefresh's promise (~1s after the call, by which
-            // point the recreated tree's onLoadDeferred -> set("path").then(
-            // focusNode) steal has fired). Mirrors the SAS Studio's own
-            // SASSTUDIO-13593 fix that was commented out (which used .then +
-            // 100ms), minus its gotoLine jump.
-            // ponytail: fix the timeline by wrapping createProjectsTree's
-            // set("path").then(focusNode) instead. Ceiling: a workspace
-            // listing slow enough to load past the 1s onRefresh resolve leaves
-            // the steal unbeaten; reload-interval uncommon enough to ignore.
-            p.then(() => {
-              setTimeout(() => {
-                try {
-                  // Don't yank focus from an SS-Ext prompt (command palette /
-                  // browse_ss) the user may have opened after save.
-                  if (document.querySelector(".ace_prompt_container, .ace_browse_ss_container")) return;
-                  ed.focus && ed.focus();
-                } catch (e) {
-                  console.error("[SS Ext] keepFocusAfterSave: refocus failed:", e);
-                }
-              }, 0);
-            });
-          }
-          return p;
-        };
-      }
-
-      ensureInstalled();
-      // Uncommon: no code tab at init. Install once the first one is created.
-      // Composes with middleClickCloseTab's own _newTab wrap (each delegates).
-      const tabs = window.appDMS.tabs;
-      const o_newTab = tabs._newTab;
-      tabs._newTab = function (...args) {
-        const r = o_newTab.apply(this, args);
+    noTreeFocusSteal: function () {
+      // Every file operation (save, run, new/rename/delete, ...) reloads the
+      // file and libraries trees, and the reloaded tree calls
+      // dijit.Tree.focusNode(node) on the node it re-selects (DMSProjects'
+      // createProjectsTree / selectTreeNodeByIdNew, DMSLibraries' equivalents),
+      // yanking focus out of wherever you were - possibly seconds later, since
+      // the reload waits on the server.
+      //
+      // Rather than chasing the steal after the fact, suppress it at the
+      // source: focusNode still does its selection/tabIndex bookkeeping (so
+      // keyboard nav works once you do tab into the tree) but skips the actual
+      // DOM focus whenever focus currently lives outside that tree. Focus moves
+      // to a tree only when you're already in it (click, arrow keys) or when
+      // the call comes from an open dijit dialog (Save As destination tree,
+      // table pickers), which does need to place focus for you.
+      const o_focusNode = window.dijit.Tree.prototype.focusNode;
+      window.dijit.Tree.prototype.focusNode = function (node) {
+        const active = document.activeElement;
+        const allowed =
+          !active ||
+          active === document.body ||
+          (this.domNode && this.domNode.contains(active)) ||
+          !!(active.closest && active.closest(".dijitDialog"));
+        if (allowed || !node) return o_focusNode.apply(this, arguments);
+        const hadOwn = Object.prototype.hasOwnProperty.call(node, "focus");
+        const o_focus = node.focus;
+        node.focus = function () {};
         try {
-          ensureInstalled();
-        } catch (e) {
-          /* ignore */
+          return o_focusNode.apply(this, arguments);
+        } finally {
+          if (hadOwn) node.focus = o_focus;
+          else delete node.focus;
         }
-        return r;
       };
     },
   };

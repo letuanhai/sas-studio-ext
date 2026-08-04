@@ -256,10 +256,10 @@ Add a prefix to the path for different option:
       title: "Minimize the run-progress dialog to the bottom-right corner so the app stays usable while a program runs (one foreground run at a time; opening files as text is blocked during a run). Uncheck to leave SAS Studio's dialog untouched.",
     },
     {
-      name: "keepFocusAfterSave",
+      name: "noTreeFocusSteal",
       kind: "patch",
-      label: "Keep focus in editor after save",
-      title: "After saving a code file, SAS Studio reloads the file tree, which steals focus from the editor. This re-focuses the editor (without moving the cursor) once the tree finishes reloading.",
+      label: "Stop the file/libraries trees stealing focus",
+      title: "Reloading the file or libraries tree (after a save, a run, or any file operation) moves keyboard focus into the tree, often seconds later. This keeps focus where it is; the tree still takes focus when you click or arrow-key into it, or when a dialog needs it.",
     },
   ];
 })();

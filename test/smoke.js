@@ -625,7 +625,7 @@ function check(name, ok, detail) {
     await page.waitForTimeout(300);
   }
 
-  // -- keepFocusAfterSave: editor keeps focus across the post-save tree reload ----
+  // -- noTreeFocusSteal: editor keeps focus across the post-save tree reload ----
   // Reuses an already-open, real (non-virgin) Ace code tab; a virgin "Program N"
   // tab would route saveFile() through the Save As dialog and isn't a valid
   // subject. Saving posts the unchanged text back (a no-op write), so it's safe
@@ -669,7 +669,7 @@ function check(name, ok, detail) {
     };
   });
   if (saveFocus.skipped) {
-    check("keepFocusAfterSave (skipped: no non-virgin Ace code tab open)", false, saveFocus);
+    check("noTreeFocusSteal (skipped: no non-virgin Ace code tab open)", false, saveFocus);
   } else {
     check("editor stays focused after save (focus not stolen by the tree reload)", saveFocus.focusedAfter, saveFocus);
     check("focus return doesn't jump the cursor to line 1", saveFocus.cursorUnchanged, saveFocus);
