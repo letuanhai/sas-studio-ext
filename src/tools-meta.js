@@ -99,6 +99,13 @@ Add a prefix to the path for different option:
       hotkey: { key: "L", altKey: true },
     },
     {
+      name: "toggleMaxView",
+      kind: "action",
+      label: "Toggle maximized view",
+      title: "Maximize / restore the editor view (same as SAS Studio's own Alt+F11)",
+      hotkey: null,
+    },
+    {
       name: "selectNextTab",
       kind: "action",
       label: "Next tab",

@@ -865,6 +865,9 @@ Add a prefix to the path for different option:
         logURL ? window.open(logURL, "_blank") : alert("No logURL to open!");
       },
     },
+    // onMaxView() decides from the accordion's display, so it stays in sync with
+    // SAS Studio's own Alt+F11 / menu entry.
+    toggleMaxView: { fn: () => window.appDMS.onMaxView() },
     selectNextTab: { fn: () => selectNextTab() },
     selectPreviousTab: { fn: () => selectNextTab(-1) },
     copyCurrentTabUri: {
