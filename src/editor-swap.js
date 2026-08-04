@@ -1279,7 +1279,16 @@
       });
       Vim.defineEx("quit", "q", (cm) => vimClose(resolveAceContext(cm.ace)));
       Vim.defineEx("wq", "wq", saveAndClose);
-      Vim.defineEx("xit", "x", () => {
+      Vim.defineEx("xit", "x", (cm, params) => {
+        // Vim exits visual mode (collapsing the Ace selection) before the ex
+        // handler runs, but keeps the range as params.line/lineEnd - re-select it
+        // so runCurrentProgram submits the selection instead of the whole file.
+        if (params && params.line !== undefined && cm.ace) {
+          const end = params.lineEnd !== undefined ? params.lineEnd : params.line;
+          const sel = cm.ace.selection;
+          sel.moveTo(params.line, 0);
+          sel.selectTo(end, cm.ace.session.getLine(end).length);
+        }
         if (window.__ssf && window.__ssf.run) window.__ssf.run("runCurrentProgram");
       });
 

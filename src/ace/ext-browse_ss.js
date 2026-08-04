@@ -607,7 +607,9 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         }
         .ace_browse_ss_container .ace_autocomplete .ace_line .ace_browse_ss_caption-inner {
         display: inline-flex;
-        white-space: nowrap;
+        /* pre, not nowrap: nowrap collapses the trailing space of the icon span
+        (ace's text layer sets pre, which we'd otherwise override here). */
+        white-space: pre;
         will-change: transform;
         }`,
         "browse_ss.css",
