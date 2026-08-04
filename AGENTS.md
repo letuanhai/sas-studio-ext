@@ -53,3 +53,35 @@ Vimrc: `aceConfig.vimrc` is a small subset of vim config lines (`map`/`nmap`/`im
 ## Development
 
 No build step for the extension's own code, no Tampermonkey needed anymore; `./build_lib.sh` generates the gitignored `lib/` (run once after cloning, and after bumping a version variable at its top). Smoke test: `node test/smoke.js` — launches headless Chromium with the unpacked extension against the live instance and exercises injection, middle-click close (raw CDP input — catches event-suppression bugs synthetic dispatch can't), reopen, the native-mouse toggle, Ace activation/deactivation, the text viewer (mirroring/dirty/save/vim), the command palette (focused/unfocused/global hotkey), and the aceConfig flow (seeding, live apply, settings-menu persistence via relay.js, vimrc); see the file header for `SS_URL`/`CHROME_BIN` env vars and the playwright requirement. **Run it single-threaded** — the live instance is rate-limited (see top of file), so never launch two runs at once. Concrete recipe when `playwright` isn't a normal dependency here (it usually isn't — it's pulled via `npx`): point `NODE_PATH` at a cached npx playwright and `CHROME_BIN` at the matching cached Chromium, e.g. `NODE_PATH=~/.npm/_npx/<hash>/node_modules CHROME_BIN=~/.cache/ms-playwright/chromium-<build>/chrome-linux64/chrome node test/smoke.js` (find the two paths with `ls ~/.npm/_npx/*/node_modules/playwright` and `find ~/.cache/ms-playwright -name chrome -path '*chrome-linux64*'`; the file header explains the version-match caveat and why a real `google-chrome` won't load the extension headless). Ad-hoc one-off checks (a throwaway playwright script under a scratch dir) run the same way — one at a time. To test changes manually: `chrome://extensions/` → reload the unpacked extension (loaded from the repo root) → refresh the SAS Studio page → toggle with `Ctrl+.` (or the popup's toggle button). To build the publishable zip: `./package.sh` → `dist/sas-studio-ext-<version>.zip` (dist/ is gitignored; it packs `manifest.json src assets lib` — rebuilding `lib/` first if incomplete — so a new runtime file belongs in one of those). All extension logs are prefixed `[SS Ext]`; expect one line per toggle (`activated`/`deactivated ... N tab(s) ...`) plus errors/warnings only.
+
+## Commit convention
+
+Follow the EU Component Library convention
+(https://ec.europa.eu/component-library/v1.15.0/eu/docs/conventions/git/):
+
+```
+<type>: <subject>
+
+<body>
+
+<footer>
+```
+
+No scope — type only. Header mandatory, lines <= 100 chars. Subject in imperative
+present tense, no leading capital, no trailing period; body same style,
+explaining motivation and contrast with previous behaviour. `BREAKING CHANGE:`
+and closed-issue links go in the footer. A revert is `revert: <original header>`
+with `This reverts commit <hash>.` in the body.
+
+Types:
+
+- `feat` — a new feature
+- `fix` — a bug fix
+- `docs` — documentation only
+- `style` — formatting/whitespace, no code-meaning change
+- `refactor` — neither fixes a bug nor adds a feature
+- `perf` — performance improvement
+- `test` — adding missing tests
+- `chore` — build process or auxiliary tool changes
+
+Do not append session/trailer links to commit messages.
