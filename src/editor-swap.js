@@ -595,6 +595,23 @@
     });
   }
 
+  // SAS Studio loads its own (1.x) ace purely as a tokenizer - SyntaxColorerAdapter.js
+  // imports it for EditSession and nothing else; the stock editor's DOM is
+  // EditorView.js's own markup and no SAS file references an .ace_* class. So its
+  // stylesheets do nothing for SAS and only interfere with us, two ways:
+  //   1. importCssString dedupes by <style> id, so every id SAS registered first
+  //      (ace_editor.css, ace-tm, vimMode, ...) silently DROPS our version and the
+  //      new editor ends up styled by the old build's css;
+  //   2. the new ace inserts its styles at the top of <head>, leaving SAS's later in
+  //      the document, where they win every equal-specificity tie.
+  // Drop them all before the new build loads: their ids are then free for our own
+  // sheets, and if SAS's ace loads afterwards its imports are the ones deduped away.
+  function dropOldAceStyles() {
+    document.querySelectorAll("style[id]").forEach((el) => {
+      if (/^ace[-_]/.test(el.id) || el.id === "vimMode") el.remove();
+    });
+  }
+
   async function loadNewAce(libPath) {
     ssExt.libPath = libPath;
     if (ssExt.newAceLoaded) return;
@@ -605,6 +622,7 @@
     // (see src/ace-patches.js's header comment for the rest of this split).
     const srcAcePath = libPath.replace(/\/lib\/ace\/src-noconflict$/, "/src/ace");
 
+    dropOldAceStyles();
     await loadScript(`${libPath}/ace.js`);
     if (window.ace && window.ace.config) {
       window.ace.config.set("basePath", libPath);
@@ -657,6 +675,20 @@
     // lazy config.loadModule("ace/ext/settings_menu", ...) in the showSettingsMenu
     // command is a no-op (module id already registered), not a second HTTP load.
     await loadScript(`${libPath}/ext-settings_menu.js`);
+
+    // Some themes style .ace_cursor at the same (or higher) specificity as
+    // keybinding-vim's ".normal-mode .ace_cursor{border:none;background:...}",
+    // and their sheet loads later - github_light_default's "background: none"
+    // wipes the vim block cursor out entirely (invisible in normal mode, fine in
+    // insert mode and while unfocused, where the 3-class .ace_hidden-cursors rule
+    // still wins). ambiance's ".ace-ambiance.normal-mode .ace_cursor-layer{z-index:0}"
+    // hides it the same way, behind the marker layer.
+    window.ace.require("ace/lib/dom").importCssString(
+      ".normal-mode .ace_cursor{background-color:rgba(255,0,0,0.5)!important}" +
+        ".normal-mode .ace_hidden-cursors .ace_cursor{background-color:transparent!important}" +
+        ".normal-mode .ace_cursor-layer{z-index:4!important}",
+      "ssExtVimCursorFix",
+    );
 
     ssExt.newLib = { ace: window.ace };
     ssExt.newAceLoaded = true;
