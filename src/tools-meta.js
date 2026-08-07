@@ -261,5 +261,72 @@ Add a prefix to the path for different option:
       label: "Stop the file/libraries trees stealing focus",
       title: "Reloading the file or libraries tree (after a save, a run, or any file operation) moves keyboard focus into the tree, often seconds later. This keeps focus where it is; the tree still takes focus when you click or arrow-key into it, or when a dialog needs it.",
     },
+    {
+      name: "aceEditorOnLoad",
+      kind: "patch",
+      defaultOff: true,
+      label: "Activate Ace editor replacement at SAS Studio startup",
+      title: "Activate the Ace editor replacement automatically when a SAS Studio page loads (you can still toggle to the original code editor with the hotkey or the popup)",
+    },
   ];
+
+  // Patches default to enabled; `defaultOff: true` ones default to disabled.
+  // Used by ss-fixes.js's init() and the options page's checkbox list.
+  window.ssfPatchEnabled = function (tool, fixes) {
+    const saved = (fixes || {})[tool.name];
+    return typeof saved === "boolean" ? saved : !tool.defaultOff;
+  };
+
+  // Physical key per event.code for a US layout - the fallback for when the real
+  // layout map isn't known (see ssfKeyLayout below). Letters/digits come out of
+  // the code name itself; only the punctuation keys need a table.
+  const US_LAYOUT = {
+    Backquote: "`",
+    Minus: "-",
+    Equal: "=",
+    BracketLeft: "[",
+    BracketRight: "]",
+    Backslash: "\\",
+    Semicolon: ";",
+    Quote: "'",
+    Comma: ",",
+    Period: ".",
+    Slash: "/",
+    Space: " ",
+  };
+
+  // Real code -> key map for the user's keyboard layout, resolved from
+  // navigator.keyboard.getLayoutMap(). That API is secure-context only, so it's
+  // unavailable on a plain-http SAS Studio page: the options page resolves it
+  // (see ssfLoadKeyLayout) and sw.js seeds the result into __ssf.init(), which
+  // fills this in. Empty -> US_LAYOUT is used.
+  window.ssfKeyLayout = {};
+
+  // Resolve the layout map on an extension page (options/popup) and persist it
+  // so sw.js can hand it to the in-page code. Returns the map (possibly empty).
+  window.ssfLoadKeyLayout = async function () {
+    try {
+      if (!navigator.keyboard || !navigator.keyboard.getLayoutMap) return window.ssfKeyLayout;
+      const map = await navigator.keyboard.getLayoutMap();
+      map.forEach((key, code) => {
+        window.ssfKeyLayout[code] = key;
+      });
+      await chrome.storage.local.set({ keyLayout: window.ssfKeyLayout });
+    } catch (e) {
+      console.warn("[SS Ext] keyboard layout map unavailable:", e);
+    }
+    return window.ssfKeyLayout;
+  };
+
+  // macOS turns Option+<key> into a composed character or "Dead" ("Alt+Dead"
+  // instead of "Alt+n", and nothing matches), so for Alt hotkeys resolve the
+  // physical key from event.code instead: the real layout map when known, the
+  // US table otherwise. Lower-cased for display; hotkey matching is
+  // case-insensitive, so the uppercase SSF_TOOLS defaults still match.
+  window.ssfEventKey = function (event) {
+    if (!event.altKey) return event.key;
+    const code = event.code || "";
+    const m = /^(?:Key|Digit)(.)$/.exec(code);
+    return window.ssfKeyLayout[code] || US_LAYOUT[code] || (m ? m[1].toLowerCase() : event.key);
+  };
 })();

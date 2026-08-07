@@ -10,10 +10,11 @@
  *   appears. Guarded against double-call.
  * - `run(name)` invokes a single named action on demand (used by the popup).
  *
- * `settings = { fixes: {name: bool}, hotkeys: {name: keymap|null} }` - missing
- * entries default to enabled / the metadata default hotkey (from tools-meta.js's
- * SSF_TOOLS, which must be loaded first). `hotkeys[name] === null` means
- * explicitly unbound.
+ * `settings = { fixes: {name: bool}, hotkeys: {name: keymap|null}, keyLayout }` -
+ * missing entries default to enabled (unless the SSF_TOOLS entry is `defaultOff`)
+ * / the metadata default hotkey (from tools-meta.js's SSF_TOOLS, which must be
+ * loaded first). `hotkeys[name] === null` means explicitly unbound. `keyLayout`
+ * is the code->key map the options page captured for Alt-hotkey matching.
  *
  * /// <reference path="typedefs.js" />
  */
@@ -61,7 +62,7 @@
         // Case-insensitive key compare - fixes a latent bug where e.g. {key:'O'}
         // never matched the event's lowercase 'o'.
         if (
-          String(event.key).toLowerCase() !== String(keyMap.key).toLowerCase() ||
+          String(window.ssfEventKey(event)).toLowerCase() !== String(keyMap.key).toLowerCase() ||
           Boolean(keyMap.altKey) !== event.altKey ||
           Boolean(keyMap.ctrlKey) !== event.ctrlKey ||
           Boolean(keyMap.metaKey) !== event.metaKey ||
@@ -1506,6 +1507,12 @@ Add a prefix to the path for different option:
         }
       };
     },
+
+    aceEditorOnLoad: function () {
+      // Off by default (SSF_TOOLS' defaultOff). sw.js seeds ssExt.libPath before
+      // calling init(), so the same call the toggleEditor action makes works here.
+      ACTIONS.toggleEditor.fn();
+    },
   };
 
   // ==========================================================================
@@ -1524,10 +1531,14 @@ Add a prefix to the path for different option:
     settings = settings || {};
     const fixes = settings.fixes || {};
     const hotkeys = settings.hotkeys || {};
+    // Keyboard layout captured by the options page (tools-meta.js) - this page
+    // can't resolve it itself (getLayoutMap is secure-context only).
+    Object.assign(window.ssfKeyLayout, settings.keyLayout || {});
 
     waitForElm(".dijitTreeNode").then(() => {
       Object.keys(PATCHES).forEach((name) => {
-        if (fixes[name] === false) return; // default: enabled
+        const meta = (window.SSF_TOOLS || []).find((t) => t.name === name) || { name };
+        if (!window.ssfPatchEnabled(meta, fixes)) return;
         try {
           PATCHES[name]();
         } catch (e) {

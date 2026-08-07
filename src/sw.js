@@ -72,25 +72,22 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!tab.url || !SASSTUDIO_URL_PATTERN.test(tab.url)) return;
 
   try {
-    const { fixes, hotkeys } = await chrome.storage.local.get(["fixes", "hotkeys"]);
-    const settings = { fixes: fixes || {}, hotkeys: hotkeys || {} };
+    // keyLayout: the navigator.keyboard.getLayoutMap() result captured by the
+    // options page - that API is secure-context only, so the (http) SAS Studio
+    // page can't resolve it itself. Absent -> ss-fixes falls back to US layout.
+    const { fixes, hotkeys, keyLayout } = await chrome.storage.local.get(["fixes", "hotkeys", "keyLayout"]);
+    const settings = { fixes: fixes || {}, hotkeys: hotkeys || {}, keyLayout: keyLayout || {} };
 
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ["src/tools-meta.js", "src/ss-fixes.js"],
       world: "MAIN",
     });
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: (s) => window.__ssf.init(s),
-      args: [settings],
-      world: "MAIN",
-    });
-
     // Pre-inject editor-swap.js (idempotent) with libPath/snippets/aceConfig known,
     // so the global command-palette hotkey (ss-fixes.js's commandPalette action)
     // can call window.__ssExt.commandPalette() with no args and it'll have what
-    // it needs to load the Ace lib on demand.
+    // it needs to load the Ace lib on demand. Seeded BEFORE __ssf.init() so the
+    // aceEditorOnLoad patch has libPath when it fires.
     const libPath = chrome.runtime.getURL(LIB_PATH);
     const snippetsText = await getSnippetsText();
     const aceConfig = await getAceConfig();
@@ -111,6 +108,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         window.__ssExt.aceConfig = config;
       },
       args: [libPath, snippetsText, aceConfig],
+      world: "MAIN",
+    });
+
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (s) => window.__ssf.init(s),
+      args: [settings],
       world: "MAIN",
     });
   } catch (error) {

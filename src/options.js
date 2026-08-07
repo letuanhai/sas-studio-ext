@@ -32,7 +32,7 @@
     const container = document.getElementById("patches-list");
 
     window.SSF_TOOLS.filter((t) => t.kind === "patch").forEach((tool) => {
-      const enabled = saved[tool.name] !== false; // default: enabled
+      const enabled = window.ssfPatchEnabled(tool, saved);
 
       const label = document.createElement("label");
       const checkbox = document.createElement("input");
@@ -127,7 +127,7 @@
           recordBtn.classList.remove("recording");
 
           const keymap = {
-            key: event.key,
+            key: window.ssfEventKey(event),
             altKey: event.altKey,
             ctrlKey: event.ctrlKey,
             metaKey: event.metaKey,
@@ -360,6 +360,9 @@
   }
 
   renderPatches();
-  renderHotkeys();
+  // Resolve + persist the keyboard layout map before any hotkey is recorded;
+  // this page is a secure context, the http SAS Studio page isn't, so this is
+  // where it gets captured for both sides (see tools-meta.js).
+  window.ssfLoadKeyLayout().then(renderHotkeys);
   initEditorConfig().then(initSnippets);
 })();
