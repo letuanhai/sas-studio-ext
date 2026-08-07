@@ -529,6 +529,10 @@
       // undefined), fixed alongside adding lspMaxLines.
       lsp: typeof cfg.lsp === "boolean" ? cfg.lsp : true,
       lspMaxLines: typeof cfg.lspMaxLines === "number" ? cfg.lspMaxLines : 500,
+      // vimrc was missing here too - installSettingsMenuPersistence() posts this
+      // object back to chrome.storage.local wholesale, so omitting it silently
+      // wiped the saved vimrc on the next in-page settings-menu change.
+      vimrc: typeof cfg.vimrc === "string" ? cfg.vimrc : "",
     };
   }
 
