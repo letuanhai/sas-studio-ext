@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11
+
+- New "Use the Ace editor from page load" patch in the options page: with it
+  ticked, the Ace editor replacement activates by itself on every SAS Studio
+  page load instead of needing the toggle each time (you can still toggle it
+  back off with the hotkey or the popup). It is off by default — the first
+  patch that starts disabled rather than enabled.
+- Hotkeys using Alt/Option are recorded and matched by the physical key
+  instead of the character the OS produces. On macOS, Option+n or Option+.
+  composes a dead key or a symbol, so such a binding showed up as "Alt+Dead"
+  or "Alt+≥" and never fired; it now reads and triggers as "Alt+n" / "Alt+.".
+  The keyboard layout is read once on the options page via
+  `navigator.keyboard.getLayoutMap()` and handed to the page from there — that
+  API is unavailable on a plain-http SAS Studio page — with a US layout as the
+  fallback until the options page has been opened once. Existing bindings keep
+  working; matching is case-insensitive.
+- Changing anything in the in-page Ace settings menu no longer wipes the saved
+  vim keymap. The config object posted back to storage on every such change
+  was built without its `vimrc` field, so e.g. switching the keyboard handler
+  silently cleared it. The options-page section is now labelled "Vim Keymap".
+
 ## 0.10
 
 - The `keepFocusAfterSave` patch is replaced by `noTreeFocusSteal` (settings
