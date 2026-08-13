@@ -56,6 +56,13 @@ Add a prefix to the path for different option:
       hotkey: null,
     },
     {
+      name: "forceClearBusyDialog",
+      kind: "action",
+      label: "Force-close busy dialog",
+      title: "Unstick the app when SAS Studio errors and leaves the modal busy/run dialog up: destroys the dialog, drops its underlay and resets the run state of any tab still marked as running. Best-effort - the server-side session isn't touched, so reload the page if things still misbehave.",
+      hotkey: null,
+    },
+    {
       name: "scrollTreeToSelectedNode",
       kind: "action",
       label: "Focus tree on selected node",

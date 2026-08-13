@@ -826,6 +826,99 @@ Add a prefix to the path for different option:
     }
   }
 
+  /**
+   * Escape hatch for a hung app: SAS Studio hit an error while a busy/run
+   * dialog was up, so the modal never came down and its shared underlay keeps
+   * blocking the whole UI. Destroys the dialog and undoes the state the app
+   * sets at submit time and only clears on a response that never arrived
+   * (DMSEditor.js:6261-6268 is the original's own version of this cleanup).
+   * Best-effort: the SAS session on the server is not touched, so if the
+   * server-side run really is wedged the app still needs a reload.
+   */
+  function forceClearBusyDialog() {
+    const dialogs = window.appDMS.dialogs;
+    const problems = [];
+    // dialogs.busyDialog is often a stale reference (every run-end path tears
+    // down via submitDialog.hide(), never hideBusyDialog()), so try every known
+    // handle and skip the ones already dead.
+    const seen = new Set();
+    [dialogs.busyDialog, window.__ssfRunDialog, window.dijit.byId("busyDialog")].forEach((d) => {
+      if (!d || d._destroyed || seen.has(d)) return;
+      seen.add(d);
+      try {
+        d.destroyRecursive();
+      } catch (e) {
+        problems.push("busy dialog destroy failed: " + e);
+      }
+    });
+    dialogs.busyDialog = null;
+    window.__ssfRunDialog = null;
+
+    // Undo what minimizeBusyDialog itself disabled/tinted. Normally the
+    // dialog's wrapped destroy() does this, but a dialog that was already
+    // destroyed (or threw above) never gets there.
+    if (window.__ssfReenableRun) {
+      try {
+        window.__ssfReenableRun();
+      } catch (e) {
+        problems.push("run-state restore failed: " + e);
+      }
+    }
+
+    // dijit pops the shared underlay in Dialog.destroy(), but only for a dialog
+    // that made it onto the level-manager stack - one that threw mid-show
+    // leaves it up, which is exactly what blocks the app.
+    const dialogOpen = window.dijit.registry
+      .toArray()
+      .some((w) => w.open && !w._destroyed && /Dialog/.test(w.declaredClass || ""));
+    if (!dialogOpen) {
+      document
+        .querySelectorAll(".dijitDialogUnderlayWrapper")
+        .forEach((el) => (el.style.display = "none"));
+    }
+
+    // Per-tab run state: SAS disables Run and shows a busy tab icon in
+    // submitHandler and only undoes it when the submission responds.
+    let reset = 0;
+    (window.appDMS.tabs.getAllTabObjects() || []).forEach((t) => {
+      const ed = t.editor;
+      if (!ed || !ed.running) return;
+      try {
+        ed.running = false;
+        ed.submitDialog = null;
+        ed.removeTabBusyIcon();
+        ["submitButton", "backgroundSubmitButton"].forEach(
+          (b) => ed[b] && ed[b].set("disabled", false),
+        );
+        ed.cancelButton && ed.cancelButton.set("disabled", true);
+        reset++;
+      } catch (e) {
+        problems.push("tab '" + (t.name || "?") + "' cleanup failed: " + e);
+      }
+    });
+    try {
+      window.appDMS.clearRunningStatus();
+    } catch (e) {
+      problems.push("status message reset failed: " + e);
+    }
+
+    const summary =
+      `Cleared ${seen.size} busy dialog(s)` + (reset ? `, reset ${reset} running tab(s)` : "");
+    if (problems.length) {
+      console.warn("[SS Ext] forceClearBusyDialog:", problems.join(" | "));
+      showNotification({
+        message:
+          summary +
+          ", but some cleanup failed - the app may be usable but is in an unknown state, reload the page when you can:\n" +
+          problems.join("\n"),
+        isError: true,
+        duration: 15000,
+      });
+    } else {
+      showNotification({ message: summary + "." });
+    }
+  }
+
   // ==========================================================================
   // Actions - one-shot commands (popup button + optional hotkey)
   // ==========================================================================
@@ -835,6 +928,7 @@ Add a prefix to the path for different option:
     openUserInputTarget: { fn: openUserInputTarget },
     saveFileAtPath: { fn: saveFileAtPath },
     runCurrentProgram: { fn: runCurrentProgram },
+    forceClearBusyDialog: { fn: forceClearBusyDialog },
     scrollTreeToSelectedNode: { fn: () => scrollTreeToSelectedNode() },
     scrollDestinationTreeToProjectSelectedNode: { fn: scrollDestinationTreeToProjectSelectedNode },
     collapseCurrentTree: { fn: collapseCurrentTree },
@@ -1275,6 +1369,9 @@ Add a prefix to the path for different option:
           restoreStatusBar();
           if (runTabNode) runTabNode.classList.remove("ssf-running");
         }
+        // Exposed so the forceClearBusyDialog action can undo this state when
+        // the dialog hangs (or is already gone) and reenable() never fires.
+        window.__ssfReenableRun = reenable;
         ["hide", "destroy"].forEach((name) => {
           const orig = dialog[name].bind(dialog);
           dialog[name] = function (...args) {
