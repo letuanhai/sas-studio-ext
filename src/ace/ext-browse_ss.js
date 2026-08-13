@@ -760,6 +760,13 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 targetItem.fileType === 'TXT' ? 'FileOpenWithTextViewer' :
                     targetItem.fileType === 'EXT' ? 'FileOpenWithExternalProgram' :
                         'FileOpen';
+            // handleWebOneEvent backfills item.id from the uri only for the
+            // FileOpen/FileOpenWithCodeEditor actions (AppDMS.js:5240); the TextViewer
+            // branch rewrites the action to FileOpen *after* that, so an id-less item
+            // opens as tab id "undefined" and the second one collides on the dijit
+            // widget id (editTabContentPane_undefined_texttoolbar). Backfill it here.
+            if (action !== 'TableOpen' && !targetItem.id && targetItem.uri)
+                targetItem.id = targetItem.uri.replaceAll('/', '~ps~');
             // @ts-ignore
             window.appDMS.handleWebOneEvent(action, targetItem);
         }
