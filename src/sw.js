@@ -75,7 +75,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // keyLayout: the navigator.keyboard.getLayoutMap() result captured by the
     // options page - that API is secure-context only, so the (http) SAS Studio
     // page can't resolve it itself. Absent -> ss-fixes falls back to US layout.
-    const { fixes, hotkeys, keyLayout } = await chrome.storage.local.get(["fixes", "hotkeys", "keyLayout"]);
+    const { fixes, hotkeys, keyLayout, browsePaths } = await chrome.storage.local.get([
+      "fixes",
+      "hotkeys",
+      "keyLayout",
+      "browsePaths",
+    ]);
     const settings = { fixes: fixes || {}, hotkeys: hotkeys || {}, keyLayout: keyLayout || {} };
 
     await chrome.scripting.executeScript({
@@ -98,7 +103,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     });
     await chrome.scripting.executeScript({
       target: { tabId },
-      func: (path, snippets, config) => {
+      func: (path, snippets, config, paths) => {
         // Unconditional: libPath is always this same constant, and userSnippets/
         // aceConfig just mirror current storage - re-setting any of them to the
         // same value on repeat onUpdated firings is harmless (ace/toggle() aren't
@@ -106,8 +111,11 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         window.__ssExt.libPath = path;
         window.__ssExt.userSnippets = snippets;
         window.__ssExt.aceConfig = config;
+        // Browse start paths (options page); an empty entry means "use the
+        // browser's built-in default" - see ext-browse_ss.js's getStartPath().
+        window.__ssExt.browsePaths = paths;
       },
-      args: [libPath, snippetsText, aceConfig],
+      args: [libPath, snippetsText, aceConfig, browsePaths || {}],
       world: "MAIN",
     });
 

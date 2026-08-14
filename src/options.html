@@ -146,6 +146,16 @@
       <tbody id="hotkeys-list"></tbody>
     </table>
 
+    <h2>Browsing</h2>
+    <p class="note">
+      Start path of the file / library browsers (Alt+P / Alt+O) - also listed last in the empty prompt, below the
+      bookmarks and recents. Leave blank for the built-in default (the project tree root / <code>libraries/</code>).
+      A browser reopens where it was last closed within a page load, so this is what it falls back to after a reload.
+      Applies on next page reload.
+    </p>
+    <label>Files <input type="text" id="browse-path-files" placeholder="/path/to/folder/" style="width: 28em" /></label>
+    <label>Library <input type="text" id="browse-path-library" placeholder="libraries/" style="width: 28em" /></label>
+
     <h2>Editor</h2>
     <p class="note">
       Defaults for every Ace editor in SAS Studio (code editor, text viewer) and for the snippet editor below.

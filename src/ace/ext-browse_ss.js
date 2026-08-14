@@ -499,6 +499,21 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             })];
         }
 
+        /**
+         * The browser's default start path (options page or built-in), last in
+         * the empty prompt so it's always one keypress away after wandering off.
+         * @returns {Partial<DataItem>[]}
+         */
+        function defaultPathCompletions() {
+            if (!options.startPath) return [];
+            return [{
+                uri: options.startPath,
+                value: options.startPath,
+                meta: '>',
+                message: 'Default path',
+            }];
+        }
+
         /** @param {Number=} keepRow row to reselect after popup.setData resets it to 0 */
         function updateCompletions(keepRow) {
             const cmdLineValue = cmdLine.getValue().trimStart();
@@ -511,8 +526,9 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 const curDirPath = Utils.getCurCollPath(cmdLineValue);
 
                 if (cmdLineValue === '' && historyKey) {
-                    // Nothing typed: current tab first, then saved bookmarks/recents.
-                    popup.setData([...currentTabCompletions(), ...savedCompletions('')], '');
+                    // Nothing typed: current tab, saved bookmarks/recents, default path.
+                    popup.setData(
+                        [...currentTabCompletions(), ...savedCompletions(''), ...defaultPathCompletions()], '');
                 }
                 // Get completions using curDirItem if loaded
                 // Also get completions in case history is not saved (with SsTabs)
@@ -925,7 +941,6 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
     }
 
     class SsFiles {
-        static defaultPath = '/applis/12201-esmb0-sasbasic/data/DEN/';
         static placeholder = 'Enter a path to browse';
         static maxHistory = 100;
         static historyKey = 'BrowseSsFilesHistory';
@@ -943,9 +958,12 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
 
         /** @returns {String} */
         static getStartPath() {
-            // Get current project tree root path, 0th child is 'Folder Shortcuts'
+            // Options page ("Browsing" section, seeded onto __ssExt by sw.js) wins;
+            // unset -> the current project tree root, 0th child is 'Folder Shortcuts'.
+            const configured = window.__ssExt?.browsePaths?.files;
+            if (configured) return configured;
             const currentRootPath = window.appDMS.projects.tree.rootNode.getChildren()[1].item.uri;
-            return (currentRootPath ?? SsFiles.defaultPath) + '/';
+            return (currentRootPath ?? '') + '/';
         }
 
         /**
@@ -1089,7 +1107,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
 
         /** @returns {String} */
         static getStartPath() {
-            return SsLibrary.defaultPath;
+            return window.__ssExt?.browsePaths?.library || SsLibrary.defaultPath;
         }
 
         /**

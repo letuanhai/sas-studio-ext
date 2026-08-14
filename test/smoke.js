@@ -601,6 +601,7 @@ function check(name, ok, detail) {
       value,
       currentTabFile: tab?.type === "FILE" ? tab.uri : null,
       firstEntry: window._browseSsLastPrompt.popup.data[0],
+      lastEntry: window._browseSsLastPrompt.popup.data.at(-1),
     };
   });
   check("browse_ss reopens at the last navigated path", reopened.value === closedAt, { closedAt, ...reopened });
@@ -609,6 +610,11 @@ function check(name, ok, detail) {
     !reopened.currentTabFile ||
       (reopened.firstEntry?.message === "Current tab" && reopened.firstEntry?.uri === reopened.currentTabFile),
     reopened
+  );
+  check(
+    "browse_ss lists the default path last in the empty prompt",
+    reopened.lastEntry?.message === "Default path",
+    reopened.lastEntry
   );
 
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
