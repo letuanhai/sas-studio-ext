@@ -161,6 +161,9 @@ mac too — Alt+B is flaky there) pins/unpins the selected entry as a bookmark
 without losing your place in the list. The tab browser has neither (open tabs
 are already the whole list).
 
+Filtering ranks an exact name match first, then prefix matches, then the rest of
+the fuzzy matches.
+
 Long paths truncate on the right of the box; the selected row's text
 auto-scrolls to reveal the hidden tail (and snaps back when you move on), and
 hovering any row shows its full value in a tooltip.

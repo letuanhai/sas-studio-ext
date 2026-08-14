@@ -561,6 +561,28 @@ function check(name, ok, detail) {
   const afterRemove = await bookmarkCount();
   check("Ctrl+B again removes the bookmark", afterRemove === 0, { afterRemove });
 
+  // Exact match ranks first: type the full path of an entry that isn't already
+  // at the top of the directory listing and check it becomes row 0.
+  const exactMatch = await page.evaluate(async () => {
+    const { popup, cmdLine } = window._browseSsLastPrompt;
+    const dir = cmdLine.getValue();
+    const names = popup.data
+      .map((d) => (d.uri || "").split("/").filter(Boolean).at(-1))
+      .filter(Boolean);
+    // Pick a late entry so the original order can't accidentally satisfy the check.
+    const target = names.at(-1);
+    if (!target || names.length < 2) return { skipped: true };
+    cmdLine.setValue(dir.replace(/\/*$/, "/") + target, 1);
+    await new Promise((r) => setTimeout(r, 400));
+    const first = window._browseSsLastPrompt.popup.data[0];
+    return { target, first: first && (first.uri || first.value) };
+  });
+  check(
+    "browse_ss ranks an exact name match first",
+    exactMatch.skipped || (exactMatch.first || "").endsWith(exactMatch.target),
+    exactMatch
+  );
+
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await page.waitForTimeout(300);
 

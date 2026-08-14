@@ -418,7 +418,21 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         function getFilteredCompletions(itemList, filterText) {
             const resultItems = JSON.parse(JSON.stringify(itemList));
             const filtered = new FilteredList(resultItems);
-            return filtered.filterCompletions(resultItems, filterText);
+            const results = filtered.filterCompletions(resultItems, filterText);
+            // ace's filterCompletions scores but never sorts, so an exact (or
+            // prefix) hit can sit anywhere in the collection's own order. Rank
+            // those to the top; the sort is stable, so ties keep that order.
+            // Compare on the bare name - directory entries carry an icon prefix.
+            if (!filterText) return results;
+            const needle = filterText.toLowerCase();
+            /** @param {Partial<DataItem>} item */
+            const rank = item => {
+                let name = (item.value ?? '').toLowerCase();
+                const prefix = (item.prefix ?? '').toLowerCase();
+                if (prefix && name.startsWith(prefix)) name = name.slice(prefix.length);
+                return name === needle ? 0 : name.startsWith(needle) ? 1 : 2;
+            };
+            return results.sort((a, b) => rank(a) - rank(b));
         }
 
         /**
@@ -435,7 +449,13 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             const bookmarks = getBookmarks().map(b => Object.assign(b, { message: '⭐ Bookmark' }));
             const history = getHistory().filter(h => !bookmarks.some(b => b.value === h.value))
                 .map(h => Object.assign(h, { message: 'Recent' }));
-            const entries = getFilteredCompletions([...bookmarks, ...history], filterText);
+            // Filter each category on its own so the exact-match sort inside
+            // getFilteredCompletions can't interleave them (the labels below
+            // only mark the first item of each run).
+            const entries = [
+                ...getFilteredCompletions(bookmarks, filterText),
+                ...getFilteredCompletions(history, filterText),
+            ];
             // Only label the first item of each category; the rest inherit it by position.
             let seenBookmark = false, seenRecent = false;
             entries.forEach(item => {
