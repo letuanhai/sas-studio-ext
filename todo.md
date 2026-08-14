@@ -13,4 +13,4 @@ Uncaught Error: Tried to register widget with id==editTabContentPane_undefined_t
 
 - [x] also add an action to close the busy dialog when sas studio has error and the busy dialog hang the app, basically just `window.dijit.byId("busyDialog").destroyRecursive()` plus any necessary cleanup. restore sas studio to normal working state if possible, otherwise allow the user to use the app (use editor, check opening tabs) but alert that the app should be restarted.
 - [x] browse-ss: change the fuzzy search to put exact match on top
-- [ ] browse-ss: open last navigated path (fallback to default start path) when the popup open. put current tab path (if available) to the default list when the path is empty (above bookmark/history), add the text to denote it is current tab path
+- [x] browse-ss: open last navigated path (fallback to default start path) when the popup open. put current tab path (if available) to the default list when the path is empty (above bookmark/history), add the text to denote it is current tab path

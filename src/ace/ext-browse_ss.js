@@ -33,6 +33,12 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
     const PLACEHOLDER_TEXT = 'Enter a path to browse';
     const MAX_HISTORY = 50;
 
+    // Where each browser (files/library/tabs) was when it was last closed, so
+    // reopening resumes there instead of jumping back to the start path.
+    // ponytail: in-memory only - a page reload starts from options.startPath again.
+    /** @type {Record<string, string>} */
+    const lastPaths = Object.create(null);
+
     // --- Persistent store (chrome.storage via relay.js) ---------------------
     // History/bookmarks persist in chrome.storage.local (extension-scoped -
     // survives "clear site data"/clearing the page cache) instead of the page's
@@ -95,6 +101,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
      * @property {String=} placeholder                Placeholder text, default to PLACEHOLDER_TEXT
      * @property {Number=} maxHistory                 Maximum number of history entries, default to MAX_HISTORY
      * @property {String=} historyKey                 Key to store history items in chrome.storage (relayed), disable history if blank or null
+     * @property {(() => Partial<DataItem>|null)=} currentItem  Item for the currently focused tab, listed first in the empty prompt
      * @property {(item: DataItem, ...options: any[]) => void} openItem  Function to open the selected item
      * @property {(itemPath: String) => Promise<Partial<DataItem>>} queryItemPath Function to query item path for DataItem
      * @property {Function} scrollTreeToItem          Function to scroll the tree to the selected item
@@ -117,12 +124,17 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             openPrompt.close();
         }
 
+        // Resume where this browser was left off; first open of the page (or a
+        // browser without a historyKey sharing the 'tabs' slot) uses startPath.
+        const lastPathKey = options.historyKey || 'tabs';
+        const startPath = lastPaths[lastPathKey] ?? options.startPath ?? DEFAULT_PATH;
+
         // Initialize prompt
         var cmdLine = $singleLineEditor();
         cmdLine.session.setUndoManager(new UndoManager());
         cmdLine.setOption("fontSize", 14);
         // Set initial prompt value
-        cmdLine.setValue(options.startPath ?? DEFAULT_PATH, 1);
+        cmdLine.setValue(startPath, 1);
         cmdLine.setOption("placeholder", options.placeholder ?? PLACEHOLDER_TEXT);
 
         // Create overlay to dim the page
@@ -152,7 +164,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
 
         // Initialize data model
         let dataLoading = true;
-        let curCollectionPromise = getDataItem(options.startPath ?? DEFAULT_PATH);
+        let curCollectionPromise = getDataItem(startPath);
 
         // History/bookmarks live in chrome.storage (relayed); ensure the cache
         // is loaded before updateCompletions reads it. browse_tabs has no
@@ -473,6 +485,20 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             return entries;
         }
 
+        /**
+         * The focused tab's own item (file / table), listed above the saved
+         * entries in the empty prompt. Empty when nothing relevant is focused.
+         * @returns {Partial<DataItem>[]}
+         */
+        function currentTabCompletions() {
+            const item = options.currentItem?.();
+            if (!item || !item.uri) return [];
+            return [Object.assign({}, item, {
+                value: (item.prefix ?? '') + item.uri,
+                message: 'Current tab',
+            })];
+        }
+
         /** @param {Number=} keepRow row to reselect after popup.setData resets it to 0 */
         function updateCompletions(keepRow) {
             const cmdLineValue = cmdLine.getValue().trimStart();
@@ -485,8 +511,8 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 const curDirPath = Utils.getCurCollPath(cmdLineValue);
 
                 if (cmdLineValue === '' && historyKey) {
-                    // Nothing typed: show saved bookmarks/recents only (empty if none).
-                    popup.setData(savedCompletions(''), '');
+                    // Nothing typed: current tab first, then saved bookmarks/recents.
+                    popup.setData([...currentTabCompletions(), ...savedCompletions('')], '');
                 }
                 // Get completions using curDirItem if loaded
                 // Also get completions in case history is not saved (with SsTabs)
@@ -582,6 +608,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
 
         // Cleanup
         function done() {
+            lastPaths[lastPathKey] = cmdLine.getValue();
             overlay.close();
             openPrompt = null;
         }
@@ -641,6 +668,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         browse_ss({
             startPath: SsFiles.getStartPath(),
             historyKey: SsFiles.historyKey,
+            currentItem: SsFiles.getCurrentItem,
             placeholder: SsFiles.placeholder,
             maxHistory: SsFiles.maxHistory,
             openItem: SsFiles.openFile,
@@ -653,6 +681,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         browse_ss({
             startPath: SsLibrary.getStartPath(),
             historyKey: SsLibrary.historyKey,
+            currentItem: SsLibrary.getCurrentItem,
             placeholder: SsLibrary.placeholder,
             maxHistory: SsLibrary.maxHistory,
             openItem: SsLibrary.openTable,
@@ -916,11 +945,21 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         static getStartPath() {
             // Get current project tree root path, 0th child is 'Folder Shortcuts'
             const currentRootPath = window.appDMS.projects.tree.rootNode.getChildren()[1].item.uri;
-            // If current open tab is a file then use the file path
-            //  This allow to get information about the file
+            return (currentRootPath ?? SsFiles.defaultPath) + '/';
+        }
+
+        /**
+         * The focused tab's file, if any - listed in the empty prompt.
+         * @returns {Partial<DataItem>|null} */
+        static getCurrentItem() {
             const currentTab = window.appDMS.tabs.getFocusedTab();
-            return (currentTab?.type === 'FILE' && currentTab?.uri) ?
-                currentTab.uri : (currentRootPath ?? SsFiles.defaultPath) + '/';
+            if (currentTab?.type !== 'FILE' || !currentTab?.uri) return null;
+            const name = Utils.normalizeItemPath(currentTab.uri).split('/').at(-1) ?? '';
+            return {
+                uri: currentTab.uri,
+                meta: '',
+                prefix: SsFiles.fileIconMap.get(name.split('.').at(-1)?.toLocaleLowerCase() ?? '') ?? '',
+            };
         }
 
         /**
@@ -1050,12 +1089,18 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
 
         /** @returns {String} */
         static getStartPath() {
-            // If current open tab is a table or a view then use the current path
-            //  This allow to get information about the table/view columns
+            return SsLibrary.defaultPath;
+        }
+
+        /**
+         * The focused tab's table/view, if any - listed in the empty prompt.
+         * Kept as a collection ('>'), so accepting it lists the columns, same as
+         * what the old current-tab start path did.
+         * @returns {Partial<DataItem>|null} */
+        static getCurrentItem() {
             const currentTab = window.appDMS.tabs.getFocusedTab();
-            return (['DATA', 'VIEW'].includes(currentTab?.type) && (currentTab?.id ?? currentTab?.uri)) ?
-                (currentTab.id ?? currentTab.uri).replaceAll('~', '/') + '/'
-                : SsLibrary.defaultPath;
+            if (!['DATA', 'VIEW'].includes(currentTab?.type) || !(currentTab?.id ?? currentTab?.uri)) return null;
+            return { uri: (currentTab.id ?? currentTab.uri).replaceAll('~', '/'), meta: '>' };
         }
 
         /**

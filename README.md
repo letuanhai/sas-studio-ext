@@ -161,8 +161,11 @@ mac too — Alt+B is flaky there) pins/unpins the selected entry as a bookmark
 without losing your place in the list. The tab browser has neither (open tabs
 are already the whole list).
 
-Filtering ranks an exact name match first, then prefix matches, then the rest of
-the fuzzy matches.
+Each browser reopens at the path it was last closed on (per page load — after a
+reload it starts at the project tree root / `libraries/` again). In the empty
+prompt, the focused tab's own file (or table/view) is listed first, tagged
+`Current tab`, above the bookmarks and recents. Filtering ranks an exact name
+match first, then prefix matches, then the rest of the fuzzy matches.
 
 Long paths truncate on the right of the box; the selected row's text
 auto-scrolls to reveal the hidden tail (and snaps back when you move on), and

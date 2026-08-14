@@ -586,6 +586,34 @@ function check(name, ok, detail) {
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await page.waitForTimeout(300);
 
+  // Reopening resumes at the path the prompt was closed on, and the empty
+  // prompt lists the focused tab's own file first (when a FILE tab is focused).
+  const closedAt = await page.evaluate(() => window._browseSsLastPrompt.cmdLine.getValue());
+  await page.evaluate(() => window.__ssf.run("browseFiles"));
+  await page.waitForTimeout(600);
+  const reopened = await page.evaluate(async () => {
+    const { cmdLine } = window._browseSsLastPrompt;
+    const value = cmdLine.getValue();
+    const tab = window.appDMS.tabs.getFocusedTab();
+    cmdLine.setValue("", 1);
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      value,
+      currentTabFile: tab?.type === "FILE" ? tab.uri : null,
+      firstEntry: window._browseSsLastPrompt.popup.data[0],
+    };
+  });
+  check("browse_ss reopens at the last navigated path", reopened.value === closedAt, { closedAt, ...reopened });
+  check(
+    "browse_ss lists the current tab first in the empty prompt",
+    !reopened.currentTabFile ||
+      (reopened.firstEntry?.message === "Current tab" && reopened.firstEntry?.uri === reopened.currentTabFile),
+    reopened
+  );
+
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
+  await page.waitForTimeout(300);
+
   // With a code editor (an Ace instance) focused: editor commands should also
   // show up. Reuses any currently-open code tab rather than the (now-closed)
   // text viewer from the block above.
