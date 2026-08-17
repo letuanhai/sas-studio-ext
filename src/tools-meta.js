@@ -27,7 +27,7 @@
       kind: "action",
       label: "New file",
       title: "Create a new SAS program (same as F4 / New > SAS Program)",
-      hotkey: { key: "N", altKey: true },
+      hotkey: { key: "n", altKey: true },
     },
     {
       name: "openUserInputTarget",
@@ -39,14 +39,14 @@ Add a prefix to the path for different option:
 - 'txt:' to open a file as text
 - 'ext:' to download a file to open in external programs
 `,
-      hotkey: { key: "O", altKey: true },
+      hotkey: null,
     },
     {
       name: "saveFileAtPath",
       kind: "action",
       label: "Save file at path",
       title: "Save the current file at the given absolute path, as if using Save As and selecting that path in the destination tree",
-      hotkey: { key: "S", altKey: true, shiftKey: true },
+      hotkey: { key: "s", altKey: true, shiftKey: true },
     },
     {
       name: "runCurrentProgram",
@@ -89,21 +89,21 @@ Add a prefix to the path for different option:
       kind: "action",
       label: "Close current tab",
       title: "Close current tab",
-      hotkey: { key: "W", altKey: true },
+      hotkey: { key: "w", altKey: true },
     },
     {
       name: "reopenClosedTab",
       kind: "action",
       label: "Reopen last closed tab",
       title: "Reopen last closed tab from the stack",
-      hotkey: { key: "T", altKey: true },
+      hotkey: { key: "w", altKey: true, shiftKey: true },
     },
     {
       name: "openLogInNewTab",
       kind: "action",
       label: "Open submission log in new tab",
       title: "Open the log content for current submission in new tab",
-      hotkey: { key: "L", altKey: true },
+      hotkey: { key: "l", altKey: true },
     },
     {
       name: "toggleMaxView",
@@ -117,28 +117,28 @@ Add a prefix to the path for different option:
       kind: "action",
       label: "Next tab",
       title: "Select the next tab",
-      hotkey: { key: "}", altKey: true, shiftKey: true },
+      hotkey: { key: "]", altKey: true, shiftKey: true },
     },
     {
       name: "selectPreviousTab",
       kind: "action",
       label: "Previous tab",
       title: "Select the previous tab",
-      hotkey: { key: "{", altKey: true, shiftKey: true },
+      hotkey: { key: "[", altKey: true, shiftKey: true },
     },
     {
       name: "copyCurrentTabUri",
       kind: "action",
       label: "Copy current tab URI",
       title: "Copy the path of the item in current tab",
-      hotkey: { key: "C", altKey: true },
+      hotkey: { key: "c", altKey: true },
     },
     {
       name: "resetLayoutCurrentTab",
       kind: "action",
       label: "Reset layout current tab",
       title: "Move all panes within current tab back to the main pane container",
-      hotkey: { key: "|", altKey: true, shiftKey: true },
+      hotkey: { key: "\\", altKey: true, shiftKey: true },
     },
     {
       name: "resetLayoutAllTabs",
@@ -172,31 +172,31 @@ Add a prefix to the path for different option:
       name: "commandPalette",
       kind: "action",
       label: "Command palette",
-      // event.key for Alt+Shift+P is "P" (uppercase); shiftKey is matched
-      // explicitly so this is Alt+Shift+P, distinct from a plain Alt+P.
+      // shiftKey is matched explicitly so this is Alt+Shift+P, distinct
+      // from a plain Alt+P.
       title: "Open the SS-Ext command palette",
-      hotkey: { key: "P", altKey: true, shiftKey: true },
+      hotkey: { key: "p", altKey: true, shiftKey: true },
     },
     {
       name: "browseFiles",
       kind: "action",
       label: "Browse files",
       title: "Browse and open SAS Studio files",
-      hotkey: { key: "P", altKey: true },
+      hotkey: { key: "p", altKey: true },
     },
     {
       name: "browseLibrary",
       kind: "action",
       label: "Browse library",
       title: "Browse SAS Studio library items",
-      hotkey: { key: "O", altKey: true },
+      hotkey: { key: "o", altKey: true },
     },
     {
       name: "browseTabs",
       kind: "action",
       label: "Browse tabs",
       title: "Switch between open SAS Studio tabs",
-      hotkey: { key: "T", altKey: true },
+      hotkey: { key: "t", altKey: true },
     },
     {
       name: "toggleEditor",
