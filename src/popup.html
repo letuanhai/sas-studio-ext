@@ -118,6 +118,14 @@
         border-radius: 4px;
         padding: 6px;
       }
+      .root-label {
+        display: block;
+        color: var(--hint);
+        margin-bottom: 4px;
+      }
+      .root-label input {
+        margin-top: 2px;
+      }
       #options-link {
         background: none;
         border: none;
@@ -144,6 +152,13 @@
     </div>
     <div class="toggle-row">
       <button id="palette-btn" class="toggle-btn">Command palette&hellip;</button>
+    </div>
+    <div class="cookies-row" id="roots-row">
+      <div class="cookies-head">
+        <span>Browsing root paths - <span id="roots-host"></span></span>
+      </div>
+      <label class="root-label">Files <input type="text" id="root-files" class="cookies-text" placeholder="project tree root" /></label>
+      <label class="root-label">Library <input type="text" id="root-library" class="cookies-text" placeholder="libraries/" /></label>
     </div>
     <div class="cookies-row">
       <div class="cookies-head">

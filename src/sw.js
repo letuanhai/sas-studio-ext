@@ -1,7 +1,7 @@
 /**
  * Background service worker.
  *
- * Three independent jobs (the editor toggle / browse / command-palette are all
+ * Four independent jobs (the editor toggle / browse / command-palette are all
  * driven from the page now - the popup button for the toggle, in-page ss-fixes
  * hotkeys for browse/palette - so the service worker no longer registers any
  * chrome.commands handler; the only browser command is _execute_action, which
@@ -11,7 +11,7 @@
  *    tools-meta.js + ss-fixes.js into the MAIN world and call
  *    window.__ssf.init(settings) with the persisted patch/hotkey settings.
  *    The same handler pre-injects editor-swap.js and seeds
- *    libPath/userSnippets/aceConfig so the global command-palette hotkey works
+ *    libPath/userSnippets/aceConfig/browsePaths so the global command-palette hotkey works
  *    without a prior toggle.
  *
  * 2. Live snippet apply: when chrome.storage.local's `snippets` changes, push
@@ -21,6 +21,10 @@
  *    (from the in-page settings panel via relay.js, or from options.html),
  *    push the merged config into every open SASStudio tab via
  *    window.__ssExt.applyAceConfig.
+ *
+ * 4. Live browse-roots apply: when chrome.storage.local's `browsePaths` changes
+ *    (the popup's per-host root paths), assign each open SASStudio tab its own
+ *    host's entry on window.__ssExt.browsePaths.
  */
 
 importScripts("defaults.js");
@@ -111,11 +115,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         window.__ssExt.libPath = path;
         window.__ssExt.userSnippets = snippets;
         window.__ssExt.aceConfig = config;
-        // Browse start paths (options page); an empty entry means "use the
-        // browser's built-in default" - see ext-browse_ss.js's getStartPath().
+        // Browse root paths for THIS instance (popup); an empty entry means "use
+        // the browser's built-in default" - see ext-browse_ss.js's getStartPath().
         window.__ssExt.browsePaths = paths;
       },
-      args: [libPath, snippetsText, aceConfig, browsePaths || {}],
+      // Root paths name folders on one specific server, so they're stored per
+      // host (like the browse history/bookmarks) and only this host's are seeded.
+      args: [libPath, snippetsText, aceConfig, (browsePaths || {})[new URL(tab.url).host] || {}],
       world: "MAIN",
     });
 
@@ -181,6 +187,33 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
       );
     } catch (error) {
       console.error("[SS Ext] Error live-applying ace config:", error);
+    }
+  }
+
+  // Browse roots (popup): plain assignment is enough - ext-browse_ss.js reads
+  // __ssExt.browsePaths when a prompt opens, so the next Alt+P uses the new root
+  // without a page reload. Each tab gets only its own host's entry.
+  if (changes.browsePaths) {
+    const byHost = changes.browsePaths.newValue || {};
+
+    try {
+      const tabs = await chrome.tabs.query({ url: "*://*/SASStudio/*" });
+      await Promise.all(
+        tabs.map((tab) =>
+          chrome.scripting
+            .executeScript({
+              target: { tabId: tab.id },
+              func: (paths) => {
+                if (window.__ssExt) window.__ssExt.browsePaths = paths;
+              },
+              args: [byHost[new URL(tab.url).host] || {}],
+              world: "MAIN",
+            })
+            .catch(() => {}), // no-op if editor-swap.js isn't loaded in that tab
+        ),
+      );
+    } catch (error) {
+      console.error("[SS Ext] Error live-applying browse roots:", error);
     }
   }
 });

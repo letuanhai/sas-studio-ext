@@ -612,12 +612,31 @@ function check(name, ok, detail) {
     reopened
   );
   check(
-    "browse_ss lists the default path last in the empty prompt",
-    reopened.lastEntry?.message === "Default path",
+    "browse_ss lists the root path last in the empty prompt",
+    reopened.lastEntry?.message === "Root",
     reopened.lastEntry
   );
 
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
+  await page.waitForTimeout(300);
+
+  // Browse roots (popup -> chrome.storage.local.browsePaths, keyed by host) reach
+  // an open tab without a reload, and supersede the remembered last path.
+  const TEST_ROOT = "/ssext-smoke-root/"; // needn't exist - only the start path matters
+  await sw.evaluate(
+    ([host, root]) => chrome.storage.local.set({ browsePaths: { [host]: { files: root } } }),
+    [new global.URL(URL).host, TEST_ROOT]
+  );
+  await page.waitForTimeout(500);
+  const seededRoot = await page.evaluate(() => window.__ssExt && window.__ssExt.browsePaths);
+  check("browse roots live-apply to an open tab", seededRoot?.files === TEST_ROOT, seededRoot);
+
+  await page.evaluate(() => window.__ssf.run("browseFiles"));
+  await page.waitForTimeout(800);
+  const rootedOpen = await page.evaluate(() => window._browseSsLastPrompt.cmdLine.getValue());
+  check("browse_ss opens at the new root, not the remembered path", rootedOpen === TEST_ROOT, { rootedOpen });
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
+  await sw.evaluate(() => chrome.storage.local.remove("browsePaths"));
   await page.waitForTimeout(300);
 
   // With a code editor (an Ace instance) focused: editor commands should also

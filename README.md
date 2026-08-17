@@ -162,13 +162,16 @@ without losing your place in the list. The tab browser has neither (open tabs
 are already the whole list).
 
 Each browser reopens at the path it was last closed on (per page load — after a
-reload it starts at its default path again). The default is the project tree
-root / `libraries/`, overridable per browser in the options page's **Browsing**
-section (applies on next page reload). In the empty prompt, the focused tab's
-own file (or table/view) is listed first, tagged `Current tab`, above the
-bookmarks and recents, and the default path is listed last, tagged
-`Default path`. Filtering ranks an exact name
-match first, then prefix matches, then the rest of the fuzzy matches.
+reload it starts at its root path again). The root is the project tree root /
+`libraries/` by default; the popup's **Browse roots** fields override it for the
+SAS Studio instance in the active tab (they name folders on that server, so
+they're stored per host, like the bookmarks and history). A change reaches open
+SAS Studio tabs immediately — the next browse prompt uses the new root, no page
+reload, and it wins over the path that browser was last closed at. In the empty
+prompt, the focused tab's own file (or table/view) is listed first, tagged
+`Current tab`, above the bookmarks and recents, and the root path is listed
+last, tagged `Root`. Filtering ranks an exact name match
+first, then prefix matches, then the rest of the fuzzy matches.
 
 Long paths truncate on the right of the box; the selected row's text
 auto-scrolls to reveal the hidden tail (and snaps back when you move on), and

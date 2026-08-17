@@ -34,9 +34,12 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
     const MAX_HISTORY = 50;
 
     // Where each browser (files/library/tabs) was when it was last closed, so
-    // reopening resumes there instead of jumping back to the start path.
+    // reopening resumes there instead of jumping back to the root path. The root
+    // in effect at the time is kept alongside it: changing the root (popup, live-
+    // applied by sw.js) makes the saved path stale, and the next open starts at
+    // the new root instead of the old wandering point.
     // ponytail: in-memory only - a page reload starts from options.startPath again.
-    /** @type {Record<string, string>} */
+    /** @type {Record<string, {path: string, root: string|undefined}>} */
     const lastPaths = Object.create(null);
 
     // --- Persistent store (chrome.storage via relay.js) ---------------------
@@ -127,7 +130,8 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // Resume where this browser was left off; first open of the page (or a
         // browser without a historyKey sharing the 'tabs' slot) uses startPath.
         const lastPathKey = options.historyKey || 'tabs';
-        const startPath = lastPaths[lastPathKey] ?? options.startPath ?? DEFAULT_PATH;
+        const last = lastPaths[lastPathKey];
+        const startPath = (last && last.root === options.startPath ? last.path : options.startPath) ?? DEFAULT_PATH;
 
         // Initialize prompt
         var cmdLine = $singleLineEditor();
@@ -500,17 +504,17 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         }
 
         /**
-         * The browser's default start path (options page or built-in), last in
-         * the empty prompt so it's always one keypress away after wandering off.
+         * The browser's root path (options page or built-in), last in the empty
+         * prompt so it's always one keypress away after wandering off.
          * @returns {Partial<DataItem>[]}
          */
-        function defaultPathCompletions() {
+        function rootPathCompletions() {
             if (!options.startPath) return [];
             return [{
                 uri: options.startPath,
                 value: options.startPath,
                 meta: '>',
-                message: 'Default path',
+                message: 'Root',
             }];
         }
 
@@ -526,9 +530,9 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 const curDirPath = Utils.getCurCollPath(cmdLineValue);
 
                 if (cmdLineValue === '' && historyKey) {
-                    // Nothing typed: current tab, saved bookmarks/recents, default path.
+                    // Nothing typed: current tab, saved bookmarks/recents, root path.
                     popup.setData(
-                        [...currentTabCompletions(), ...savedCompletions(''), ...defaultPathCompletions()], '');
+                        [...currentTabCompletions(), ...savedCompletions(''), ...rootPathCompletions()], '');
                 }
                 // Get completions using curDirItem if loaded
                 // Also get completions in case history is not saved (with SsTabs)
@@ -624,7 +628,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
 
         // Cleanup
         function done() {
-            lastPaths[lastPathKey] = cmdLine.getValue();
+            lastPaths[lastPathKey] = { path: cmdLine.getValue(), root: options.startPath };
             overlay.close();
             openPrompt = null;
         }

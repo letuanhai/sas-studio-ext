@@ -122,8 +122,42 @@
     setTimeout(() => (btn.textContent = "Copy"), 1200);
   }
 
+  // Browse root paths, per SAS Studio host - they name folders on that server, so
+  // they can't be one global setting (browse history/bookmarks are host-keyed for
+  // the same reason). The popup is inherently scoped to the active tab, which is
+  // what makes it the right place for this rather than the options page.
+  // Saved on every keystroke: the popup can be dismissed without a blur/change.
+  async function initRoots() {
+    const row = document.getElementById("roots-row");
+    const tab = await getActiveTab();
+    let host = "";
+    try {
+      host = tab && tab.url ? new URL(tab.url).host : "";
+    } catch {
+      host = "";
+    }
+    if (!host) {
+      row.hidden = true;
+      return;
+    }
+    document.getElementById("roots-host").textContent = host;
+    const { browsePaths } = await chrome.storage.local.get("browsePaths");
+    const saved = (browsePaths || {})[host] || {};
+    ["files", "library"].forEach((kind) => {
+      const input = document.getElementById(`root-${kind}`);
+      input.value = saved[kind] || "";
+      input.addEventListener("input", async () => {
+        const { browsePaths } = await chrome.storage.local.get("browsePaths");
+        const all = Object.assign({}, browsePaths);
+        all[host] = Object.assign({}, all[host], { [kind]: input.value.trim() });
+        await chrome.storage.local.set({ browsePaths: all });
+      });
+    });
+  }
+
   document.getElementById("cookies-copy").addEventListener("click", handleCopyCookies);
   loadCookies();
+  initRoots();
 
   document.getElementById("toggle-btn").addEventListener("click", handleToggleClick);
   document.getElementById("ctxmenu-btn").addEventListener("click", handleCtxMenuClick);

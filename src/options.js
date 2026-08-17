@@ -342,22 +342,6 @@
     return snippetsEditor;
   }
 
-  // -- Browsing ---------------------------------------------------------------------
-
-  // Start path per browser; blank -> ext-browse_ss.js's built-in default.
-  async function initBrowsePaths() {
-    const { browsePaths } = await chrome.storage.local.get("browsePaths");
-    const saved = browsePaths || {};
-    ["files", "library"].forEach((kind) => {
-      const input = document.getElementById(`browse-path-${kind}`);
-      input.value = saved[kind] || "";
-      input.addEventListener("change", async () => {
-        const { browsePaths } = await chrome.storage.local.get("browsePaths");
-        await chrome.storage.local.set({ browsePaths: Object.assign({}, browsePaths, { [kind]: input.value.trim() }) });
-      });
-    });
-  }
-
   // -- Snippets ---------------------------------------------------------------------
 
   async function initSnippets(editor) {
@@ -376,7 +360,6 @@
   }
 
   renderPatches();
-  initBrowsePaths();
   // Resolve + persist the keyboard layout map before any hotkey is recorded;
   // this page is a secure context, the http SAS Studio page isn't, so this is
   // where it gets captured for both sides (see tools-meta.js).
