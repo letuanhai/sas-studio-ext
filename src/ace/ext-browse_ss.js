@@ -173,7 +173,9 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // History/bookmarks live in chrome.storage (relayed); ensure the cache
         // is loaded before updateCompletions reads it. browse_tabs has no
         // historyKey, so this is a no-op there.
-        const bookmarkKey = historyKey ? historyKey + 'Bookmarks' : null;
+        // '' rather than null when there's no history: every use is a falsy
+        // check, and it keeps this a plain string for the ready() call below.
+        const bookmarkKey = historyKey ? historyKey + 'Bookmarks' : '';
         const storeReady = historyKey
             ? Promise.all([window._browseSsStore.ready(historyKey), window._browseSsStore.ready(bookmarkKey)])
             : Promise.resolve();
@@ -435,20 +437,12 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
             const resultItems = JSON.parse(JSON.stringify(itemList));
             const filtered = new FilteredList(resultItems);
             const results = filtered.filterCompletions(resultItems, filterText);
-            // ace's filterCompletions scores but never sorts, so an exact (or
-            // prefix) hit can sit anywhere in the collection's own order. Rank
-            // those to the top; the sort is stable, so ties keep that order.
-            // Compare on the bare name - directory entries carry an icon prefix.
-            if (!filterText) return results;
-            const needle = filterText.toLowerCase();
-            /** @param {Partial<DataItem>} item */
-            const rank = item => {
-                let name = (item.value ?? '').toLowerCase();
-                const prefix = (item.prefix ?? '').toLowerCase();
-                if (prefix && name.startsWith(prefix)) name = name.slice(prefix.length);
-                return name === needle ? 0 : name.startsWith(needle) ? 1 : 2;
-            };
-            return results.sort((a, b) => rank(a) - rank(b));
+            // ace scores every match ($score = -penalty: the earlier and tighter
+            // the hit, the higher) but never sorts, leaving the collection's own
+            // order - so sort by it here, best first. Stable, so equal scores
+            // (all of them when nothing is typed) keep that original order.
+            ///@ts-ignore
+            return results.sort((a, b) => b.$score - a.$score);
         }
 
         /**
