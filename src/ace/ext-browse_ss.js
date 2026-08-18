@@ -5,7 +5,7 @@
 
 
 // @ts-ignore
-ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
+__ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
     "use strict";
 
     // @ts-ignore
@@ -1271,7 +1271,7 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
 });
 (function () {
     // @ts-ignore
-    ace.require(["ace/ext/browse_ss"], function (m) {
+    __ssAce.require(["ace/ext/browse_ss"], function (m) {
         if (typeof module == "object" && typeof exports == "object" && module) {
             module.exports = m;
         }
@@ -1281,11 +1281,11 @@ ace.define("ace/ext/browse_ss", [], function (require, exports, module) {
 function _reloadBrowseSs() {
     const moduleId = 'ace/ext/browse_ss';
     // @ts-ignore
-    const srcPath = ace.config.moduleUrl(moduleId);
+    const srcPath = __ssAce.config.moduleUrl(moduleId);
     Array.from(document.body.getElementsByTagName('script')).filter(el => el.src && el.src === srcPath).forEach(el => el.remove());
     document.getElementById('browse_ss.css')?.remove();
     // @ts-ignore
-    delete ace.define.modules[moduleId];
+    delete __ssAce.define.modules[moduleId];
     const el = document.createElement('script');
     el.src = srcPath;
     el.onload = function () {

@@ -2,3 +2,4 @@ dist/*
 SASStudio-*/
 lib/
 .lsp-build/
+.ace-build/

@@ -1,4 +1,4 @@
-ace.define("ace/mode/sas_highlight_rules",[], function(require, exports, module){/* ***** BEGIN LICENSE BLOCK *****
+__ssAce.define("ace/mode/sas_highlight_rules",[], function(require, exports, module){/* ***** BEGIN LICENSE BLOCK *****
  * Distributed under the BSD license:
  *
  * Copyright (c) 2012, Ajax.org B.V.
@@ -3431,7 +3431,7 @@ exports.SasHighlightRules = SasHighlightRules;
 
 });
 
-ace.define("ace/mode/folding/cstyle",[], function(require, exports, module){"use strict";
+__ssAce.define("ace/mode/folding/cstyle",[], function(require, exports, module){"use strict";
 var oop = require("../../lib/oop");
 var Range = require("../../range").Range;
 var BaseFoldMode = require("./fold_mode").FoldMode;
@@ -3547,7 +3547,7 @@ oop.inherits(FoldMode, BaseFoldMode);
 
 });
 
-ace.define("ace/mode/folding/sas",[], function(require, exports, module){"use strict";
+__ssAce.define("ace/mode/folding/sas",[], function(require, exports, module){"use strict";
 var oop = require("../../lib/oop");
 var BaseFoldMode = require("./cstyle").FoldMode;
 var Range = require("../../range").Range;
@@ -3678,7 +3678,7 @@ oop.inherits(FoldMode, BaseFoldMode);
 
 });
 
-ace.define("ace/mode/sas",[], function(require, exports, module){/* ***** BEGIN LICENSE BLOCK *****
+__ssAce.define("ace/mode/sas",[], function(require, exports, module){/* ***** BEGIN LICENSE BLOCK *****
  * Distributed under the BSD license:
  *
  * Copyright (c) 2012, Ajax.org B.V.
@@ -3726,7 +3726,7 @@ oop.inherits(Mode, TextMode);
 exports.Mode = Mode;
 
 });                (function() {
-                    ace.require(["ace/mode/sas"], function(m) {
+                    __ssAce.require(["ace/mode/sas"], function(m) {
                         if (typeof module == "object" && typeof exports == "object" && module) {
                             module.exports = m;
                         }

@@ -1633,6 +1633,17 @@ Add a prefix to the path for different option:
     Object.assign(window.ssfKeyLayout, settings.keyLayout || {});
 
     waitForElm(".dijitTreeNode").then(() => {
+      // Swap SAS Studio's bundled (1.x) ace for ours right away instead of
+      // waiting for the first toggle/browse: from here on there is exactly one
+      // ace library on the page, whatever the editor toggle is set to. Waiting
+      // for the app to be up first means SAS's own ace has already loaded, so
+      // its script/styles are actually there to remove.
+      if (window.__ssExt && window.__ssExt.libPath) {
+        window.__ssExt.loadNewAce(window.__ssExt.libPath).catch((e) => {
+          console.error("[SS Ext] Failed to load the Ace library:", e);
+        });
+      }
+
       Object.keys(PATCHES).forEach((name) => {
         const meta = (window.SSF_TOOLS || []).find((t) => t.name === name) || { name };
         if (!window.ssfPatchEnabled(meta, fixes)) return;

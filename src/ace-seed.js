@@ -3,4 +3,4 @@
 // before ext-settings_menu's bundled ace/ext/options snapshots modelist.modes
 // into the settings-menu Mode dropdown. A separate file because the extension
 // CSP (script-src 'self') forbids the inline <script> this would otherwise be.
-window.__ssExtApplyAcePatches && window.__ssExtApplyAcePatches(window.ace);
+window.__ssExtApplyAcePatches && window.__ssExtApplyAcePatches(window.__ssAce);

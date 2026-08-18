@@ -171,6 +171,97 @@ function check(name, ok, detail) {
   const libPath = `chrome-extension://${extId}/lib/ace/src-noconflict`;
 
   await page.addScriptTag({ path: require("path").join(EXT, "src", "editor-swap.js") });
+
+  // ss-fixes loads OUR ace at page load, with the toggle still off. It lives on
+  // window.__ssAce (build_lib.sh renames the vendored build's module-registry
+  // namespace); SAS Studio's own 1.x build keeps window.ace to itself. The
+  // checks below guard the two failure modes sharing one global caused: our
+  // modules landing in SAS's registry (which is how vim's :w/:q/:wq/:x once
+  // silently vanished) and SAS's stock editor ending up on our build.
+  const preload = await page.evaluate(async (lp) => {
+    await window.__ssExt.loadNewAce(lp); // no-op if the page-load load already ran
+    const req = (ace) => {
+      try {
+        const m = ace.require("ace/keyboard/vim");
+        return !!(m && m.Vim);
+      } catch (e) {
+        return false;
+      }
+    };
+    // Force a LAZY module load (a theme nothing has asked for yet) and check
+    // which registry it lands in - the property the whole split exists for.
+    const lazyTheme = await new Promise((resolve) => {
+      window.__ssAce.config.loadModule("ace/theme/monokai", () => {
+        resolve({
+          inOurs: !!window.__ssAce.require("ace/theme/monokai").cssClass,
+          inSas: (() => {
+            try {
+              return !!window.ace.require("ace/theme/monokai");
+            } catch (e) {
+              return false;
+            }
+          })(),
+        });
+      });
+    });
+    return {
+      active: window.__ssExt.active,
+      separateLibs: window.ace !== window.__ssAce && window.__ssAce === window.__ssExt.newLib.ace,
+      sasAceVersion: window.ace.version,
+      ourAceVersion: window.__ssAce.version,
+      // SAS's stock editor tokenizes through ITS OWN build, at call time, in
+      // exactly these places (paths under
+      // SASStudio-3.82/resources/js/sas-commons/controls/_codeEditor/):
+      //   mode/SyntaxColorerAdapter.js  ace/edit_session .EditSession
+      //   Mode.js                       ace/lib/oop .inherits, ace/mode/text .Mode,
+      //                                 ace/mode/text_highlight_rules .TextHighlightRules
+      //   mode/sas/SasLexer.js          ace/unicode .packages
+      // All of it must still resolve off window.ace - if it stops, our ace has
+      // leaked into SAS's registry (or evicted it) and the stock editor silently
+      // stops colouring.
+      sasContractBroken: Object.entries({
+        "ace/edit_session .EditSession": () => !!window.ace.require("ace/edit_session").EditSession,
+        "ace/lib/oop .inherits": () => typeof window.ace.require("ace/lib/oop").inherits === "function",
+        "ace/mode/text .Mode": () => !!window.ace.require("ace/mode/text").Mode,
+        "ace/mode/text_highlight_rules .TextHighlightRules": () =>
+          !!window.ace.require("ace/mode/text_highlight_rules").TextHighlightRules,
+        "ace/unicode .packages": () => !!(window.ace.require("ace/unicode").packages || {}).L,
+      })
+        .filter(([, probe]) => {
+          try {
+            return !probe();
+          } catch (e) {
+            return true;
+          }
+        })
+        .map(([name]) => name),
+      lazyTheme,
+      vimExInstalled: !!window.__ssExt._vimExInstalled,
+      inNewAce: req(window.__ssAce),
+      inOldAce: req(window.ace),
+    };
+  }, libPath);
+  check(
+    "our ace and SAS's are two separate libraries, SAS's untouched on window.ace",
+    preload.separateLibs && preload.sasAceVersion !== preload.ourAceVersion && !preload.active,
+    preload,
+  );
+  check(
+    "SAS's stock editor still resolves everything it needs from its OWN ace",
+    preload.sasContractBroken.length === 0,
+    preload,
+  );
+  check(
+    "a lazily loaded module registers in OUR registry, not SAS's",
+    preload.lazyTheme.inOurs && !preload.lazyTheme.inSas,
+    preload,
+  );
+  check(
+    "vim ex-commands install against our ace, not SAS's build",
+    preload.vimExInstalled && preload.inNewAce && !preload.inOldAce,
+    preload,
+  );
+
   const activated = await page.evaluate((lp) => window.__ssExt.toggle(lp), libPath);
   check("Ace editor replacement activates", activated && activated.active === true, activated);
 
@@ -848,6 +939,17 @@ function check(name, ok, detail) {
 
   const deactivated = await page.evaluate((lp) => window.__ssExt.toggle(lp), libPath);
   check("Ace editor replacement deactivates cleanly", deactivated && deactivated.active === false, deactivated);
+  // Deactivating restores SAS's stock editors; neither library moves.
+  const globalAfterOff = await page.evaluate(() => ({
+    separateLibs: window.ace !== window.__ssAce && window.__ssAce === window.__ssExt.newLib.ace,
+    sasAceVersion: window.ace.version,
+    sasStillHasOwnModules: !!window.ace.require("ace/edit_session").EditSession,
+  }));
+  check(
+    "window.ace is still SAS's own build after deactivation",
+    globalAfterOff.separateLibs && globalAfterOff.sasStillHasOwnModules,
+    globalAfterOff,
+  );
 
   // -- Global command-palette hotkey (Alt+Shift+P), Ace NOT activated ------------
   // Exercises sw.js's tabs.onUpdated pre-injection (editor-swap.js + seeded

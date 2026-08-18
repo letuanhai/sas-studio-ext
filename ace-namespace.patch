@@ -1,0 +1,52 @@
+diff --git a/Makefile.dryice.js b/Makefile.dryice.js
+index 3dbaa3d..60a9d3d 100755
+--- a/Makefile.dryice.js
++++ b/Makefile.dryice.js
+@@ -436,7 +436,7 @@ function buildAceModuleInternal(opts, callback) {
+     
+         var filters = [];
+ 
+-        var ns = opts.ns || "ace";
++        var ns = nsFor(opts);
+         if (opts.filters)
+             filters = filters.concat(opts.filters);
+     
+@@ -803,11 +803,20 @@ function optimizeTextModules(sources) {
+     }
+ }
+ 
++// The noconflict builds can be given a custom global/module namespace, so a
++// page that already runs its own ace (SAS Studio does) keeps two independent
++// module registries instead of fighting over window.ace.
++function nsFor(opts) {
++    return (opts.noconflict && process.env.ACE_NS) || opts.ns || "ace";
++}
++
+ function namespace(ns) {
+     return function(text) {
+         text = text
+             .toString()
+             .replace(/ACE_NAMESPACE\s*=\s*""/, 'ACE_NAMESPACE = "' + ns +'"')
++            // the worker prelude publishes itself under the same name (worker.js)
++            .replace(/window\.ace = window;/, "window." + ns + " = window;")
+             .replace(/\bdefine\(/g, function(def, index, source) {
+                 if (/(^|[;}),])\s*$/.test(source.slice(0, index)))
+                     return ns + "." + def;
+@@ -954,7 +963,7 @@ function getTargetDir(opts) {
+ 
+ function sanityCheck(opts, callback) {
+     var targetDir = getTargetDir(opts);
+-    require("child_process").execFile(process.execPath, ["-e", "(" + function() {
++    require("child_process").execFile(process.execPath, ["-e", "(" + (function() {
+         window = global;
+         require("./ace");
+         if (typeof ace.edit != "function")
+@@ -964,7 +973,7 @@ function sanityCheck(opts, callback) {
+                 require("./" + p);
+         });
+         process.exit(0);
+-    } + ")()"], {
++    } + ")()").replace(/\bace\.edit\b/, nsFor(opts) + ".edit")], {
+         cwd: targetDir
+     }, function(err, stdout) {
+         if (callback) return callback(err, stdout);

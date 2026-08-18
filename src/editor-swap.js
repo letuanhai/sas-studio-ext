@@ -15,6 +15,13 @@
 
   if (window.__ssExt) return;
 
+  // OUR ace library, set by doLoadNewAce() once lib/ace/src-noconflict/ace.js has
+  // run. It exports itself as window.__ssAce, never window.ace: that global is
+  // SAS Studio's own 1.x ace and stays untouched (see the "Ace library
+  // management" section below). Everything in this file that says `ace` means
+  // this one, and every user of it runs after loadNewAce() has resolved.
+  let ace = null;
+
   // ==========================================================================
   // AceEditorAdapter - implements the SAS.Editor API on top of Ace
   //
@@ -478,8 +485,7 @@
     active: false,
     newAceLoaded: false,
     patchesInstalled: false,
-    origLib: null, // { ace }
-    newLib: null, // { ace }
+    newLib: null, // { ace } - our ace library (window.__ssAce), never SAS's
     userSnippets: "", // stashed by toggle()/browse() before the ace lib loads
     _userSnippetsParsed: null, // previously-registered parsed snippets, for unregister
     _textViewers: [], // live { pane, tabHolder, adapter, item, textarea, origSet, origResize, editable, dirty, buttons } entries
@@ -566,28 +572,17 @@
   }
 
   // -- Ace library management ---------------------------------------------------
-  // The original ace build's #ace_editor.css/#ace-tm style elements are inert:
-  // SAS Studio renders its own editor DOM (EditorView.js) and never references
-  // any .ace_* class or calls ace.edit - the vendored ace is only ever used via
-  // runtime ace.require(...) for tokenization (Mode.js/SyntaxColorerAdapter.js).
-  // So those old style elements are just discarded here (avoids duplicate-rule
-  // edge cases once the new build's same-named styles are attached). The
-  // window.ace GLOBAL still has to be swapped between builds though, whenever
-  // the toggle is inactive - it's the registry those ace.require calls resolve
-  // against, and it needs to keep pointing at the version-matched library.
-
-  function backupOrigAce() {
-    if (ssExt.origLib) return;
-    ["ace_editor.css", "ace-tm"]
-      .map((id) => document.getElementById(id))
-      .filter(Boolean)
-      .forEach((el) => el.remove());
-    ssExt.origLib = { ace: window.ace };
-    delete window.ace;
-    Array.from(document.head.querySelectorAll("script[src]"))
-      .filter((el) => /\/ace\/.*\.js$/.test(el.src))
-      .forEach((el) => el.remove());
-  }
+  // The two ace libraries on the page never meet: SAS Studio's own (1.x) build
+  // keeps `window.ace` to itself, ours lives on `window.__ssAce` - build_lib.sh
+  // builds ace with its module-registry namespace set to ours (see its comment).
+  // That is the whole isolation mechanism. Nothing here swaps, pins or restores
+  // a global, so the ordering bug class it used to guard against - a lazily
+  // loaded keybinding/theme/mode registering itself into whichever library
+  // owned `ace` at that moment, which is how vim's :w/:q/:wq/:x once vanished -
+  // cannot arise, in either direction: SAS's own lazy loads land in SAS's
+  // registry and ours in ours, whatever the timing.
+  // Consequently SAS's stock editor still tokenizes against ITS ace, so bumping
+  // ACE_VERSION cannot break it and needs no compat shims.
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -616,42 +611,56 @@
     });
   }
 
-  async function loadNewAce(libPath) {
+  // Memoized on the in-flight promise, not just on newAceLoaded: ss-fixes kicks
+  // this off at page load outside toggle()/browse()'s _pending chain, so a
+  // toggle landing mid-load must await that same load, not start a second one.
+  function loadNewAce(libPath) {
     ssExt.libPath = libPath;
-    if (ssExt.newAceLoaded) return;
-    backupOrigAce();
+    if (ssExt.newAceLoaded) return Promise.resolve();
+    if (!ssExt._loading) {
+      ssExt._loading = doLoadNewAce(libPath).catch((e) => {
+        ssExt._loading = null; // let a later toggle/browse retry
+        throw e;
+      });
+    }
+    return ssExt._loading;
+  }
 
-    // lib/ace/ is pristine ace-builds@1.43.3 - the custom SAS mode/snippets and
+  async function doLoadNewAce(libPath) {
+    // lib/ace/ is upstream ace 1.43.3 - the custom SAS mode/snippets and
     // the browse_ss extension live under the extension root's src/ace/ instead
     // (see src/ace-patches.js's header comment for the rest of this split).
     const srcAcePath = libPath.replace(/\/lib\/ace\/src-noconflict$/, "/src/ace");
 
     dropOldAceStyles();
     await loadScript(`${libPath}/ace.js`);
-    if (window.ace && window.ace.config) {
-      window.ace.config.set("basePath", libPath);
+    // ace.js's loader exports the library under the renamed namespace (see the
+    // section comment above); window.ace is SAS Studio's and stays that way.
+    ace = window.__ssAce;
+    if (ace && ace.config) {
+      ace.config.set("basePath", libPath);
       // This build resolves "ace/keyboard/<name>" to keyboard-<name>.js, but the
       // bundled files are keybinding-<name>.js - without this override a
       // non-default keyboardHandler (vim, emacs, sublime, vscode - all
       // user-selectable from the options page/settings panel) 404s and silently
       // never loads. Fix the URLs before any editor is created.
       ["vim", "emacs", "sublime", "vscode"].forEach((name) => {
-        window.ace.config.setModuleUrl(`ace/keyboard/${name}`, `${libPath}/keybinding-${name}.js`);
+        ace.config.setModuleUrl(`ace/keyboard/${name}`, `${libPath}/keybinding-${name}.js`);
       });
       // ace/mode/sas and ace/snippets/sas aren't in lib/ (see above) - point ace's
       // lazy module loader at src/ace/ instead of the basePath default.
-      window.ace.config.setModuleUrl("ace/mode/sas", `${srcAcePath}/mode-sas.js`);
-      window.ace.config.setModuleUrl("ace/snippets/sas", `${srcAcePath}/snippets-sas.js`);
+      ace.config.setModuleUrl("ace/mode/sas", `${srcAcePath}/mode-sas.js`);
+      ace.config.setModuleUrl("ace/snippets/sas", `${srcAcePath}/snippets-sas.js`);
     }
     // mode-sas.js embeds Ace's own Python/Lua highlight rules for PROC PYTHON/LUA
     // submit;...endsubmit; blocks (require("./python_highlight_rules") etc.), so
     // those modes must already be registered before any editor is created.
     await loadScript(`${libPath}/mode-python.js`);
     await loadScript(`${libPath}/mode-lua.js`);
-    // Note: the src-noconflict build only ever assigns window.ace - its internal
-    // require/define are closure-local, so window.require/window.define (Dojo's
-    // AMD loader) are never touched and don't need swapping either direction.
-    // Its #ace_editor.css/#ace-tm style elements stay attached permanently from
+    // Note: the build's internal require/define are closure-local and it only
+    // ever assigns its own namespace object, so window.require/window.define
+    // (Dojo's AMD loader) and window.ace (SAS's) are all left alone. Its
+    // #ace_editor.css/#ace-tm style elements stay attached permanently from
     // here on - they're harmless since nothing in SAS Studio references .ace_*.
 
     await loadScript(`${libPath}/ext-language_tools.js`);
@@ -672,7 +681,7 @@
     // core) has loaded. This MUST run before ext-settings_menu.js below: its
     // bundled ace/ext/options snapshots modelist.modes at load time into the
     // settings-menu Mode dropdown, so the SAS entry has to exist first.
-    if (window.__ssExtApplyAcePatches) window.__ssExtApplyAcePatches(window.ace);
+    if (window.__ssExtApplyAcePatches) window.__ssExtApplyAcePatches(ace);
 
     // Bundles its own copy of ace/ext/options (OptionPanel) - the stock
     // Ctrl-,/showSettingsMenu panel. Eagerly loading it here means ace core's
@@ -687,25 +696,20 @@
     // insert mode and while unfocused, where the 3-class .ace_hidden-cursors rule
     // still wins). ambiance's ".ace-ambiance.normal-mode .ace_cursor-layer{z-index:0}"
     // hides it the same way, behind the marker layer.
-    window.ace.require("ace/lib/dom").importCssString(
+    ace.require("ace/lib/dom").importCssString(
       ".normal-mode .ace_cursor{background-color:rgba(255,0,0,0.5)!important}" +
         ".normal-mode .ace_hidden-cursors .ace_cursor{background-color:transparent!important}" +
         ".normal-mode .ace_cursor-layer{z-index:4!important}",
       "ssExtVimCursorFix",
     );
 
-    ssExt.newLib = { ace: window.ace };
+    ssExt.newLib = { ace: ace };
     ssExt.newAceLoaded = true;
 
     installDialogFocusPriorityPatch();
     installSettingsMenuPersistence();
     // Register vim :w/:q/:wq/:x once the new ace (and its vim module) is available.
-    installVimExCommands();
-
-    // loadNewAce can run while the toggle is inactive (browse-before-activate);
-    // ace.js just clobbered window.ace with the new build, so put the global
-    // back on whichever side is actually active.
-    window.ace = ssExt.active ? ssExt.newLib.ace : ssExt.origLib.ace;
+    await installVimExCommands();
   }
 
   // -- User-configurable snippets -------------------------------------------------
@@ -1290,15 +1294,20 @@
     if (tabObj) appDMS.tabs.closeTab(tabObj);
   }
 
-  function installVimExCommands() {
+  // Loaded with our own loadScript (not config.loadModule) and awaited, so the
+  // module is registered before loadNewAce returns and the defineEx calls below
+  // definitely run. keybinding-vim.js registers itself through the GLOBAL `ace`
+  // (src-noconflict build) - that used to land in SAS's old library whenever
+  // loadNewAce ran with the toggle inactive (browse/palette before activation),
+  // which left vim itself working but :w/:q/:wq/:x and the vimrc silently gone.
+  async function installVimExCommands() {
     if (ssExt._vimExInstalled) return;
     ssExt._vimExInstalled = true; // guard now so concurrent loads don't double-register
-    ssExt.newLib.ace.config.loadModule("ace/keyboard/vim", (vim) => {
+    try {
+      await loadScript(`${ssExt.libPath}/keybinding-vim.js`);
+      const vim = ssExt.newLib.ace.require("ace/keyboard/vim");
       const Vim = vim && vim.Vim;
-      if (!Vim || !Vim.defineEx) {
-        ssExt._vimExInstalled = false;
-        return;
-      }
+      if (!Vim || !Vim.defineEx) throw new Error("ace/keyboard/vim did not register");
       const saveAndClose = (cm) => {
         const ctx = resolveAceContext(cm.ace);
         vimSave(ctx);
@@ -1332,7 +1341,10 @@
       vimrcText.split("\n").forEach((line) => applyVimrcLine(Vim, line));
       ssExt._vimrcApplied = (ssExt._vimrcApplied || 0) + 1;
       ssExt._vimrcLastText = vimrcText;
-    });
+    } catch (e) {
+      ssExt._vimExInstalled = false;
+      console.warn("[SS Ext] vim :w/:q/:wq/:x not installed:", e);
+    }
   }
 
   function restoreTextViewers() {
@@ -1467,8 +1479,6 @@
 
     await loadNewAce(libPath);
     applySnippets(ssExt.userSnippets);
-    // Global still needs to point at the tokenizer's ace.require registry.
-    window.ace = ssExt.newLib.ace;
     ssExt.active = true;
     installPatches();
 
@@ -1481,8 +1491,6 @@
     if (!ssExt.active) return { active: false };
 
     ssExt.active = false;
-    // Global still needs to point at the tokenizer's ace.require registry.
-    window.ace = ssExt.origLib.ace;
 
     const restored = restoreTabsToOriginal();
     restoreTextViewers();
@@ -1517,8 +1525,6 @@
     // replacement itself. loadNewAce no-ops if already loaded.
     await loadNewAce(ssExt.libPath);
     applySnippets(ssExt.userSnippets);
-    // Resolve through the NEW ace instance, not window.ace - the global is the
-    // original library whenever the toggle is off.
     const browseSsModule = ssExt.newLib && ssExt.newLib.ace.require("ace/ext/browse_ss");
     const method = browseSsModule && browseSsModule.browse_ss && browseSsModule.browse_ss["browse_" + kind];
     if (typeof method !== "function") {

@@ -9,6 +9,11 @@
 
   const MODIFIER_KEYS = new Set(["Alt", "Control", "Meta", "Shift"]);
 
+  // The vendored build exports itself as window.__ssAce, not window.ace (see
+  // build_lib.sh's namespace rename - on the SAS Studio page that name is taken
+  // by SAS's own ace). Nothing else on this page provides an `ace` global.
+  const ace = window.__ssAce;
+
   // Ace-settings-panel options never saved into aceConfig (mirrors editor-swap.js):
   // "theme" is the options-page dark/light pair only; "mode" is per-file language,
   // never a saved default. Must stay in sync with editor-swap.js's copy.

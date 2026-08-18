@@ -1,9 +1,9 @@
 /**
- * Runtime patches applied on top of the PRISTINE vendored ace-builds@1.43.3
- * (lib/ace/). These reproduce the source modifications the project author made
- * in the ace fork (github.com/letuanhai/ace) — commits by letuanhai only —
- * without touching the vendored files, so lib/ace/ stays byte-identical to the
- * upstream npm package.
+ * Runtime patches applied on top of the vendored ace 1.43.3 (lib/ace/, an
+ * upstream build - only its module namespace is ours). These reproduce the
+ * source modifications the project author made in the ace fork
+ * (github.com/letuanhai/ace) — commits by letuanhai only — without touching
+ * the vendored files, so lib/ace/ stays upstream code.
  *
  * Scope, tied to the fork's commits:
  *   - decorators.js  (d076a5bf, 96d537fd): theme-aware scrollbar cursor bar +
