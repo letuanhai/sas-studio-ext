@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.12
+
+- The file and library browsers now reopen where you left them: the prompt
+  resumes at the path it was closed on (in memory, so a page reload falls back
+  to the root), and the focused tab's own file/table moved out of the prefilled
+  input and into the empty prompt's list as its first entry, tagged "Current
+  tab", above the bookmarks and recents. Every open used to jump away from
+  wherever the last one ended up.
+- The browsers' start paths ("Browse roots") are configurable, in the popup
+  rather than the options page: they name folders on one specific server, so
+  they are stored per host and the popup is already scoped to the active tab —
+  no host to type, no way to give a second SAS Studio instance the wrong roots.
+  Blank keeps the built-in project-tree-root / `libraries/` behavior. A change
+  takes effect at the next browse prompt rather than the next page reload, and
+  supersedes the remembered last path. The root is also listed last in the
+  empty prompt, tagged "Root", so it is one keypress away.
+- Browse matches are sorted by how well they match what you typed instead of by
+  the folder's own order, so an exact name is the first row rather than
+  wherever it happened to sit in the listing. Bookmarks and recents are sorted
+  separately so the two labelled runs can't interleave.
+- Opening a file as text from the browse prompt no longer hangs the app. The
+  item it passed had no id, so the second such tab threw on a duplicate widget
+  id and left the modal "Reading file" dialog up forever. Only the browse path
+  was affected — tree items already carry an id.
+- New "Force-close a stuck busy dialog" action (unbound by default, assignable
+  in the options page, listed in the command palette). When SAS Studio errors
+  with a busy or run dialog up, the modal never comes down and its underlay
+  blocks the whole app; until now the only way out was reloading. It destroys
+  the live dialogs, hides a leftover underlay, re-enables what the run-dialog
+  patch disabled, and resets any tab still marked as running. Each step is
+  guarded: it reports what it cleared, or says the app is usable but should be
+  reloaded.
+- Several default hotkeys were wrong and never fired: the tab-switching and
+  layout-reset defaults named the shifted punctuation (`}`, `{`, `|`) instead
+  of the physical key, and every letter default was uppercase, which no longer
+  matches after the Alt-key handling added in 0.11. Two pairs also collided —
+  "Open user input target" (now unbound) clashed with "Browse library" on
+  Alt+O, and "Reopen closed tab" (now Alt+Shift+W) with "Browse tabs" on
+  Alt+T. Hotkeys you set yourself are untouched.
+- Our Ace and SAS Studio's own bundled 1.x Ace are now two separate libraries
+  with separate module registries: `build_lib.sh` builds Ace from source with
+  its registry renamed to `window.__ssAce`, so `window.ace` is never touched.
+  Previously the extension replaced SAS's Ace outright — the only way to stop a
+  lazily loaded module (`keybinding-vim.js` and anything like it) from landing
+  in whichever library owned the global — which left SAS's stock editor running
+  on our build and made every Ace upgrade a compatibility exercise. Nothing
+  changes visibly; Ace upgrades stop being able to break the stock editor.
+
 ## 0.11
 
 - New "Use the Ace editor from page load" patch in the options page: with it
