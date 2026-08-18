@@ -22,8 +22,8 @@
  * `--disable-extensions-except` and `ignoreDefaultArgs: ["--disable-extensions"]`.
  *
  * Also needs `lib/ace/src-noconflict/ace.js` and `lib/ace-linters/*.js` present
- * (the fast, network-only part of `./build_lib.sh` - its `npm pack` calls for
- * ace-builds/ace-linters) or the Ace-activation tests fail on a 404. The slow
+ * (`./build_lib.sh`'s ace source build, ~1 min, and its `npm pack` of
+ * ace-linters) or the Ace-activation tests fail on a 404. The much slower
  * `lib/sas-lsp` clone+webpack build is only needed for the LSP-specific checks;
  * everything else degrades gracefully (one console warning) without it.
  *

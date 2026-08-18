@@ -78,8 +78,8 @@ the page is reloaded.
 ## Installation
 
 1. Clone this repository
-2. `./build_lib.sh` — generates the gitignored `lib/` directory (vendored Ace +
-   ace-linters from npm, and the SAS language server bundle built from source;
+2. `./build_lib.sh` — generates the gitignored `lib/` directory (ace-linters
+   vendored from npm, Ace and the SAS language server bundle built from source;
    needs git/node/npm/network, the LSP build takes a while the first time)
 3. `chrome://extensions/` → enable **Developer mode** → **Load unpacked** → select this directory
 4. (optional) Pin the extension from the puzzle-piece menu
@@ -221,7 +221,9 @@ The repo root is the extension root (the directory you load unpacked):
 at the root. `lib/` is gitignored, generated output: `./build_lib.sh` is the
 single place third-party library versions are recorded and bumped — it vendors
 `ace-linters` from npm (byte-identical to the tarball) and builds Ace and the
-SAS language server bundle from source. `./package.sh` zips
+SAS language server bundle from source, each from a pinned upstream tag with a
+patch from the repo root applied (`ace-namespace.patch` /
+`remove-pyright.patch`). `./package.sh` zips
 `manifest.json src assets lib` (plus README/LICENSE/CHANGELOG) into
 `dist/sas-studio-ext-<version>.zip` for publishing, running `./build_lib.sh`
 first if `lib/` is incomplete, and leaving out everything development-only
