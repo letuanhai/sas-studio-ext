@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13
+
+- Cancelling a run no longer means leaving maximized view first. The maximize
+  patch collapses the bottom status bar, which is also where the minimized run
+  dialog puts its Cancel link, so the link was unreachable for the whole run.
+  The bar is now kept (or brought back) at its normal height while a run is in
+  flight — including when you maximize mid-run — and collapses again at run
+  end.
+- Browse matches whose name actually contains what you typed now rank above
+  fuzzy ones, which previously could push a plain substring hit below a
+  scattered-letter match.
+
 ## 0.12
 
 - The file and library browsers now reopen where you left them: the prompt
