@@ -810,6 +810,16 @@ Add a prefix to the path for different option:
     return window.dijit.byId(`${targetTreeId}.tree`);
   }
 
+  /**
+   * Height the bottom status bar should currently have: collapsed in maximized
+   * view (that's the point of the maximizeEditor patch), except while a run is
+   * in flight - the minimized run dialog puts its Cancel link there, and it is
+   * unreachable if the bar is collapsed.
+   */
+  function statusBarHeight() {
+    return window.appDMS.inMaxView && !document.getElementById("ssf-run-cancel") ? 0 : "17.35px";
+  }
+
   /** Cleanup objects not properly destroyed in dijit registry */
   function cleanUpDijitRegistry() {
     const registry = window.dijit.registry;
@@ -1226,7 +1236,7 @@ Add a prefix to the path for different option:
         cleanUpDijitRegistry();
         o_setMaxView.call(this);
         document.getElementById("headContainer").style.height = 0;
-        document.getElementById("studio_status_bar").style.height = 0;
+        document.getElementById("studio_status_bar").style.height = statusBarHeight();
         window.dispatchEvent(new Event("resize"));
       };
       const o_setRegularView = window.appDMS.setRegularView;
@@ -1420,6 +1430,12 @@ Add a prefix to the path for different option:
           };
           bar.appendChild(link);
         }
+        // The maximizeEditor patch collapses the bar to 0 height; un-collapse
+        // it for the duration of the run so Cancel stays reachable.
+        if (bar) {
+          bar.style.height = statusBarHeight();
+          window.dispatchEvent(new Event("resize"));
+        }
 
         // Mark the running tab with an animated spinner icon + amber label so
         // you can see WHICH open script is executing. The run is initiated from
@@ -1440,6 +1456,10 @@ Add a prefix to the path for different option:
         if (bar) bar.style.removeProperty("background");
         const link = document.getElementById("ssf-run-cancel");
         if (link) link.remove();
+        if (bar) {
+          bar.style.height = statusBarHeight();
+          window.dispatchEvent(new Event("resize"));
+        }
       }
 
       // Spinner-icon + amber-label animation for the running tab, injected once.
