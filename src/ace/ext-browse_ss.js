@@ -439,10 +439,14 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             const results = filtered.filterCompletions(resultItems, filterText);
             // ace scores every match ($score = -penalty: the earlier and tighter
             // the hit, the higher) but never sorts, leaving the collection's own
-            // order - so sort by it here, best first. Stable, so equal scores
-            // (all of them when nothing is typed) keep that original order.
+            // order - so sort by it here: contiguous (substring) matches first,
+            // then by score. Stable, so equal ranks (all of them when nothing is
+            // typed) keep that original order.
+            const needle = (filterText ?? '').toLowerCase();
+            const fullMatch = (/** @type {DataItem} */ item) => needle &&
+                String(item.value ?? '').toLowerCase().includes(needle) ? 1 : 0;
             ///@ts-ignore
-            return results.sort((a, b) => b.$score - a.$score);
+            return results.sort((a, b) => fullMatch(b) - fullMatch(a) || b.$score - a.$score);
         }
 
         /**
