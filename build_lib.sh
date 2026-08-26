@@ -14,8 +14,10 @@
 #                    Pyright (Python LSP, ~6 MB) stripped via
 #                    remove-pyright.patch at the repo root
 #
-# The ace-linters copy is byte-identical to its tarball - never hand-edit lib/
-# (runtime tweaks belong in src/ace-patches.js). Both source builds are skipped
+# The ace-linters copy is byte-identical to its tarball bar one blanked-out
+# unpkg URL, and the ace build bar two dropped snippet files - both are MV3
+# remote-hosted-code strings the Chrome Web Store rejects, see the comments at
+# each spot. Never hand-edit lib/ (runtime tweaks belong in src/ace-patches.js). Both source builds are skipped
 # while lib/<name>/.version already records the version being asked for: ace
 # takes a couple of minutes, the LSP (npm ci + two webpack builds) many.
 #
@@ -90,6 +92,14 @@ else
   cp -r "$ACE_SRC/build/src-noconflict" "$ACE_SRC/build/types" lib/ace/
   echo "$ACE_VERSION-$ACE_NAMESPACE" > lib/ace/.version
 
+  # Chrome Web Store review reads shipped source as if it ran: ace's html/liquid
+  # snippet files carry `html5shiv` snippets whose BODY TEXT is a
+  # <script src="https://cdnjs.cloudflare.com/..."> tag, and the MV3 scanner
+  # flags that as remotely hosted code (rejection "Blue Argon", 2026-08). They
+  # are inert text for snippet insertion, and neither mode is reachable from a
+  # SAS editor - drop any snippet file that embeds a remote script tag.
+  grep -rlE 'script[^>]*src=[^>]*http' lib/ace/src-noconflict/snippets | xargs -r rm -f
+
   # The build's own sanity check already required every file under the new
   # namespace, so this only guards against copying the wrong target dir.
   grep -qrF -- "$ACE_NAMESPACE.define(" lib/ace/src-noconflict || {
@@ -104,8 +114,17 @@ npm pack --silent "ace-linters@$ACE_LINTERS_VERSION" --pack-destination "$TMP" >
 tar -xzf "$TMP"/ace-linters-*.tgz -C "$TMP"
 rm -rf lib/ace-linters
 mkdir -p lib/ace-linters
-cp "$TMP/package/build/language-client.js" \
-   "$TMP/package/build/ace-language-client.js" lib/ace-linters/
+cp "$TMP/package/build/language-client.js" lib/ace-linters/
+# Same MV3 remote-code rule as the ace snippets above: ace-linters' built-in
+# service table gives its python service a `cdnUrl` on unpkg.com. We never
+# instantiate those services (we drive our own SAS server worker), so blank the
+# URL out - the only edit made to either bundle, otherwise byte-identical.
+sed 's#"https://www.unpkg.com/ace-python-ruff-linter/build"#""#' \
+  "$TMP/package/build/ace-language-client.js" > lib/ace-linters/ace-language-client.js
+if grep -q 'unpkg.com' lib/ace-linters/ace-language-client.js; then
+  echo "build_lib.sh: ace-linters still references unpkg.com" >&2
+  exit 1
+fi
 
 # -- lib/sas-lsp --------------------------------------------------------------
 if [ -f lib/sas-lsp/sas-server.js ] && [ "$(cat lib/sas-lsp/.version 2>/dev/null)" = "$SAS_LSP_VERSION" ]; then
