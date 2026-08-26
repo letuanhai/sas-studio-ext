@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14
+
+- Removed remotely hosted code from the vendored libraries so the extension
+  passes Chrome Web Store Manifest V3 review (which had rejected it). Ace's
+  bundled html/liquid snippet files carried an `html5shiv` snippet whose body
+  is a `<script src="https://cdnjs.cloudflare.com/...">` tag, and ace-linters
+  pointed its (unused) python service at a script on unpkg.com. Both were inert
+  here — neither snippet mode is reachable from a SAS editor and the language
+  server runs from a worker we build ourselves — but the store scans shipped
+  source as if it executed. The snippet files are now dropped and the unpkg URL
+  blanked out at build time, each guarded so a future library bump fails loudly
+  if the string comes back.
+
 ## 0.13
 
 - Cancelling a run no longer means leaving maximized view first. The maximize
