@@ -229,6 +229,7 @@
                   },
                 }),
           );
+          installLspMetaLabels(this.aceEditor);
           // The semanticTokens/full request ace-linters fires on registration
           // races the server's didOpen handling and fails once; kick a refresh
           // after the server's had time to open the document so the initial
@@ -693,6 +694,7 @@
 
     await loadScript(`${libPath}/ext-language_tools.js`);
     registerOtherEditorsCompleter();
+    registerSasContextCompleter();
     await loadScript(`${srcAcePath}/ext-browse_ss.js`);
     // Warm the command-history cache now (fire-and-forget - "SsCmdPaletteHistory",
     // inlined since CMD_HISTORY_KEY is defined later in this closure but not yet
@@ -730,6 +732,16 @@
         ".normal-mode .ace_hidden-cursors .ace_cursor{background-color:transparent!important}" +
         ".normal-mode .ace_cursor-layer{z-index:4!important}",
       "ssExtVimCursorFix",
+    );
+
+    // The completion popup's meta column (library / SASHELP. / CLASS. / program)
+    // is flex: 0 0 auto, so it never shrinks - the CAPTION ellipsizes to make
+    // room for it. At ace's stock 300px a table-name meta would eat the column
+    // names it labels. !important because importCssString prepends to <head>,
+    // so this sheet sits ABOVE ace's own and would otherwise lose the tie.
+    ace.require("ace/lib/dom").importCssString(
+      ".ace_editor.ace_autocomplete{width:400px!important}",
+      "ssExtCompletionPopup",
     );
 
     ssExt.newLib = { ace: ace };
@@ -787,6 +799,236 @@
           [...words].map((w) => ({ caption: w, value: w, score: 0, meta: "tab" })),
         );
       },
+    });
+  }
+
+  // -- SAS context completion: PROC SQL tables + column names ----------------------
+  // Two things the SAS language server can't answer, so we answer them from SAS
+  // Studio's own library tree (the same source as sas/getLibList):
+  //  - PROC SQL data set names. Inside `proc sql;` every position is zone
+  //    PROC_STMT_OPT and the server only offers the SELECT statement's option
+  //    NAMES: its syntax data types the FROM option as "value", not "dataSet", so
+  //    isDataSetType() never fires and no library list is ever requested. Verified
+  //    against the language service directly for from/join/create table/insert/update.
+  //  - Columns. The server has no column zone at all (getDocumentVariables() is a
+  //    `//TODO:` stub), so `keep `, `var `, `select `, `where ` get nothing.
+  //
+  // ponytail: regexes over the current step, not a SAS parser. Macro-generated
+  // names (&tbl) and tables the program hasn't created yet are out of scope - the
+  // library tree only knows what already exists on the server.
+
+  // Clause keywords whose operand is a data set, restricted to the ones the
+  // language server misses (`set`/`data=` already work, and duplicating them
+  // would double every entry).
+  const SQL_DATASET_RE = /\b(?:from|join|into|update|table|view)\s+(?:([A-Za-z_]\w*)\.)?[A-Za-z_]*$/i;
+  // Same keywords plus the data-step ones, for finding which tables a step reads.
+  const TABLE_REF_RE = /\b(from|join|into|update|table|set|merge|data\s*=)\s*/gi;
+  // ...but only the SQL ones take an alias: `from a b` aliases a, while the data
+  // step's `set a b` / `merge a b` are two data sets.
+  const TAKES_ALIAS_RE = /^(?:from|join|into|update|table|view)$/i;
+  // Words that can follow a table name but are never an alias or another table.
+  const NOT_A_TABLE = new Set(
+    ("where group order having on inner left right full outer cross natural join union as select " +
+      "from into update table view set merge quit run by and or not when case end do then else if " +
+      "output keep drop rename format informat label length retain distinct calculated")
+      .split(" "),
+  );
+  const STEP_LOOKBACK_ROWS = 200; // a single step practically never spans more
+  const CONTEXT_SCORE = 1000; // above the LSP's 0, far above the text completers
+
+  // "LIB.TABLE" -> null while the columns are loading, else [{ name, type }].
+  const columnsByRef = new Map();
+
+  function refKey(ref) {
+    return `${(ref.lib || "WORK").toUpperCase()}.${ref.table.toUpperCase()}`;
+  }
+
+  // A run holds the workspace session single-threaded, so a column lookup fired
+  // now would just queue behind it (see ss-fixes' minimizeBusyDialog notice).
+  function runInProgress() {
+    const d = window.__ssfRunDialog;
+    return !!(d && d.open && !d._destroyed);
+  }
+
+  function warmColumns(refs) {
+    if (runInProgress()) return;
+    refs.forEach((ref) => {
+      const key = refKey(ref);
+      if (columnsByRef.has(key)) return;
+      columnsByRef.set(key, null);
+      resolveColumns(ref)
+        .then((cols) => columnsByRef.set(key, cols))
+        .catch(() => columnsByRef.set(key, []));
+    });
+  }
+
+  // "sashelp.class" -> that table's columns, resolved by NAME through the two
+  // cached listings so no tree path is ever constructed by hand.
+  function resolveColumns(ref) {
+    const libName = (ref.lib || "WORK").toUpperCase();
+    const tableName = ref.table.toUpperCase();
+    return getLibList(null)
+      .then((libs) => libs.find((l) => l.name.toUpperCase() === libName))
+      .then((lib) => (lib ? getLibList(lib.id) : []))
+      .then((tables) => tables.find((t) => t.name.toUpperCase() === tableName))
+      .then((table) => (table ? getColumnList(table.id) : []));
+  }
+
+  // The whole step around the cursor, plus the text before the cursor within it.
+  // It has to reach PAST the cursor: `select | from sashelp.class` names its
+  // table after the caret, which is exactly where columns are wanted.
+  // Boundaries: back to the last proc/data, forward to the next run;/quit; or
+  // next proc/data. An intervening run;/quit; BEFORE the cursor means that step
+  // is already over and nothing is in scope.
+  function stepAroundCursor(session, pos) {
+    const firstRow = Math.max(0, pos.row - STEP_LOOKBACK_ROWS);
+    const lastRow = Math.min(session.getLength() - 1, pos.row + STEP_LOOKBACK_ROWS);
+    const lines = session.getLines(firstRow, lastRow);
+    const text = lines.join("\n");
+    const caret =
+      lines.slice(0, pos.row - firstRow).reduce((n, l) => n + l.length + 1, 0) + pos.column;
+    const before = text.slice(0, caret);
+
+    const boundary = /(?:^|[\s;])(?:proc|data)\b/gi;
+    let start = -1;
+    let m;
+    while ((m = boundary.exec(before))) start = m.index;
+    if (start < 0 || /\b(?:run|quit)\s*;/i.test(before.slice(start))) return { before, step: "" };
+
+    const ahead = /\b(?:run|quit)\s*;|(?:^|[\s;])(?:proc|data)\b/i.exec(text.slice(caret));
+    const end = ahead ? caret + ahead.index + ahead[0].length : text.length;
+    return { before, step: text.slice(start, end) };
+  }
+
+  // Table references in a step: `from a.b x`, `join a.b as x`, `set a b`,
+  // `merge a b`, `data=a.b`, `from a, b`. Returns [{ lib, table, alias }].
+  function tableRefs(stepText) {
+    const refs = [];
+    const seen = new Set();
+    TABLE_REF_RE.lastIndex = 0;
+    let m;
+    while ((m = TABLE_REF_RE.exec(stepText))) {
+      let i = TABLE_REF_RE.lastIndex;
+      const takesAlias = TAKES_ALIAS_RE.test(m[1]);
+      for (;;) {
+        const name = /^([A-Za-z_]\w*)(?:\.([A-Za-z_]\w*))?/.exec(stepText.slice(i));
+        if (!name || NOT_A_TABLE.has(name[1].toLowerCase())) break;
+        i += name[0].length;
+        const alias = takesAlias
+          ? /^[ \t]+(?:as[ \t]+)?([A-Za-z_]\w*)/i.exec(stepText.slice(i))
+          : null;
+        const aliasName = alias && !NOT_A_TABLE.has(alias[1].toLowerCase()) ? alias[1] : null;
+        if (aliasName) i += alias[0].length;
+        const ref = { lib: name[2] ? name[1] : null, table: name[2] || name[1], alias: aliasName };
+        const key = refKey(ref) + "/" + (aliasName || "");
+        if (!seen.has(key)) {
+          seen.add(key);
+          refs.push(ref);
+        }
+        const separator = /^[ \t]*,[ \t\n]*|^[ \t]+/.exec(stepText.slice(i));
+        if (!separator) break;
+        i += separator[0].length;
+      }
+    }
+    return refs;
+  }
+
+  // Table names run to 32 characters and ace lets the meta win the flex fight
+  // against the caption, so cap ours rather than ellipsize the column it labels.
+  function tableMeta(name) {
+    const upper = name.toUpperCase();
+    return (upper.length > 12 ? upper.slice(0, 11) + "…" : upper) + ".";
+  }
+
+  // Exposed for test/smoke.js (the parsing is checked without a live LSP).
+  ssExt._sasContext = {
+    tableRefs,
+    stepAroundCursor,
+    tableMeta,
+    columnsByRef,
+    relabelLspCompletions,
+  };
+
+  function registerSasContextCompleter() {
+    if (ssExt._sasContextCompleterAdded) return;
+    ssExt._sasContextCompleterAdded = true;
+    ace.require("ace/ext/language_tools").addCompleter({
+      id: "ssextSasContext",
+      getCompletions: (editor, session, pos, prefix, callback) => {
+        const results = [];
+        try {
+          if (session.$modeId === "ace/mode/sas") collectSasContext(session, pos, results);
+        } catch (e) {
+          console.warn("[SS Ext] SAS context completions failed:", e);
+        }
+        callback(null, results);
+      },
+    });
+  }
+
+  function collectSasContext(session, pos, results) {
+    const { before, step } = stepAroundCursor(session, pos);
+    const line = before.slice(before.lastIndexOf("\n") + 1);
+    const refs = step ? tableRefs(step) : [];
+    warmColumns(refs);
+
+    // 1. PROC SQL (and friends): libraries, or one library's tables.
+    const dataset = SQL_DATASET_RE.exec(line);
+    if (dataset) {
+      const libref = dataset[1];
+      const lib = libref && resolvedLib(libref);
+      if (libref) {
+        if (lib) {
+          resolvedTables(lib.id).forEach((t) =>
+            results.push({
+              caption: t.name,
+              value: t.name,
+              score: CONTEXT_SCORE,
+              meta: tableMeta(libref),
+            }),
+          );
+          getLibList(lib.id); // warm, so the next keystroke has it
+        } else {
+          getLibList(null);
+        }
+      } else {
+        resolvedLibs().forEach((l) =>
+          results.push({ caption: l.name, value: l.name, score: CONTEXT_SCORE, meta: "library" }),
+        );
+        getLibList(null);
+      }
+    }
+
+    // 2. Columns of every table the step reads. Offered step-wide rather than
+    // after an allowlist of clauses (case-when, function arguments, calculated,
+    // data-step expressions... an allowlist misses more than it saves), but not
+    // at the start of a statement, where a statement keyword is what's wanted.
+    if (!refs.length || /(?:^|;)\s*[A-Za-z_]*$/.test(before)) return;
+    // A `name.` before the caret scopes the columns to that table - by TABLE
+    // name only. SQL aliases are deliberately not resolved here: they're still
+    // PARSED, so `from a.b x` doesn't invent a table named x, but `x.` gets no
+    // columns rather than a guess.
+    const qualifier = /([A-Za-z_]\w*)\.[A-Za-z_]*$/.exec(line);
+    const scoped = qualifier
+      ? refs.filter((r) => r.table.toUpperCase() === qualifier[1].toUpperCase())
+      : refs;
+    // A qualifier that names no table in the step (a libref, an alias, a
+    // function, ...) is not a column context.
+    if (qualifier && !scoped.length) return;
+
+    const seen = new Set();
+    scoped.forEach((ref) => {
+      (columnsByRef.get(refKey(ref)) || []).forEach((col) => {
+        const key = col.name.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        results.push({
+          caption: col.name,
+          value: col.name,
+          score: CONTEXT_SCORE,
+          meta: tableMeta(ref.table),
+        });
+      });
     });
   }
 
@@ -913,6 +1155,9 @@
   // "~" form, so a library's id round-trips straight back as the next libId.
   // Shape is the server's LibCompleteItem: { id, name, type: DATA|VIEW|LIBRARY }.
   const libListCache = new Map(); // libId ?? "@libs" -> Promise<LibCompleteItem[]>
+  // Resolved values of the same keys. Completers run on every keystroke and have
+  // to answer synchronously, so they read these and let the promises warm them.
+  const libListResolved = new Map();
   ssExt._libListCache = libListCache; // both exposed for test/smoke.js
   ssExt._getLibList = getLibList;
 
@@ -922,23 +1167,32 @@
       installLibListInvalidation();
       libListCache.set(
         key,
-        queryLibList(libId).catch((e) => {
-          console.warn("[SS Ext] library list unavailable:", e);
-          libListCache.delete(key); // never cache a failure
-          return [];
-        }),
+        queryLibList(libId)
+          .then((items) => {
+            libListResolved.set(key, items);
+            return items;
+          })
+          .catch((e) => {
+            console.warn("[SS Ext] library list unavailable:", e);
+            libListCache.delete(key); // never cache a failure
+            return [];
+          }),
       );
     }
     return libListCache.get(key);
   }
 
-  function queryLibList(libId) {
-    // treeModel is recreated on session reset, so resolve it per call, and let a
-    // missing one resolve empty rather than leaving the request unanswered.
+  // treeModel is recreated on session reset, so resolve it per call, and let a
+  // missing one resolve empty rather than leaving a request unanswered.
+  function queryTreeChildren(path) {
     const libs = typeof appDMS !== "undefined" && appDMS.libraries;
     if (!libs || !libs.treeModel) return Promise.resolve([]);
-    return Promise.resolve(libs.treeModel.query(libId || "libraries")).then((item) =>
-      ((item && item.children) || [])
+    return Promise.resolve(libs.treeModel.query(path)).then((item) => (item && item.children) || []);
+  }
+
+  function queryLibList(libId) {
+    return queryTreeChildren(libId || "libraries").then((children) =>
+      children
         .filter((c) => c.isLibrary || c.table)
         .map((c) => ({
           id: c.id,
@@ -946,6 +1200,103 @@
           type: c.isLibrary ? "LIBRARY" : c.type === "VIEW" ? "VIEW" : "DATA",
         })),
     );
+  }
+
+  // Columns of one table, keyed by the library tree's own id for it (the `id` of
+  // the entry getLibList returned, e.g. "libraries~SASHELP~CLASS.DATA"), so the
+  // ids round-trip and nothing here builds a path by hand.
+  const colListCache = new Map(); // tableId -> Promise<[{ name, type }]>
+
+  function getColumnList(tableId) {
+    if (!colListCache.has(tableId)) {
+      installLibListInvalidation();
+      colListCache.set(
+        tableId,
+        queryTreeChildren(tableId)
+          .then((children) =>
+            children
+              .filter((c) => c.library === "columns")
+              .map((c) => ({ name: c.name, type: c.type })),
+          )
+          .catch((e) => {
+            console.warn("[SS Ext] column list unavailable:", e);
+            colListCache.delete(tableId);
+            return [];
+          }),
+      );
+    }
+    return colListCache.get(tableId);
+  }
+
+  // -- Synchronous readers over the caches above (for the completers) -------------
+
+  function resolvedLibs() {
+    return libListResolved.get("@libs") || [];
+  }
+
+  function resolvedLib(name) {
+    const upper = String(name).toUpperCase();
+    return resolvedLibs().find((l) => l.name.toUpperCase() === upper);
+  }
+
+  function resolvedTables(libId) {
+    return libListResolved.get(libId) || [];
+  }
+
+  // Uppercased table names of a library, or null when that list isn't loaded -
+  // null means "don't know", which the meta relabelling treats differently
+  // from "loaded and this name isn't a table".
+  function resolvedTableNames(libref) {
+    const lib = resolvedLib(libref);
+    const tables = lib && libListResolved.get(lib.id);
+    return tables ? new Set(tables.map((t) => t.name.toUpperCase())) : null;
+  }
+
+  // -- Meta labels on the language server's own completions -----------------------
+  // The server tags a library CompletionItemKind.Folder and EVERYTHING else -
+  // tables, data set names it parsed out of the program, plain keywords -
+  // Keyword (CompletionProvider.getItemKind), and ace-linters turns the kind
+  // straight into the popup's right-hand column, so they read "Folder"/"Keyword".
+  // Relabel them where we can tell what they are:
+  //   Folder                                        -> "library"
+  //   Keyword + a known table of the typed libref   -> "SASHELP."
+  //   Keyword in a response that also lists libraries -> "program"  (the server
+  //     mixes the program's own data set names into that one list, and only that one)
+  const KIND_KEYWORD = 14;
+  const KIND_FOLDER = 19;
+
+  // Patched in place rather than wrapped in a copy: ace-linters keeps finding
+  // this object by id (setServerCapabilities assigns triggerCharacters onto it).
+  function installLspMetaLabels(aceEditor) {
+    const completer = (aceEditor.completers || []).find((c) => c.id === "lspCompleters");
+    if (!completer || completer.__ssextMetaPatched) return;
+    completer.__ssextMetaPatched = true;
+    const original = completer.getCompletions.bind(completer);
+    completer.getCompletions = (ed, session, pos, prefix, callback) => {
+      original(ed, session, pos, prefix, (err, results) => {
+        try {
+          relabelLspCompletions(results, session, pos);
+        } catch (e) {
+          /* labels are cosmetic - never lose the completions over one */
+        }
+        callback(err, results);
+      });
+    };
+  }
+
+  function relabelLspCompletions(results, session, pos) {
+    if (!results || !results.length) return;
+    const kindOf = (r) => r.item && r.item.kind;
+    const listsLibraries = results.some((r) => kindOf(r) === KIND_FOLDER);
+    const typed = /([A-Za-z_]\w*)\.[A-Za-z_]*$/.exec(session.getLine(pos.row).slice(0, pos.column));
+    const tables = typed ? resolvedTableNames(typed[1]) : null;
+    results.forEach((r) => {
+      const kind = kindOf(r);
+      if (kind === KIND_FOLDER) r.meta = "library";
+      else if (kind !== KIND_KEYWORD) return;
+      else if (tables && tables.has(String(r.caption).toUpperCase())) r.meta = tableMeta(typed[1]);
+      else if (listsLibraries) r.meta = "program";
+    });
   }
 
   // Libraries change whenever SAS Studio refreshes its library tree: every run end
@@ -963,6 +1314,9 @@
       if (typeof original !== "function") return;
       libs[name] = function () {
         libListCache.clear();
+        libListResolved.clear();
+        colListCache.clear();
+        columnsByRef.clear();
         return original.apply(this, arguments);
       };
     });

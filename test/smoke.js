@@ -542,6 +542,175 @@ function check(name, ok, detail) {
     otherEditorsState,
   );
 
+  // -- SAS context completion: step parsing ----------------------------------------
+  // Pure logic, no server: which tables a step reads, and where a step ends.
+  const parseState = await page.evaluate(() => {
+    const { tableRefs, stepAroundCursor, tableMeta } = window.__ssExt._sasContext;
+    const refs = (t) => tableRefs(t).map((r) => `${r.lib || ""}|${r.table}|${r.alias || ""}`);
+    // stepAroundCursor takes a session, so drive it through a throwaway editor.
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_step_parse";
+    div.style.cssText = "position:fixed;left:-9999px;top:0;width:400px;height:200px";
+    document.body.appendChild(div);
+    const a = new window.__ssExt.AceEditorAdapter(div.id, "", "sas");
+    const stepAt = (marked) => {
+      const head = marked.slice(0, marked.indexOf("|")).split("\n");
+      a.aceEditor.setValue(marked.replace("|", ""), -1);
+      return stepAroundCursor(a.aceEditor.session, {
+        row: head.length - 1,
+        column: head[head.length - 1].length,
+      }).step;
+    };
+    const out = {
+      sqlAlias: refs("proc sql; select * from sashelp.class a join work.b as c on 1"),
+      notAnAlias: refs("proc sql; select * from sashelp.class where x"),
+      dataStep: refs("data t; merge one two; set sashelp.class end=eof;"),
+      procData: refs("proc print data = sashelp.cars;"),
+      betweenSteps: stepAt("data t; set sashelp.class; run;\n|"),
+      // The table is named AFTER the caret here - the step must reach past it.
+      lookahead: stepAt("proc sql;\n  select | from sashelp.class;"),
+      stopsAtNextStep: stepAt("proc sql;\n  select | from a.b;\nquit;\ndata z; set sashelp.cars;"),
+      meta: [tableMeta("class"), tableMeta("a_very_long_table_name")],
+    };
+    a.dispose();
+    div.remove();
+    return out;
+  });
+  check(
+    "step parsing finds tables, aliases and data-step lists",
+    JSON.stringify(parseState.sqlAlias) === '["sashelp|class|a","work|b|c"]' &&
+      JSON.stringify(parseState.notAnAlias) === '["sashelp|class|"]' &&
+      JSON.stringify(parseState.dataStep) === '["|one|","|two|","sashelp|class|"]' &&
+      JSON.stringify(parseState.procData) === '["sashelp|cars|"]',
+    parseState,
+  );
+  check(
+    "the step spans past the caret, ends at run;/quit;, and metas are capped",
+    parseState.betweenSteps === "" &&
+      /sashelp\.class/.test(parseState.lookahead) &&
+      !/sashelp\.cars/.test(parseState.stopsAtNextStep) &&
+      JSON.stringify(parseState.meta) === '["CLASS.","A_VERY_LONG…."]',
+    parseState,
+  );
+
+  // -- SAS context completion: tables and columns ----------------------------------
+  // PROC SQL data set names (the language server has no dataSet-typed option for
+  // FROM) and column names (it has no column zone at all), both from SAS Studio's
+  // own library tree. The first call only warms the caches - by design, the popup
+  // never waits on a round trip - so each context is asked twice.
+  const contextState = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_sas_context";
+    div.style.cssText = "position:fixed;left:-9999px;top:0;width:600px;height:300px";
+    document.body.appendChild(div);
+    const a = new window.__ssExt.AceEditorAdapter(div.id, "", "sas");
+    const ed = a.aceEditor;
+    const completer = ed.completers.find((c) => c.id === "ssextSasContext");
+
+    // "|" marks the cursor.
+    const ask = (marked) => {
+      const before = marked.slice(0, marked.indexOf("|")).split("\n");
+      const pos = { row: before.length - 1, column: before[before.length - 1].length };
+      ed.setValue(marked.replace("|", ""), -1);
+      ed.moveCursorTo(pos.row, pos.column);
+      return new Promise((res) =>
+        completer.getCompletions(ed, ed.session, pos, "", (e, r) => res(r || [])),
+      );
+    };
+    const askTwice = async (text) => {
+      await ask(text);
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 250));
+        const r = await ask(text);
+        if (r.length) return r;
+      }
+      return [];
+    };
+
+    const libs = await askTwice("proc sql;\n  select * from |");
+    const tables = await askTwice("proc sql;\n  select * from sashelp.|");
+    const cols = await askTwice("proc sql;\n  select | from sashelp.class;");
+    const scoped = await askTwice("proc sql;\n  select class.| from sashelp.class;");
+    const atStart = await ask("data t;\n  set sashelp.class;\n  k|");
+    const dataStepCols = await askTwice("data t;\n  set sashelp.class;\n  if | then;");
+
+    a.dispose();
+    div.remove();
+    const names = (r) => r.map((x) => x.caption.toUpperCase());
+    return {
+      registered: !!completer,
+      libs: { has: names(libs).includes("SASHELP"), meta: (libs[0] || {}).meta },
+      tables: { has: names(tables).includes("CLASS"), meta: (tables[0] || {}).meta },
+      cols: { names: names(cols).filter((n) => n === "AGE" || n === "SEX"), meta: (cols[0] || {}).meta },
+      scoped: names(scoped).includes("AGE"),
+      dataStepCols: names(dataStepCols).includes("AGE"),
+      atStart: atStart.length,
+    };
+  });
+  check(
+    "PROC SQL offers libraries after FROM, tables after a libref",
+    contextState.registered &&
+      contextState.libs.has &&
+      contextState.libs.meta === "library" &&
+      contextState.tables.has &&
+      contextState.tables.meta === "SASHELP.",
+    contextState,
+  );
+  check(
+    "columns of the step's tables are offered, labelled with the table",
+    contextState.cols.names.length === 2 &&
+      contextState.cols.meta === "CLASS." &&
+      contextState.scoped &&
+      contextState.dataStepCols,
+    contextState,
+  );
+  check(
+    "no columns at the start of a statement (a keyword belongs there)",
+    contextState.atStart === 0,
+    contextState,
+  );
+
+  // -- Meta labels on the language server's own completions ------------------------
+  // The server kinds everything Folder (libraries) or Keyword (tables, the
+  // program's own data set names, plain keywords), which ace-linters renders as
+  // "Folder"/"Keyword". Driven directly with the two response shapes the server
+  // actually produces - the caches it needs were filled by the getLibList checks
+  // above. (Deliberately not another live LSP editor: the labels are cosmetic and
+  // this costs nothing.)
+  const metaState = await page.evaluate(() => {
+    const { relabelLspCompletions } = window.__ssExt._sasContext;
+    const item = (caption, kind) => ({ caption, meta: kind === 19 ? "Folder" : "Keyword", item: { kind } });
+    const metaOf = (results, caption) => (results.find((r) => r.caption === caption) || {}).meta;
+
+    // `set |` - the server answers with the libraries plus data set names it
+    // parsed out of the program itself.
+    const libraryZone = [item("SASHELP", 19), item("WORK", 19), item("t", 14)];
+    relabelLspCompletions(libraryZone, { getLine: () => "  set " }, { row: 0, column: 6 });
+
+    // `set sashelp.|` - all tables, no libraries.
+    const tableZone = [item("CLASS", 14), item("CARS", 14)];
+    relabelLspCompletions(tableZone, { getLine: () => "  set sashelp." }, { row: 0, column: 14 });
+
+    // A plain keyword next to a libref-shaped prefix must not be mislabelled.
+    const keywordZone = [item("length", 14)];
+    relabelLspCompletions(keywordZone, { getLine: () => "  x = sashelp." }, { row: 0, column: 14 });
+
+    return {
+      library: metaOf(libraryZone, "SASHELP"),
+      program: metaOf(libraryZone, "t"),
+      table: metaOf(tableZone, "CLASS"),
+      keyword: metaOf(keywordZone, "length"),
+    };
+  });
+  check(
+    "language-server entries are labelled library / <LIBREF>. / program",
+    metaState.library === "library" &&
+      metaState.table === "SASHELP." &&
+      metaState.program === "program" &&
+      metaState.keyword === "Keyword",
+    metaState,
+  );
+
   // Pick a real, non-empty file that isn't already open as a tab - opening an
   // already-open uri just re-focuses that tab instead of creating a viewer.
   // Enumerate the workspace root folder (entries with a `size` are files).
