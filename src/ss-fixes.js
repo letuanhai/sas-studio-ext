@@ -69,6 +69,12 @@
           Boolean(keyMap.shiftKey) !== event.shiftKey
         )
           return;
+        // While one of our own prompts is up it owns the keyboard: these
+        // listeners are on window in the CAPTURE phase and stopPropagation(),
+        // so an overlapping binding would never reach the prompt at all (Alt+C
+        // = "Copy current tab URI" here and "copy item name" in browse_ss - the
+        // prompt's binding simply never fired).
+        if (document.querySelector(".ace_browse_ss_container, .ace_prompt_container")) return;
         event.preventDefault();
         event.stopPropagation();
 
@@ -454,6 +460,59 @@
 
     document.body.appendChild(notification);
     startTimer();
+  }
+
+  /**
+   * Copy text to the clipboard.
+   *
+   * navigator.clipboard is secure-context only, and SAS Studio is typically
+   * served over plain http, where it is undefined - every copy path here used
+   * to throw there. The fallback is the pre-async-clipboard idiom: a temporary
+   * textarea + document.execCommand("copy"), which works on an insecure origin
+   * but needs the current user gesture (every caller is a key/click handler)
+   * and steals focus for a moment, so focus is put back where it was.
+   *
+   * @param {string} text
+   * @returns {Promise<boolean>} whether the copy succeeded
+   */
+  function copyText(text) {
+    if (window.navigator.clipboard) {
+      return window.navigator.clipboard.writeText(text).then(
+        () => true,
+        () => false,
+      );
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+    document.body.appendChild(ta);
+    const previous = document.activeElement;
+    let ok = false;
+    try {
+      ta.select();
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    ta.remove();
+    previous?.focus?.();
+    return Promise.resolve(ok);
+  }
+
+  /** copyText() plus the success/failure notification the copy actions all show. */
+  function copyTextWithNotice(text) {
+    copyText(text).then((ok) =>
+      showNotification(
+        ok
+          ? { message: `Copied to clipboard:\n${text}` }
+          : {
+              message: `Failed to copy to clipboard. Please copy manually:\n${text}`,
+              isError: true,
+              duration: 10000,
+            },
+      ),
+    );
   }
 
   /**
@@ -978,19 +1037,7 @@ Add a prefix to the path for different option:
     copyCurrentTabUri: {
       fn: function () {
         const uri = window.appDMS.tabs.getFocusedTab()?.uri;
-        if (uri) {
-          try {
-            navigator.clipboard.writeText(uri).then(() => {
-              showNotification({ message: `Copied to clipboard:\n${uri}` });
-            });
-          } catch {
-            showNotification({
-              message: `Failed to copy to clipboard. Please copy manually:\n${uri}`,
-              isError: true,
-              duration: 10000,
-            });
-          }
-        }
+        if (uri) copyTextWithNotice(uri);
       },
     },
     resetLayoutCurrentTab: { fn: () => resetTabLayout(window.appDMS.tabs.getFocusedTab()) },
@@ -1173,18 +1220,7 @@ Add a prefix to the path for different option:
           onClick: function () {
             const selectedItemsUri = window.appDMS.projects.tree.get("selectedItems")?.map?.((i) => i.uri);
             if (selectedItemsUri) {
-              const pathText = selectedItemsUri.join("\n");
-              try {
-                window.navigator.clipboard.writeText(pathText).then(() => {
-                  showNotification({ message: `Copied to clipboard:\n${pathText}` });
-                });
-              } catch (error) {
-                showNotification({
-                  message: `Failed to copy to clipboard. Please copy manually:\n${pathText}`,
-                  isError: true,
-                  duration: 10000,
-                });
-              }
+              copyTextWithNotice(selectedItemsUri.join("\n"));
             }
           },
         });
@@ -1199,19 +1235,7 @@ Add a prefix to the path for different option:
         label: "Copy Path",
         onClick: function () {
           const currentTargetUri = window.dijit.byNode(this.getParent().currentTarget)?.page?.tabObject?.uri;
-          if (currentTargetUri) {
-            try {
-              window.navigator.clipboard.writeText(currentTargetUri).then(() => {
-                showNotification({ message: `Copied to clipboard:\n${currentTargetUri}` });
-              });
-            } catch {
-              showNotification({
-                message: `Failed to copy to clipboard. Please copy manually:\n${currentTargetUri}`,
-                isError: true,
-                duration: 10000,
-              });
-            }
-          }
+          if (currentTargetUri) copyTextWithNotice(currentTargetUri);
         },
       });
 
@@ -1705,5 +1729,5 @@ Add a prefix to the path for different option:
     }
   }
 
-  window.__ssf = { init, run, saveFocusedFileAtPath };
+  window.__ssf = { init, run, saveFocusedFileAtPath, copyText, copyTextWithNotice };
 })();
