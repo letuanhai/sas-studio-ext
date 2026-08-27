@@ -29,6 +29,17 @@
     return name;
   }
 
+  // -- Appearance -------------------------------------------------------------------
+
+  // sw.js's storage.onChanged listener does the rest: re-registers the right
+  // stylesheet for future loads and pushes it into the tabs already open.
+  async function initDarkMode() {
+    const select = document.getElementById("dark-mode");
+    const { darkMode } = await chrome.storage.local.get("darkMode");
+    select.value = darkMode || DEFAULT_DARK_MODE;
+    select.addEventListener("change", () => chrome.storage.local.set({ darkMode: select.value }));
+  }
+
   // -- Patches --------------------------------------------------------------------
 
   async function renderPatches() {
@@ -364,6 +375,7 @@
     });
   }
 
+  initDarkMode();
   renderPatches();
   // Resolve + persist the keyboard layout map before any hotkey is recorded;
   // this page is a secure context, the http SAS Studio page isn't, so this is

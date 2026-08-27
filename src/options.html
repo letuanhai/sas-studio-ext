@@ -129,6 +129,23 @@
   <body>
     <h1>SS Ext Options</h1>
 
+    <h2>Appearance</h2>
+    <p class="note">
+      Dark theme for SAS Studio's own interface. Applies to open tabs immediately, in both directions. With "Always
+      on" the Ace editor also switches to its dark theme regardless of the OS setting; "Follow system" and "Off"
+      both leave the editor following the OS as before. This is a pre-generated static stylesheet, so it costs
+      nothing at runtime - unlike a browser dark-mode extension, which has to re-parse SAS Studio's ~95 stylesheets
+      on every load and slows the editor down noticeably when the SAS language server is on.
+    </p>
+    <label
+      >Dark mode
+      <select id="dark-mode">
+        <option value="off">Off</option>
+        <option value="on">Always on</option>
+        <option value="system">Follow system</option>
+      </select>
+    </label>
+
     <h2>Patches</h2>
     <p class="note">Passive behavior changes, on by default. Applies on next page reload.</p>
     <div id="patches-list"></div>

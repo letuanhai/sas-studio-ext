@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SS Ext",
-  "version": "0.14",
+  "version": "0.15",
   "description": "Extension for SAS Studio",
   "icons": {
     "16": "assets/icon16.png",
@@ -42,7 +42,8 @@
     {
       "resources": [
         "lib/*.js",
-        "src/ace/*.js"
+        "src/ace/*.js",
+        "src/dark.css"
       ],
       "matches": [
         "<all_urls>"

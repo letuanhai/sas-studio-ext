@@ -1210,6 +1210,196 @@ function check(name, ok, detail) {
     );
   }
 
+  // -- Dark mode (src/dark.css via a registered CSS content script) -----------------
+  // The headline check is the regression that made a runtime dark-mode
+  // extension unusable here: on reload, SAS Studio's ~95 nested-@import
+  // stylesheets would sometimes come back incomplete, and losing dijit.css
+  // takes out BOTH the icon background-images and .dijitDisplayNone - so icon
+  // buttons rendered as bare text labels. A static sheet can't race anything,
+  // and these assert exactly that symptom is absent.
+  const readDark = () =>
+    page.evaluate(() => {
+      const bg = getComputedStyle(document.body).backgroundColor;
+      const m = /rgba?\((\d+), ?(\d+), ?(\d+)/.exec(bg);
+      const icons = [...document.querySelectorAll('[class*="Icon"], [class*="icon"]')].filter(
+        (el) => el.offsetParent !== null,
+      );
+      const withImage = icons.filter((el) => getComputedStyle(el).backgroundImage !== "none");
+      // Icon-only dijit buttons hide their label via dijit.css's
+      // .dijitDisplayNone - the rule that vanished along with the icons.
+      const hiddenLabels = [...document.querySelectorAll(".dijitButtonText.dijitDisplayNone")];
+      return {
+        bodyBg: bg,
+        bodyIsDark: !!m && (+m[1] + +m[2] + +m[3]) / 3 < 120,
+        iconCount: icons.length,
+        iconsWithImage: withImage.length,
+        // Any icon image that 404s decodes to nothing - naturalWidth 0.
+        brokenIconUrls: withImage
+          .map((el) => /url\("?([^")]+)/.exec(getComputedStyle(el).backgroundImage)[1])
+          .filter((u, i, a) => a.indexOf(u) === i)
+          .slice(0, 40),
+        labelCount: hiddenLabels.length,
+        labelsStillHidden: hiddenLabels.every((el) => getComputedStyle(el).display === "none"),
+      };
+    });
+
+  const checkIconUrls = async (urls) =>
+    page.evaluate(
+      (list) =>
+        Promise.all(
+          list.map(
+            (u) =>
+              new Promise((res) => {
+                const i = new Image();
+                i.onload = () => res(i.naturalWidth > 0 ? null : u);
+                i.onerror = () => res(u);
+                i.src = u;
+              }),
+          ),
+        ).then((r) => r.filter(Boolean)),
+      urls,
+    );
+
+  const setDarkMode = async (mode) => {
+    await sw.evaluate((m) => chrome.storage.local.set({ darkMode: m }), mode);
+    await page.waitForTimeout(1500);
+  };
+
+  const beforeDark = await readDark();
+  await setDarkMode("on");
+
+  // Live apply (no reload): the storage listener insertCSS()es into open tabs.
+  const liveDark = await readDark();
+  check(
+    "dark mode applies to an already-open tab without a reload",
+    !beforeDark.bodyIsDark && liveDark.bodyIsDark,
+    { beforeDark: beforeDark.bodyBg, liveDark: liveDark.bodyBg },
+  );
+
+  // Now the real thing: a fresh page load with the CSS registered at
+  // document_start.
+  await page.reload({ waitUntil: "load", timeout: 30000 });
+  await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 45000 });
+  await page.waitForTimeout(3000);
+
+  const afterReload = await readDark();
+  check("dark mode survives a page reload", afterReload.bodyIsDark, afterReload);
+  check(
+    "icons still render with dark mode on after a reload",
+    afterReload.iconCount > 0 && afterReload.iconsWithImage > 0,
+    afterReload,
+  );
+  const broken = await checkIconUrls(afterReload.brokenIconUrls);
+  check("no icon image 404s with dark mode on (the relative-url trap)", broken.length === 0, broken);
+  check(
+    afterReload.labelCount > 0
+      ? "icon-button labels stay hidden with dark mode on (dijit.css intact)"
+      : "icon-button labels stay hidden (skipped: no icon-only buttons on screen)",
+    afterReload.labelCount === 0 || afterReload.labelsStillHidden,
+    afterReload,
+  );
+
+  // darkMode "on" must drag Ace onto its dark theme even though the OS here is
+  // light, or you get dark chrome around a light editor.
+  await page.addScriptTag({ path: require("path").join(EXT, "src", "editor-swap.js") });
+  await page.evaluate((lp) => window.__ssExt.toggle(lp), libPath);
+  await page.waitForTimeout(1500);
+  const aceTheme = await page.evaluate(() => {
+    const tabObj = window.appDMS.tabs
+      .getAllTabObjects()
+      .find((t) => t.editor && t.editor.editor && t.editor.editor.aceEditor);
+    return {
+      osIsDark: window.matchMedia("(prefers-color-scheme: dark)").matches,
+      darkMode: window.__ssExt.darkMode,
+      theme: tabObj ? tabObj.editor.editor.aceEditor.getTheme() : null,
+      configured: (window.__ssExt.aceConfig || {}).darkTheme,
+    };
+  });
+  check(
+    "darkMode 'on' puts Ace on its dark theme regardless of the OS setting",
+    !aceTheme.osIsDark && aceTheme.theme && aceTheme.theme === aceTheme.configured,
+    aceTheme,
+  );
+
+  // The stylesheet is a <link> node we own (src/dark-inject.js), not
+  // extension-injected CSS - that is the whole reason removal can be live. If
+  // this ever goes back to `css: [...]` in registerContentScripts, the sheet
+  // becomes unreachable (not in document.styleSheets, and removeCSS only knows
+  // about insertCSS'd sheets) and turning dark mode off silently needs a
+  // reload again.
+  const linkState = await page.evaluate(() => {
+    const link = document.getElementById("ssext-dark-css");
+    return {
+      present: !!link,
+      isLink: !!link && link.tagName === "LINK" && link.rel === "stylesheet",
+      extensionUrl: !!link && link.href.startsWith("chrome-extension://"),
+      media: link ? link.media : null,
+    };
+  });
+  check(
+    "dark stylesheet is a page-owned <link> node (so it can be removed live)",
+    linkState.present && linkState.isLink && linkState.extensionUrl,
+    linkState,
+  );
+
+  // Off again - live this time, in both directions, and Ace with it.
+  await setDarkMode("off");
+  const liveOff = await page.evaluate(() => {
+    const tabObj = window.appDMS.tabs
+      .getAllTabObjects()
+      .find((t) => t.editor && t.editor.editor && t.editor.editor.aceEditor);
+    return {
+      bodyBg: getComputedStyle(document.body).backgroundColor,
+      linkGone: !document.getElementById("ssext-dark-css"),
+      aceTheme: tabObj ? tabObj.editor.editor.aceEditor.getTheme() : null,
+      lightTheme: (window.__ssExt.aceConfig || {}).lightTheme,
+      osIsDark: window.matchMedia("(prefers-color-scheme: dark)").matches,
+    };
+  });
+  check(
+    "turning dark mode off restores the light UI without a reload",
+    liveOff.linkGone && !/36, 37, 37/.test(liveOff.bodyBg),
+    liveOff,
+  );
+  check(
+    "Ace follows dark mode back off in the same pass (no light-editor-in-dark-chrome)",
+    !liveOff.osIsDark && (!liveOff.aceTheme || liveOff.aceTheme === liveOff.lightTheme),
+    liveOff,
+  );
+
+  // "Follow system" is the link's media attribute, not a second stylesheet.
+  await setDarkMode("system");
+  const systemState = await page.evaluate(() => {
+    const link = document.getElementById("ssext-dark-css");
+    return {
+      present: !!link,
+      media: link ? link.media : null,
+      // OS is light in headless, so the media query must NOT match.
+      bodyBg: getComputedStyle(document.body).backgroundColor,
+    };
+  });
+  check(
+    "follow-system attaches one stylesheet gated by a media attribute",
+    systemState.present &&
+      systemState.media === "(prefers-color-scheme: dark)" &&
+      !/36, 37, 37/.test(systemState.bodyBg),
+    systemState,
+  );
+  await setDarkMode("off");
+
+  await page.reload({ waitUntil: "load", timeout: 30000 });
+  await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 45000 });
+  await page.waitForTimeout(3000);
+  const offAfterReload = await page.evaluate(() => ({
+    bodyBg: getComputedStyle(document.body).backgroundColor,
+    linkGone: !document.getElementById("ssext-dark-css"),
+  }));
+  check(
+    "dark mode stays off after a reload (content script unregistered)",
+    offAfterReload.linkGone && !/36, 37, 37/.test(offAfterReload.bodyBg),
+    offAfterReload,
+  );
+
   await ctx.close();
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed");
   process.exit(failures ? 1 : 0);

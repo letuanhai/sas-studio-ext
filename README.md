@@ -19,6 +19,15 @@ independent UX fixes for the rest of SAS Studio.
 - Applies to every open tab and to new tabs opened while active
 - Text, cursor position, and dirty (`*`) state are preserved across a toggle;
   undo history is not (see Known Limitations)
+- Dark mode for SAS Studio's own interface (Off / Always on / Follow system, in
+  the options page). It ships as a pre-generated static stylesheet rather than a
+  live theming engine, which matters: a general-purpose dark-mode extension has
+  to re-parse SAS Studio's ~95 nested-`@import` stylesheets on every load — lose
+  one to a slow server and icon buttons come back as bare text labels — and its
+  DOM observer costs about **5x** on Ace typing latency once the SAS language
+  server is attached. This costs nothing measurable, applies with no flash of
+  light on load (verified frame-by-frame), and toggles live in both directions.
+  "Always on" also switches Ace to its dark theme regardless of the OS setting
 - Various UX fixes/quick actions (tab management, tree navigation, keyboard shortcuts,
   clipboard, context menus) — quick actions live in the command palette, on/off
   toggles and hotkey rebinding live in the options page
@@ -230,7 +239,8 @@ first if `lib/` is incomplete, and leaving out everything development-only
 (reference docs, `test/`, extracted app source). Within the runtime tree:
 
 - `manifest.json`, `src/sw.js` — extension config + service worker (editor toggle,
-  ss-fixes injection, live snippet apply, live ace-config apply)
+  ss-fixes injection, live snippet apply, live ace-config apply, dark-mode
+  stylesheet registration)
 - `relay.js` — ISOLATED-world content script; the only bridge from the
   in-page settings panel (MAIN world) to `chrome.storage.local.aceConfig`
 - `editor-swap.js` — `AceEditorAdapter`, the `window.__ssExt` singleton, the
@@ -238,7 +248,13 @@ first if `lib/` is incomplete, and leaving out everything development-only
 - `ss-fixes.js` — various UX fixes, split into one-shot `ACTIONS` and passive `PATCHES`
 - `tools-meta.js` — shared `SSF_TOOLS` metadata (labels/titles/hotkeys) for
   ss-fixes, the popup, and the options page
-- `defaults.js` — shared `DEFAULT_SAS_SNIPPETS`/`DEFAULT_ACE_CONFIG` defaults
+- `defaults.js` — shared `DEFAULT_DARK_MODE`/`DEFAULT_SAS_SNIPPETS`/`DEFAULT_ACE_CONFIG` defaults
+- `dark.css` — the generated dark theme for SAS Studio's own UI. Committed
+  generated output — rebuild with `node tools/gen-dark-css.js`
+  (development-only, needs a live instance); never hand-edit
+- `dark-inject.js`, `dark-media-auto.js` — attach `dark.css` to the page as a
+  `<link>` node at `document_start` (the second one adds the
+  `(prefers-color-scheme: dark)` media attribute for "Follow system")
 - `popup.html`/`popup.js` — editor toggle, native-mouse toggle, command palette button
 - `options.html`/`options.js` — patch toggles, hotkey rebinding, editor config
   (theme pair, vim config), snippet editor

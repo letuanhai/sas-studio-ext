@@ -44,6 +44,19 @@ snippet sqlpass
 `;
 
 /**
+ * Dark mode for SAS Studio's OWN interface (the Dojo/dijit app chrome), backed
+ * by chrome.storage.local.darkMode and applied as a static stylesheet - see
+ * sw.js's syncDarkInjection() and tools/gen-dark-css.js.
+ *
+ *   "off"    - untouched (the default: this is opt-in, and it leaves an
+ *              OS-dark Ace theme alone for anyone who already had one)
+ *   "on"     - always dark; also forces Ace onto its dark theme
+ *   "system" - dark only when the OS is, via a (prefers-color-scheme: dark)
+ *              media attribute on the injected <link>
+ */
+var DEFAULT_DARK_MODE = "off";
+
+/**
  * Default Ace editor configuration - the "default for new editors" that the
  * in-page settings panel and options.html both read/write via
  * chrome.storage.local.aceConfig (see editor-swap.js/sw.js/options.js).

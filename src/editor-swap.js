@@ -69,10 +69,7 @@
       const cfg = getAceConfig();
       this._darkTheme = cfg.darkTheme;
       this._lightTheme = cfg.lightTheme;
-      const isDarkMode =
-        window.matchMedia &&
-        window.matchMedia("(prefers-color-scheme: dark)").matches;
-      const editorTheme = isDarkMode ? this._darkTheme : this._lightTheme;
+      const editorTheme = prefersDarkTheme() ? this._darkTheme : this._lightTheme;
 
       const resolvedMode =
         typeof modeId === "string" && modeId.startsWith("ace/mode/") ? modeId : "ace/mode/sas";
@@ -103,8 +100,10 @@
       // Reads this._darkTheme/this._lightTheme live (not the cfg captured above)
       // so an options-page theme-pair change still takes effect on the next flip.
       this._darkModeMql = window.matchMedia("(prefers-color-scheme: dark)");
-      this._darkModeHandler = (event) => {
-        this.aceEditor.setTheme(event.matches ? this._darkTheme : this._lightTheme);
+      this._darkModeHandler = () => {
+        // Deliberately not event.matches: with darkMode "on" the editor stays
+        // dark regardless of which way the OS just flipped.
+        this.aceEditor.setTheme(prefersDarkTheme() ? this._darkTheme : this._lightTheme);
       };
       this._darkModeMql.addEventListener("change", this._darkModeHandler);
 
@@ -400,8 +399,7 @@
     applyConfig(cfg) {
       this._darkTheme = cfg.darkTheme;
       this._lightTheme = cfg.lightTheme;
-      const isDarkMode = this._darkModeMql && this._darkModeMql.matches;
-      this.aceEditor.setTheme(isDarkMode ? cfg.darkTheme : cfg.lightTheme);
+      this.aceEditor.setTheme(prefersDarkTheme() ? cfg.darkTheme : cfg.lightTheme);
       this.aceEditor.setOptions(cfg.options);
       // Keep the status bar overlay's font in step with the editor's.
       if (this._statusEl) this._statusEl.style.fontSize = cssFontSize(cfg.options && cfg.options.fontSize);
@@ -491,6 +489,7 @@
     _textViewers: [], // live { pane, tabHolder, adapter, item, textarea, origSet, origResize, editable, dirty, buttons } entries
     libPath: null, // stashed by loadNewAce() so the palette's editor-toggle command can call toggle(ssExt.libPath)
     aceConfig: null, // seeded by sw.js (tabs.onUpdated) and refreshed by applyAceConfig()
+    darkMode: "off", // "off" | "on" | "system", seeded by sw.js - see prefersDarkTheme()
     activate,
     deactivate,
     toggle,
@@ -521,6 +520,19 @@
   // Fallback mirrors defaults.js's DEFAULT_ACE_CONFIG for the (normally brief)
   // window before sw.js's onUpdated seed sets ssExt.aceConfig - MAIN-world code
   // can't importScripts/load defaults.js itself.
+  // Which of the configured theme pair an editor should use.
+  //
+  // ssExt.darkMode is the extension's own dark-mode setting for SAS Studio's UI
+  // (seeded by sw.js from chrome.storage.local.darkMode): "off" | "on" |
+  // "system". Forcing it "on" has to drag Ace along, or you get dark app chrome
+  // wrapped around a light editor. "off" and "system" both fall through to the
+  // OS setting, which is what Ace did before this setting existed - so turning
+  // dark mode off never takes an OS-dark editor away from anyone.
+  function prefersDarkTheme() {
+    if (ssExt.darkMode === "on") return true;
+    return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  }
+
   function getAceConfig() {
     const cfg = ssExt.aceConfig || {};
     return {

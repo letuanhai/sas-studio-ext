@@ -1,7 +1,7 @@
 /**
  * Background service worker.
  *
- * Four independent jobs (the editor toggle / browse / command-palette are all
+ * Five independent jobs (the editor toggle / browse / command-palette are all
  * driven from the page now - the popup button for the toggle, in-page ss-fixes
  * hotkeys for browse/palette - so the service worker no longer registers any
  * chrome.commands handler; the only browser command is _execute_action, which
@@ -25,6 +25,10 @@
  * 4. Live browse-roots apply: when chrome.storage.local's `browsePaths` changes
  *    (the popup's per-host root paths), assign each open SASStudio tab its own
  *    host's entry on window.__ssExt.browsePaths.
+ *
+ * 5. Dark mode: register (or unregister) src/dark.css - the static dark theme
+ *    for SAS Studio's own UI - as a CSS-only content script, following
+ *    chrome.storage.local's `darkMode`.
  */
 
 importScripts("defaults.js");
@@ -67,6 +71,80 @@ async function getAceConfig() {
   return mergeAceConfig(aceConfig);
 }
 
+// -- Dark mode for SAS Studio's own UI -----------------------------------------
+//
+// A static, pre-generated stylesheet (tools/gen-dark-css.js) rather than
+// anything that themes at runtime. SAS Studio loads ~95 stylesheets, 77 of them
+// via nested @import, so a runtime theming engine has to re-fetch and re-parse
+// the lot on every load - losing one sheet to a slow server is what made icon
+// buttons come back as bare text labels - and its DOM observer costs ~5x on an
+// Ace editor with the SAS LSP attached.
+//
+// It is attached by src/dark-inject.js as a <link> node rather than registered
+// as `css:`, so that it can be taken back out again; see that file. Registering
+// the script (rather than injecting per tab) is what gets it in before the
+// first paint. "Follow system" prepends dark-media-auto.js, which puts a media
+// query on the link - so there is only ever one copy of the stylesheet.
+const DARK_SCRIPT_ID = "ssext-dark";
+const DARK_CSS_FILE = "src/dark.css";
+const DARK_MEDIA = { on: "", system: "(prefers-color-scheme: dark)" };
+
+function darkModeEnabled(mode) {
+  return Object.prototype.hasOwnProperty.call(DARK_MEDIA, mode);
+}
+
+async function syncDarkInjection(mode) {
+  try {
+    const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [DARK_SCRIPT_ID] });
+    if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [DARK_SCRIPT_ID] });
+    if (!darkModeEnabled(mode)) return;
+    await chrome.scripting.registerContentScripts([
+      {
+        id: DARK_SCRIPT_ID,
+        matches: ["*://*/SASStudio/*"],
+        js: mode === "system" ? ["src/dark-media-auto.js", "src/dark-inject.js"] : ["src/dark-inject.js"],
+        runAt: "document_start",
+        persistAcrossSessions: true,
+      },
+    ]);
+  } catch (error) {
+    console.error("[SS Ext] Error registering dark mode injection:", error);
+  }
+}
+
+// Add/replace/remove the <link> in one already-open tab. Symmetric: because the
+// stylesheet is a DOM node we own, every transition applies live, including
+// turning dark mode off.
+async function applyDarkToTab(tabId, mode) {
+  await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      func: (href, media) => {
+        const old = document.getElementById("ssext-dark-css");
+        if (old) old.remove();
+        if (!href) return;
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.id = "ssext-dark-css";
+        link.href = href;
+        if (media) link.media = media;
+        document.documentElement.appendChild(link);
+      },
+      args: [
+        darkModeEnabled(mode) ? chrome.runtime.getURL(DARK_CSS_FILE) : "",
+        DARK_MEDIA[mode] || "",
+      ],
+    })
+    .catch(() => {}); // tab may not be injectable (still loading, or gone)
+}
+
+// Reconcile on every service-worker start: the registration is persisted, but
+// this keeps it honest after an update/reinstall that dropped it.
+chrome.storage.local
+  .get("darkMode")
+  .then(({ darkMode }) => syncDarkInjection(darkMode || DEFAULT_DARK_MODE))
+  .catch(() => {});
+
 // -- ss-fixes injection on every SASStudio page load ---------------------------
 
 const SASSTUDIO_URL_PATTERN = /\/SASStudio\//;
@@ -79,11 +157,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // keyLayout: the navigator.keyboard.getLayoutMap() result captured by the
     // options page - that API is secure-context only, so the (http) SAS Studio
     // page can't resolve it itself. Absent -> ss-fixes falls back to US layout.
-    const { fixes, hotkeys, keyLayout, browsePaths } = await chrome.storage.local.get([
+    const { fixes, hotkeys, keyLayout, browsePaths, darkMode } = await chrome.storage.local.get([
       "fixes",
       "hotkeys",
       "keyLayout",
       "browsePaths",
+      "darkMode",
     ]);
     const settings = { fixes: fixes || {}, hotkeys: hotkeys || {}, keyLayout: keyLayout || {} };
 
@@ -107,7 +186,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     });
     await chrome.scripting.executeScript({
       target: { tabId },
-      func: (path, snippets, config, paths) => {
+      func: (path, snippets, config, paths, dark) => {
         // Unconditional: libPath is always this same constant, and userSnippets/
         // aceConfig just mirror current storage - re-setting any of them to the
         // same value on repeat onUpdated firings is harmless (ace/toggle() aren't
@@ -118,10 +197,19 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         // Browse root paths for THIS instance (popup); an empty entry means "use
         // the browser's built-in default" - see ext-browse_ss.js's getStartPath().
         window.__ssExt.browsePaths = paths;
+        // Read by prefersDarkTheme(): with dark mode forced on, Ace has to use
+        // its dark theme too, whatever the OS says.
+        window.__ssExt.darkMode = dark;
       },
       // Root paths name folders on one specific server, so they're stored per
       // host (like the browse history/bookmarks) and only this host's are seeded.
-      args: [libPath, snippetsText, aceConfig, (browsePaths || {})[new URL(tab.url).host] || {}],
+      args: [
+        libPath,
+        snippetsText,
+        aceConfig,
+        (browsePaths || {})[new URL(tab.url).host] || {},
+        darkMode || DEFAULT_DARK_MODE,
+      ],
       world: "MAIN",
     });
 
@@ -187,6 +275,43 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
       );
     } catch (error) {
       console.error("[SS Ext] Error live-applying ace config:", error);
+    }
+  }
+
+  // Dark mode: re-register so the next page load is right, then bring the
+  // already-open tabs along. Every transition applies live - on, off, and
+  // on<->system - because the stylesheet is a <link> node we own rather than
+  // extension-injected CSS, which could never be withdrawn. Ace is re-themed in
+  // the same pass so the editor and the app chrome never disagree.
+  if (changes.darkMode) {
+    const mode = changes.darkMode.newValue || DEFAULT_DARK_MODE;
+    await syncDarkInjection(mode);
+
+    try {
+      const tabs = await chrome.tabs.query({ url: "*://*/SASStudio/*" });
+      await Promise.all(
+        tabs.map(async (tab) => {
+          await applyDarkToTab(tab.id, mode);
+          // applyAceConfig re-runs every editor's applyConfig, which goes
+          // through prefersDarkTheme().
+          await chrome.scripting
+            .executeScript({
+              target: { tabId: tab.id },
+              func: (dark) => {
+                if (!window.__ssExt) return;
+                window.__ssExt.darkMode = dark;
+                if (window.__ssExt.applyAceConfig && window.__ssExt.aceConfig) {
+                  window.__ssExt.applyAceConfig(window.__ssExt.aceConfig);
+                }
+              },
+              args: [mode],
+              world: "MAIN",
+            })
+            .catch(() => {}); // no-op if editor-swap.js isn't loaded in that tab
+        }),
+      );
+    } catch (error) {
+      console.error("[SS Ext] Error live-applying dark mode:", error);
     }
   }
 
