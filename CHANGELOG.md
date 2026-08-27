@@ -18,6 +18,26 @@
   attached, because Ace rewrites inline styles on every keystroke. A static
   stylesheet has neither problem and measures indistinguishable from no dark
   mode at all.
+- Fixed the file browser's copy shortcuts (`Alt+C` for an item's name,
+  `Alt+Shift+C` — was `Alt+Ctrl+C` — for its full path), which did nothing at
+  all. Two causes: the global `Alt+C` hotkey ("Copy current tab URI") is bound
+  in the capture phase and stopped the event before the open prompt ever saw
+  it, and copying itself
+  went through `navigator.clipboard`, which the browser only exposes on a
+  secure origin — over plain http it is simply absent, so every copy threw.
+  Global hotkeys now stand down while one of the extension's own prompts is
+  open, and all copying falls back to a `document.execCommand("copy")` path on
+  insecure origins. The "Copy Path" context-menu entries and "Copy current tab
+  URI" were failing the same way over http and now work there too. Copying from
+  the browser now shows the same "Copied to clipboard" notification those
+  actions do, instead of being silent.
+- Every key inside the file/library/tab browser is now rebindable, in a new
+  "Browse prompt keys" table in the options page. Changes apply to the next
+  prompt you open — no page reload — and the hint line under the prompt is
+  generated from the same table, so it always shows the keys actually bound.
+  "Clear" leaves an action unbound, "Default" restores the built-in key.
+  Copy-path moved to `Alt+Shift+C` by default: `Ctrl+Alt+<letter>` is a common
+  window-manager shortcut, and those never reach the page.
 
 ## 0.14
 

@@ -70,25 +70,41 @@
 
   // -- Hotkeys ----------------------------------------------------------------------
 
+  // Warn (don't block) when two actions in the same table share a key - which
+  // one wins is whatever binds last.
+  function flagDuplicateCells(cells) {
+    const counts = {};
+    cells.forEach((c) => {
+      if (c.textContent !== "(unbound)") counts[c.textContent] = (counts[c.textContent] || 0) + 1;
+    });
+    cells.forEach((c) => {
+      const dup = counts[c.textContent] > 1;
+      c.classList.toggle("duplicate", dup);
+      c.title = dup ? "Duplicate: another action uses this key" : "";
+    });
+  }
+
+  // Record one keystroke: calls back with the event, or does nothing if the
+  // recording is abandoned. Shared by both key tables.
+  function recordKey(button, onKey) {
+    button.textContent = "Press a key...";
+    button.classList.add("recording");
+    window.addEventListener("keydown", function onKeydown(event) {
+      if (MODIFIER_KEYS.has(event.key)) return; // wait for a non-modifier key
+      event.preventDefault();
+      window.removeEventListener("keydown", onKeydown, true);
+      button.textContent = "Record";
+      button.classList.remove("recording");
+      onKey(event);
+    }, true);
+  }
+
   async function renderHotkeys() {
     const { hotkeys } = await chrome.storage.local.get("hotkeys");
     const saved = hotkeys || {};
     const tbody = document.getElementById("hotkeys-list");
     const cells = [];
-
-    // Warn (don't block) when two actions share a hotkey - which one wins is
-    // whatever ss-fixes.js binds last.
-    function flagDuplicates() {
-      const counts = {};
-      cells.forEach((c) => {
-        if (c.textContent !== "(unbound)") counts[c.textContent] = (counts[c.textContent] || 0) + 1;
-      });
-      cells.forEach((c) => {
-        const dup = counts[c.textContent] > 1;
-        c.classList.toggle("duplicate", dup);
-        c.title = dup ? "Duplicate: another action uses this hotkey" : "";
-      });
-    }
+    const flagDuplicates = () => flagDuplicateCells(cells);
 
     window.SSF_TOOLS.filter((t) => t.kind === "action").forEach((tool) => {
       const current = Object.prototype.hasOwnProperty.call(saved, tool.name) ? saved[tool.name] : tool.hotkey;
@@ -131,28 +147,111 @@
 
       clearBtn.addEventListener("click", () => saveHotkey(null));
 
-      recordBtn.addEventListener("click", () => {
-        recordBtn.textContent = "Press a key...";
-        recordBtn.classList.add("recording");
-
-        function onKeydown(event) {
-          if (MODIFIER_KEYS.has(event.key)) return; // wait for a non-modifier key
-          event.preventDefault();
-          window.removeEventListener("keydown", onKeydown, true);
-          recordBtn.textContent = "Record";
-          recordBtn.classList.remove("recording");
-
-          const keymap = {
+      recordBtn.addEventListener("click", () =>
+        recordKey(recordBtn, (event) =>
+          saveHotkey({
             key: window.ssfEventKey(event),
             altKey: event.altKey,
             ctrlKey: event.ctrlKey,
             metaKey: event.metaKey,
             shiftKey: event.shiftKey,
-          };
-          saveHotkey(keymap);
-        }
-        window.addEventListener("keydown", onKeydown, true);
-      });
+          })
+        )
+      );
+    });
+
+    flagDuplicates();
+  }
+
+  // -- Browse prompt keys -----------------------------------------------------------
+  // These are ace bindings on the browse prompt's own command line, not global
+  // hotkeys, so they're stored as ace key strings ("Alt-Shift-C") under a
+  // separate storage key; sw.js seeds them onto __ssExt.browseKeys.
+
+  // An ace binding with no modifier (or shift alone) that isn't a navigation/
+  // function key is parsed as a TEXT binding by ace's MultiHashHandler, i.e. it
+  // would fire while typing a path. Refuse to record those.
+  function bindableAceKey(event) {
+    const keys = ace.require("ace/lib/keys");
+    if (event.ctrlKey || event.altKey || event.metaKey) return true;
+    return !!keys.FUNCTION_KEYS[event.keyCode];
+  }
+
+  function aceKeyString(event) {
+    const keys = ace.require("ace/lib/keys");
+    return (
+      (event.ctrlKey ? "Ctrl-" : "") +
+      (event.altKey ? "Alt-" : "") +
+      (event.metaKey ? "Cmd-" : "") +
+      (event.shiftKey ? "Shift-" : "") +
+      keys.keyCodeToString(event.keyCode)
+    );
+  }
+
+  async function renderBrowseKeys() {
+    const { browseKeys } = await chrome.storage.local.get("browseKeys");
+    const saved = browseKeys || {};
+    const tbody = document.getElementById("browse-keys-list");
+    const cells = [];
+    const flagDuplicates = () => flagDuplicateCells(cells);
+
+    window.SSF_BROWSE_KEYS.forEach((tool) => {
+      const row = document.createElement("tr");
+
+      const nameCell = document.createElement("td");
+      nameCell.textContent = tool.label;
+      row.appendChild(nameCell);
+
+      const keyCell = document.createElement("td");
+      keyCell.className = "hotkey-value";
+      keyCell.textContent = window.ssfBrowseKeyLabel(window.ssfBrowseKeys(tool, saved));
+      row.appendChild(keyCell);
+      cells.push(keyCell);
+
+      const actionsCell = document.createElement("td");
+
+      const recordBtn = document.createElement("button");
+      recordBtn.textContent = "Record";
+      actionsCell.appendChild(recordBtn);
+
+      const clearBtn = document.createElement("button");
+      clearBtn.textContent = "Clear";
+      clearBtn.style.marginLeft = "6px";
+      actionsCell.appendChild(clearBtn);
+
+      const resetBtn = document.createElement("button");
+      resetBtn.textContent = "Default";
+      resetBtn.style.marginLeft = "6px";
+      actionsCell.appendChild(resetBtn);
+
+      row.appendChild(actionsCell);
+      tbody.appendChild(row);
+
+      // null removes the entry, so the SSF_BROWSE_KEYS default applies again;
+      // "" is a real value meaning "deliberately unbound".
+      async function saveBrowseKey(binding) {
+        const { browseKeys } = await chrome.storage.local.get("browseKeys");
+        const updated = browseKeys || {};
+        if (binding === null) delete updated[tool.name];
+        else updated[tool.name] = binding;
+        await chrome.storage.local.set({ browseKeys: updated });
+        keyCell.textContent = window.ssfBrowseKeyLabel(window.ssfBrowseKeys(tool, updated));
+        flagDuplicates();
+      }
+
+      clearBtn.addEventListener("click", () => saveBrowseKey(""));
+      resetBtn.addEventListener("click", () => saveBrowseKey(null));
+
+      recordBtn.addEventListener("click", () =>
+        recordKey(recordBtn, (event) => {
+          if (!bindableAceKey(event)) {
+            recordBtn.textContent = "Needs a modifier";
+            setTimeout(() => (recordBtn.textContent = "Record"), 1500);
+            return;
+          }
+          saveBrowseKey(aceKeyString(event));
+        })
+      );
     });
 
     flagDuplicates();
@@ -381,5 +480,8 @@
   // this page is a secure context, the http SAS Studio page isn't, so this is
   // where it gets captured for both sides (see tools-meta.js).
   window.ssfLoadKeyLayout().then(renderHotkeys);
+  // Browse keys are recorded from event.keyCode via ace's own key tables, so
+  // they need no layout map - but they do need ace, which options.html loads.
+  renderBrowseKeys();
   initEditorConfig().then(initSnippets);
 })();

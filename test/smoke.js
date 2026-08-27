@@ -652,6 +652,70 @@ function check(name, ok, detail) {
   const afterRemove = await bookmarkCount();
   check("Ctrl+B again removes the bookmark", afterRemove === 0, { afterRemove });
 
+  // Copy keybindings (Alt+C name / Alt+Shift+C path). Two things broke them: ss-fixes' global Alt+C hotkey
+  // ("Copy current tab URI", bound on window in the capture phase with
+  // stopPropagation) swallowed the prompt's own Alt+C, and navigator.clipboard
+  // is undefined on this insecure origin, so the copy threw. The fallback path
+  // is document.execCommand("copy") on a temporary textarea - intercept it to
+  // read back what was copied (the headless clipboard isn't readable here).
+  await page.evaluate(() => {
+    window.__copied = [];
+    const orig = document.execCommand.bind(document);
+    document.execCommand = function (cmd, ...rest) {
+      if (cmd === "copy") window.__copied.push(document.activeElement?.value ?? null);
+      return orig(cmd, ...rest);
+    };
+  });
+  const copyRow = await page.evaluate(() => {
+    const { popup } = window._browseSsLastPrompt;
+    const d = popup.getData(popup.getRow());
+    return d && { uri: d.uri, name: d.prefix ? d.value.replace(d.prefix, "") : d.value };
+  });
+  await selectRowThen("Alt+c");
+  await page.waitForTimeout(300);
+  await selectRowThen("Alt+Shift+c");
+  await page.waitForTimeout(300);
+  const copied = await page.evaluate(() => window.__copied);
+  check("Alt+C copies the selected browse entry's name", copied[0] === copyRow?.name, { copied, copyRow });
+  check("Alt+Shift+C copies its full path", copied[1] === copyRow?.uri, { copied, copyRow });
+  check(
+    "the browse prompt survives a copy with focus intact",
+    await page.evaluate(
+      () => !!document.querySelector(".ace_browse_ss_container")?.contains(document.activeElement)
+    )
+  );
+  check("copying shows the same notification as the Copy Path actions", await page.evaluate(() =>
+    [...document.querySelectorAll("div")].some((d) => d.textContent?.startsWith("Copied to clipboard:"))
+  ));
+
+  // Rebinding a browse key (options page -> chrome.storage.local.browseKeys)
+  // reaches an open tab and applies to the next prompt, no reload. "" is an
+  // explicit unbind, and the prompt's hint line is generated from the same table.
+  await sw.evaluate(() => chrome.storage.local.set({ browseKeys: { copyPath: "Ctrl-Alt-Q", copyName: "" } }));
+  await page.waitForTimeout(400);
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.__ssf.run("browseFiles"));
+  await page
+    .waitForFunction(() => window._browseSsLastPrompt?.popup?.data?.length > 0, null, { timeout: 10000 })
+    .catch(() => {});
+  await page.evaluate(() => (window.__copied.length = 0));
+  await selectRowThen("Alt+c");
+  await page.waitForTimeout(300);
+  check("a cleared browse binding stops firing", (await page.evaluate(() => window.__copied)).length === 0);
+  await page.keyboard.press("Control+Alt+q");
+  await page.waitForTimeout(300);
+  const remapped = await page.evaluate(() => window.__copied);
+  check("a remapped browse binding fires on the new key", remapped.length === 1, { remapped });
+  const hintText = await page.evaluate(() => document.querySelector(".ace_browse_ss_hint")?.textContent || "");
+  check(
+    "the prompt hint is generated from the live bindings",
+    hintText.includes("Ctrl+Alt+Q copy path") && !hintText.includes("copy name"),
+    { hintText }
+  );
+  await sw.evaluate(() => chrome.storage.local.remove("browseKeys"));
+  await page.waitForTimeout(300);
+
   // Exact match ranks first: type the full path of an entry that isn't already
   // at the top of the directory listing and check it becomes row 0.
   const exactMatch = await page.evaluate(async () => {
@@ -729,6 +793,22 @@ function check(name, ok, detail) {
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await sw.evaluate(() => chrome.storage.local.remove("browsePaths"));
   await page.waitForTimeout(300);
+
+  // The other half of that guard: with no prompt open, the global Alt+C hotkey
+  // (copy current tab URI) must still fire - and copy through the same
+  // execCommand fallback, since this origin has no navigator.clipboard.
+  await page.evaluate(() => (window.__copied.length = 0));
+  await page.keyboard.press("Alt+c");
+  await page.waitForTimeout(500);
+  const globalCopy = await page.evaluate(() => ({
+    copied: window.__copied,
+    notified: [...document.querySelectorAll("div")].some((d) => d.textContent?.startsWith("Copied to clipboard:")),
+  }));
+  check(
+    "global Alt+C still copies the current tab URI with no prompt open",
+    globalCopy.copied.length === 1 && globalCopy.notified,
+    globalCopy
+  );
 
   // With a code editor (an Ace instance) focused: editor commands should also
   // show up. Reuses any currently-open code tab rather than the (now-closed)

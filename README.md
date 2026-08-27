@@ -144,7 +144,9 @@ rebindable in the options page like any other action, and listed as
 `SS-Ext: Browse …` entries in the command palette.
 
 Once a browse prompt is open, these keys act on the selected entry (a compact
-placeholder legend is also shown under the prompt while it's empty):
+placeholder legend is also shown under the prompt while it's empty). All of them
+are rebindable in the options page's **Browse prompt keys** table, which applies
+to the next prompt you open — no reload:
 
 | Key | Action |
 |-----|--------|
@@ -157,8 +159,8 @@ placeholder legend is also shown under the prompt while it's empty):
 | `Ctrl+L` | Clear the prompt |
 | `Esc` | Drop the last path segment; close when already empty / at a folder |
 | `Shift+Esc` | Close the prompt |
-| `Alt+C` | Copy the item's name |
-| `Alt+Ctrl+C` | Copy the item's full path |
+| `Alt+C` | Copy the item's name (both copies show the same notification as "Copy Path") |
+| `Alt+Shift+C` | Copy the item's full path |
 | `↑` `↓` `PgUp` `PgDn` `Ctrl+↑`/`Home` `Ctrl+↓`/`End` | Move the selection |
 
 The file and library browsers keep per-server (localStorage) bookmarks and a

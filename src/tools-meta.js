@@ -277,6 +277,51 @@ Add a prefix to the path for different option:
     },
   ];
 
+  // -- Browse prompt keys ------------------------------------------------------
+  // The file/library/tab browser's in-prompt keybindings (ext-browse_ss.js binds
+  // them on its own command line, so they are ace key strings - "Ctrl-Enter",
+  // alternatives separated by "|" - not SSF_TOOLS keymap objects). Rebindable in
+  // the options page, which stores {name: aceKeyString} under
+  // chrome.storage.local.browseKeys; sw.js seeds those onto __ssExt.browseKeys.
+  // `legend` entries are the ones listed in the prompt's own hint line.
+  window.SSF_BROWSE_KEYS = [
+    { name: "accept", label: "Open item", keys: "Enter", legend: "open" },
+    { name: "acceptAsText", label: "Open item as text", keys: "Ctrl-Enter", legend: "as text" },
+    { name: "revealInTree", label: "Reveal item in tree", keys: "Shift-Enter", legend: "reveal" },
+    { name: "fillPath", label: "Fill prompt with selected path", keys: "Tab", legend: "fill" },
+    { name: "parentFolder", label: "Go to parent", keys: "Shift-Space", legend: "parent" },
+    { name: "toggleBookmark", label: "Toggle bookmark", keys: "Ctrl-B", legend: "bookmark", history: true },
+    { name: "copyName", label: "Copy item name", keys: "Alt-C", legend: "copy name" },
+    { name: "copyPath", label: "Copy item path", keys: "Alt-Shift-C", legend: "copy path" },
+    { name: "clearPrompt", label: "Clear prompt", keys: "Ctrl-L" },
+    { name: "back", label: "Clear filter / go back", keys: "Esc", legend: "back" },
+    { name: "close", label: "Close prompt", keys: "Shift-Esc", legend: "close" },
+    { name: "selectUp", label: "Select previous item", keys: "Up" },
+    { name: "selectDown", label: "Select next item", keys: "Down" },
+    { name: "selectFirst", label: "Select first item", keys: "Ctrl-Up|Ctrl-Home" },
+    { name: "selectLast", label: "Select last item", keys: "Ctrl-Down|Ctrl-End" },
+    { name: "pageUp", label: "Page up", keys: "PageUp" },
+    { name: "pageDown", label: "Page down", keys: "PageDown" },
+  ];
+
+  // Stored binding wins, including "" (deliberately unbound); absent -> default.
+  window.ssfBrowseKeys = function (tool, browseKeys) {
+    const saved = (browseKeys || {})[tool.name];
+    return typeof saved === "string" ? saved : tool.keys;
+  };
+
+  // "Ctrl-Alt-C" -> "Ctrl+Alt+C" for display (options table, prompt hint line);
+  // only the first alternative of a "a|b" binding is shown.
+  window.ssfBrowseKeyLabel = function (keys) {
+    if (!keys) return "(unbound)";
+    // ace's key strings are case-insensitive and a recorded one comes out
+    // lower-cased ("Ctrl-Alt-k"); show the key itself upper-cased.
+    return keys
+      .split("|")[0]
+      .replace(/-/g, "+")
+      .replace(/[^+]+$/, (key) => (key.length === 1 ? key.toUpperCase() : key));
+  };
+
   // Patches default to enabled; `defaultOff: true` ones default to disabled.
   // Used by ss-fixes.js's init() and the options page's checkbox list.
   window.ssfPatchEnabled = function (tool, fixes) {

@@ -29,6 +29,18 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
     /** * @type {{ close: () => void; } | null} */
     let openPrompt;
 
+    /**
+     * Copy through ss-fixes.js's helper, which also shows the same
+     * copied/failed-to-copy notification the "Copy path" actions do (and works
+     * on an insecure origin, where navigator.clipboard is undefined - SAS Studio
+     * is usually plain http). __ssf is always injected on a SAS Studio page
+     * before this module can be reached.
+     * @param {string} text
+     */
+    function copyText(text) {
+        window.__ssf?.copyTextWithNotice(text);
+    }
+
     const DEFAULT_PATH = '';
     const PLACEHOLDER_TEXT = 'Enter a path to browse';
     const MAX_HISTORY = 50;
@@ -160,9 +172,11 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // promptTextContainer is showing "Loading..."/an error), same moment
         // the saved history/bookmarks view (see updateCompletions) appears.
         const hint = dom.buildDom(["div", { class: "ace_browse_ss_hint" },
-            "Enter open · Ctrl+Enter as text · Shift+Enter reveal · Tab fill · " +
-            "Shift+Space parent · " + (historyKey ? "Ctrl+B bookmark · " : "") +
-            "Alt+C / Alt+Ctrl+C copy name / path · Esc back · Shift+Esc close"]);
+            browseTools()
+                .filter((tool) => tool.legend && window.ssfBrowseKeys(tool, window.__ssExt?.browseKeys))
+                .map((tool) =>
+                    `${window.ssfBrowseKeyLabel(window.ssfBrowseKeys(tool, window.__ssExt?.browseKeys))} ${tool.legend}`)
+                .join(" · ")]);
         hint.hidden = true;
         el.appendChild(hint);
 
@@ -295,15 +309,17 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // load still shows the error entry in the popup (see updateCompletions()).
         curCollectionPromise.then(() => updateCompletions(), () => updateCompletions());
 
-        // Initialize key bindings
-        const keys = {
+        // Initialize key bindings. Keyed by action name (SSF_BROWSE_KEYS) rather
+        // than by key string: the actual keys come from that table, overridden
+        // per action by the options page (__ssExt.browseKeys).
+        const actions = {
             // NB: don't bind `accept` directly - ace passes the editor as the first
             // arg, which would make accept()'s `asText` always truthy (open as text).
-            "Enter": function () { accept(); },
+            "accept": function () { accept(); },
             // Open file as text
-            "Ctrl-Enter": function () { accept(true) },
+            "acceptAsText": function () { accept(true) },
             // Scroll tree to selected item
-            "Shift-Enter": function () {
+            "revealInTree": function () {
                 const curData = popup.getData(popup.getRow());
                 if (!curData || curData.error || curData.uri == null) return;
                 const cleanedPath = Utils.normalizeItemPath(curData.uri);
@@ -311,17 +327,17 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 options.scrollTreeToItem(cleanedPath);
             },
             // Clear prompt
-            "Ctrl-L": function () { cmdLine.setValue(''); },
+            "clearPrompt": function () { cmdLine.setValue(''); },
             // Clear filter -> Close prompt
-            "Esc": function () {
+            "back": function () {
                 const cmdLineValue = cmdLine.getValue().trimStart();
                 if (cmdLineValue === '' || cmdLineValue.endsWith('/')) { done(); }
                 else cmdLine.setValue(cmdLineValue.slice(0, cmdLineValue.lastIndexOf('/') + 1), 1);
             },
             // Close prompt
-            "Shift-Esc": done,
+            "close": done,
             // Go to parent
-            "Shift-Space": function () {
+            "parentFolder": function () {
                 // Go to parent directory
                 const cmdLineValue = cmdLine.getValue();
                 // Replace multiple consecutive slashes
@@ -333,41 +349,47 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 cmdLine.setValue(parentPath, 1);
                 updateCompletions();
             },
-            "Up": function () { popup.goTo("up"); },
-            "Down": function () { popup.goTo("down"); },
+            "selectUp": function () { popup.goTo("up"); },
+            "selectDown": function () { popup.goTo("down"); },
             // Go to top of list
-            "Ctrl-Up|Ctrl-Home": function () { popup.goTo("start"); },
+            "selectFirst": function () { popup.goTo("start"); },
             // Go to end of list
-            "Ctrl-Down|Ctrl-End": function () { popup.goTo("end"); },
+            "selectLast": function () { popup.goTo("end"); },
             // Put selected item name in prompt
-            "Tab": function () {
+            "fillPath": function () {
                 const curData = popup.getData(popup.getRow());
                 if (!curData || curData.error || curData.uri == null) return;
                 cmdLine.setValue(curData.uri, 1);
                 updateCompletions();
             },
-            "PageUp": function () { popup.gotoPageUp(); },
-            "PageDown": function () { popup.gotoPageDown(); },
+            "pageUp": function () { popup.gotoPageUp(); },
+            "pageDown": function () { popup.gotoPageDown(); },
             // Toggle bookmark on selected item (Ctrl on mac too - Alt+B is flaky there)
-            "Ctrl-B": function () {
+            "toggleBookmark": function () {
                 toggleBookmark(popup.getData(popup.getRow()));
             },
             // Copy item name
-            "Alt-C": function () {
+            "copyName": function () {
                 /** @type {DataItem} */
                 const curData = popup.getData(popup.getRow());
                 if (!curData || curData.error || curData.uri == null) return;
                 const itemName = curData.prefix ? curData.value.replace(curData.prefix, '') : curData.value;
-                window.navigator.clipboard.writeText(itemName);
+                copyText(itemName);
             },
             // Copy item full path
-            "Alt-Ctrl-C": function () {
+            "copyPath": function () {
                 /** @type {DataItem} */
                 const curData = popup.getData(popup.getRow());
                 if (!curData || curData.error || curData.uri == null) return;
-                window.navigator.clipboard.writeText(curData.uri);
+                copyText(curData.uri);
             },
         };
+        /** @type {Record<string, Function>} */
+        const keys = {};
+        browseTools().forEach((tool) => {
+            const binding = window.ssfBrowseKeys(tool, window.__ssExt?.browseKeys);
+            if (binding && actions[tool.name]) keys[binding] = actions[tool.name];
+        });
         cmdLine.commands.bindKeys(keys);
         // Add event listener
         cmdLine.on("input", function () { updateCompletions(); });
@@ -622,6 +644,15 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
                     console.error(e);
                 });
             return dataItemPromise;
+        }
+
+        /**
+         * The keybinding table for THIS prompt: bookmarking only exists where
+         * there's a history key to store it under (browse_tabs has none).
+         * @returns {{name: string, label: string, keys: string, legend?: string, history?: boolean}[]}
+         */
+        function browseTools() {
+            return window.SSF_BROWSE_KEYS.filter((tool) => historyKey || !tool.history);
         }
 
         // Cleanup

@@ -11,7 +11,7 @@
  *    tools-meta.js + ss-fixes.js into the MAIN world and call
  *    window.__ssf.init(settings) with the persisted patch/hotkey settings.
  *    The same handler pre-injects editor-swap.js and seeds
- *    libPath/userSnippets/aceConfig/browsePaths so the global command-palette hotkey works
+ *    libPath/userSnippets/aceConfig/browsePaths/browseKeys so the global command-palette hotkey works
  *    without a prior toggle.
  *
  * 2. Live snippet apply: when chrome.storage.local's `snippets` changes, push
@@ -22,9 +22,10 @@
  *    push the merged config into every open SASStudio tab via
  *    window.__ssExt.applyAceConfig.
  *
- * 4. Live browse-roots apply: when chrome.storage.local's `browsePaths` changes
+ * 4. Live browse-prompt apply: when chrome.storage.local's `browseKeys` (options
+ *    page, per-action key overrides) or `browsePaths` changes
  *    (the popup's per-host root paths), assign each open SASStudio tab its own
- *    host's entry on window.__ssExt.browsePaths.
+ *    host's entry on window.__ssExt.browsePaths / the keys on __ssExt.browseKeys.
  *
  * 5. Dark mode: register (or unregister) src/dark.css - the static dark theme
  *    for SAS Studio's own UI - as a CSS-only content script, following
@@ -157,11 +158,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // keyLayout: the navigator.keyboard.getLayoutMap() result captured by the
     // options page - that API is secure-context only, so the (http) SAS Studio
     // page can't resolve it itself. Absent -> ss-fixes falls back to US layout.
-    const { fixes, hotkeys, keyLayout, browsePaths, darkMode } = await chrome.storage.local.get([
+    const { fixes, hotkeys, keyLayout, browsePaths, browseKeys, darkMode } = await chrome.storage.local.get([
       "fixes",
       "hotkeys",
       "keyLayout",
       "browsePaths",
+      "browseKeys",
       "darkMode",
     ]);
     const settings = { fixes: fixes || {}, hotkeys: hotkeys || {}, keyLayout: keyLayout || {} };
@@ -186,7 +188,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     });
     await chrome.scripting.executeScript({
       target: { tabId },
-      func: (path, snippets, config, paths, dark) => {
+      func: (path, snippets, config, paths, keys, dark) => {
         // Unconditional: libPath is always this same constant, and userSnippets/
         // aceConfig just mirror current storage - re-setting any of them to the
         // same value on repeat onUpdated firings is harmless (ace/toggle() aren't
@@ -197,6 +199,9 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         // Browse root paths for THIS instance (popup); an empty entry means "use
         // the browser's built-in default" - see ext-browse_ss.js's getStartPath().
         window.__ssExt.browsePaths = paths;
+        // Per-action browse-prompt key overrides (options page); ext-browse_ss.js
+        // merges them over SSF_BROWSE_KEYS' defaults when a prompt opens.
+        window.__ssExt.browseKeys = keys;
         // Read by prefersDarkTheme(): with dark mode forced on, Ace has to use
         // its dark theme too, whatever the OS says.
         window.__ssExt.darkMode = dark;
@@ -208,6 +213,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         snippetsText,
         aceConfig,
         (browsePaths || {})[new URL(tab.url).host] || {},
+        browseKeys || {},
         darkMode || DEFAULT_DARK_MODE,
       ],
       world: "MAIN",
@@ -312,6 +318,32 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
       );
     } catch (error) {
       console.error("[SS Ext] Error live-applying dark mode:", error);
+    }
+  }
+
+  // Browse prompt keys (options page): same deal as the roots below - read when
+  // a prompt opens, so an assignment is all it takes. Not host-scoped: which key
+  // does what isn't a property of the server.
+  if (changes.browseKeys) {
+    const keys = changes.browseKeys.newValue || {};
+    try {
+      const tabs = await chrome.tabs.query({ url: "*://*/SASStudio/*" });
+      await Promise.all(
+        tabs.map((tab) =>
+          chrome.scripting
+            .executeScript({
+              target: { tabId: tab.id },
+              func: (k) => {
+                if (window.__ssExt) window.__ssExt.browseKeys = k;
+              },
+              args: [keys],
+              world: "MAIN",
+            })
+            .catch(() => {}), // no-op if editor-swap.js isn't loaded in that tab
+        ),
+      );
+    } catch (error) {
+      console.error("[SS Ext] Error live-applying browse keys:", error);
     }
   }
 
