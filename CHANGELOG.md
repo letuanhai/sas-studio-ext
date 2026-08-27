@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.16
+
+- The SAS language server no longer slows the editor down on larger files, and
+  no longer gets slower the longer a page stays open. The library driving it
+  turned every syntax-colouring token of the *whole* document into a separate
+  Ace marker on every keystroke and on every scroll frame — around 8000 of them
+  per keystroke on a 1200-line program — and walked all of them again on every
+  redraw, even though only the ~40 rows on screen can show anything. On top of
+  that it never reclaimed the discarded ones, so its marker store grew by
+  roughly 150 000 entries per minute of typing and each redraw had to walk that
+  too: measured on the same file, typing cost 601 ms of marker work in the first
+  round and 2774 ms five rounds later, with no more tokens on screen than
+  before. Tokens are now limited to the visible region (plus a margin so
+  scrolling stays coloured), the discarded ones are reclaimed, and the token
+  request is debounced, so a wheel scroll asks once instead of once per frame.
+  Marker work is now flat at ~250-310 ms per round regardless of how long the
+  page has been open, and drops from a third of the browser's main-thread time
+  to under 5%. The SAS server itself was never the bottleneck — it answers in
+  about 17 ms.
+
 ## 0.15
 
 - New dark mode for SAS Studio's own interface, in the options page: Off,
