@@ -22,7 +22,7 @@
  * `--disable-extensions-except` and `ignoreDefaultArgs: ["--disable-extensions"]`.
  *
  * Also needs `lib/ace/src-noconflict/ace.js` and `lib/ace-linters/*.js` present
- * (`./build_lib.sh`'s ace source build, ~1 min, and its `npm pack` of
+ * (`./tools/build_lib.sh`'s ace source build, ~1 min, and its `npm pack` of
  * ace-linters) or the Ace-activation tests fail on a 404. The much slower
  * `lib/sas-lsp` clone+webpack build is only needed for the LSP-specific checks;
  * everything else degrades gracefully (one console warning) without it.
@@ -173,7 +173,7 @@ function check(name, ok, detail) {
   await page.addScriptTag({ path: require("path").join(EXT, "src", "editor-swap.js") });
 
   // ss-fixes loads OUR ace at page load, with the toggle still off. It lives on
-  // window.__ssAce (build_lib.sh renames the vendored build's module-registry
+  // window.__ssAce (tools/build_lib.sh renames the vendored build's module-registry
   // namespace); SAS Studio's own 1.x build keeps window.ace to itself. The
   // checks below guard the two failure modes sharing one global caused: our
   // modules landing in SAS's registry (which is how vim's :w/:q/:wq/:x once

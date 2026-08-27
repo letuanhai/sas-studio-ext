@@ -5,14 +5,14 @@
 #
 #   lib/ace/         ace src-noconflict build (+ types), built from
 #                    ajaxorg/ace with its module registry renamed to
-#                    window.__ssAce via ace-namespace.patch at the repo root
+#                    window.__ssAce via tools/ace-namespace.patch
 #   lib/ace-linters/ the two ace-linters UMD bundles needed to drive an
 #                    external LSP server over a web worker (the other ~24
 #                    build files are its own in-browser services, unused)
 #   lib/sas-lsp/     SAS language server browser bundle, built from
 #                    sassoftware/vscode-sas-extension with the embedded
 #                    Pyright (Python LSP, ~6 MB) stripped via
-#                    remove-pyright.patch at the repo root
+#                    tools/remove-pyright.patch
 #
 # The ace-linters copy is byte-identical to its tarball bar one blanked-out
 # unpkg URL, and the ace build bar two dropped snippet files - both are MV3
@@ -22,10 +22,10 @@
 # takes a couple of minutes, the LSP (npm ci + two webpack builds) many.
 #
 # Requires: npm, git, node >= 18, network.
-# Usage: ./build_lib.sh          (package.sh runs it automatically if lib/ is incomplete)
-#   BUILD_DIR=<dir> ./build_lib.sh   # override the LSP clone/build location
+# Usage: ./tools/build_lib.sh     (tools/package.sh runs it automatically if lib/ is incomplete)
+#   BUILD_DIR=<dir> ./tools/build_lib.sh   # override the LSP clone/build location
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.." # repo root - lib/ and tools/ are relative to it
 
 ACE_VERSION=v1.43.3 # release tag of ajaxorg/ace (ace-builds is its build output)
 ACE_REPO=https://github.com/ajaxorg/ace
@@ -51,7 +51,7 @@ trap 'rm -rf "$TMP"' EXIT
 # pinning, no compat shims for SAS's stock editor.
 #
 # ace's build already supports this (`namespace()` filter, `opts.ns`), it just
-# isn't reachable from outside; ace-namespace.patch at the repo root exposes it
+# isn't reachable from outside; tools/ace-namespace.patch exposes it
 # as $ACE_NS and fixes the two places upstream's own option falls short (the
 # sanity check reads the global by hardcoded name; the worker prelude publishes
 # itself as `window.ace` while its module bodies get renamed). So we build from
@@ -75,7 +75,7 @@ else
   git -C "$ACE_SRC" fetch -q origin tag "$ACE_VERSION" 2>/dev/null || git -C "$ACE_SRC" fetch -q origin
   git -C "$ACE_SRC" checkout -qf "$ACE_VERSION"
   git -C "$ACE_SRC" reset -q --hard "$ACE_VERSION" # drops the previous patch
-  git -C "$ACE_SRC" apply "$ROOT/ace-namespace.patch"
+  git -C "$ACE_SRC" apply "$ROOT/tools/ace-namespace.patch"
   (
     cd "$ACE_SRC"
     npm install --silent --no-audit --no-fund --ignore-scripts
@@ -103,7 +103,7 @@ else
   # The build's own sanity check already required every file under the new
   # namespace, so this only guards against copying the wrong target dir.
   grep -qrF -- "$ACE_NAMESPACE.define(" lib/ace/src-noconflict || {
-    echo "build_lib.sh: lib/ace is not namespaced - '$ACE_NAMESPACE.define(' not found" >&2
+    echo "tools/build_lib.sh: lib/ace is not namespaced - '$ACE_NAMESPACE.define(' not found" >&2
     exit 1
   }
 fi
@@ -122,7 +122,7 @@ cp "$TMP/package/build/language-client.js" lib/ace-linters/
 sed 's#"https://www.unpkg.com/ace-python-ruff-linter/build"#""#' \
   "$TMP/package/build/ace-language-client.js" > lib/ace-linters/ace-language-client.js
 if grep -q 'unpkg.com' lib/ace-linters/ace-language-client.js; then
-  echo "build_lib.sh: ace-linters still references unpkg.com" >&2
+  echo "tools/build_lib.sh: ace-linters still references unpkg.com" >&2
   exit 1
 fi
 
@@ -141,7 +141,7 @@ else
   git -C "$SRC" checkout -qf "$SAS_LSP_VERSION"
   git -C "$SRC" reset -q --hard "$SAS_LSP_VERSION"
   git -C "$SRC" clean -qfd server/src
-  git -C "$SRC" apply "$ROOT/remove-pyright.patch"
+  git -C "$SRC" apply "$ROOT/tools/remove-pyright.patch"
 
   # compile populates server/dist/node/typeshed-fallback, which the browser
   # webpack build depends on; compile-browser alone fails without it.

@@ -585,7 +585,7 @@
 
   // -- Ace library management ---------------------------------------------------
   // The two ace libraries on the page never meet: SAS Studio's own (1.x) build
-  // keeps `window.ace` to itself, ours lives on `window.__ssAce` - build_lib.sh
+  // keeps `window.ace` to itself, ours lives on `window.__ssAce` - tools/build_lib.sh
   // builds ace with its module-registry namespace set to ours (see its comment).
   // That is the whole isolation mechanism. Nothing here swaps, pins or restores
   // a global, so the ordering bug class it used to guard against - a lazily
@@ -754,7 +754,7 @@
   // -- SAS language server (LSP) via ace-linters ---------------------------------
   // Additive-only: completions/hover/diagnostics/semantic tokens layer on top of
   // mode-sas's own highlighting; if the (gitignored, built separately by
-  // ./build_lib.sh) server bundle is missing or the worker fails, editors
+  // ./tools/build_lib.sh) server bundle is missing or the worker fails, editors
   // just work as before. One worker/LanguageProvider for the page's whole lifetime
   // once started - ponytail: never torn down, deactivate()/reactivate() (the
   // Phase-1 toggle) just re-registers editors against the same provider/worker.
@@ -796,7 +796,7 @@
           const resp = await fetch(serverUrl, { method: "HEAD" });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         } catch (e) {
-          console.warn("[SS Ext] LSP server bundle not found - run ./build_lib.sh");
+          console.warn("[SS Ext] LSP server bundle not found - run ./tools/build_lib.sh");
           ssExt._lspFailed = true;
           return null;
         }

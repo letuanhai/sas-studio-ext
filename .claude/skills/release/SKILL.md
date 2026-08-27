@@ -30,5 +30,5 @@ the highest `v*` git tag (`v0.9` -> `0.10`).
 ## Notes
 
 - Versions are two-part (`0.9`), tags are `v`-prefixed. Keep both.
-- Building the zip is not part of this skill; run `./package.sh` separately.
+- Building the zip is not part of this skill; run `./tools/package.sh` separately.
 - Pushing is never part of this skill; the user pushes when they want to.

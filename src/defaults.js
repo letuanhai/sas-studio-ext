@@ -80,7 +80,7 @@ var DEFAULT_ACE_CONFIG = {
   vimrc: "",
   // SAS language server (completions/hover/diagnostics via ace-linters + a web
   // worker, see editor-swap.js's ensureLsp) - on by default, additive-only: if
-  // the server bundle isn't built (./build_lib.sh) or the worker
+  // the server bundle isn't built (./tools/build_lib.sh) or the worker
   // fails, the editor just works as before.
   lsp: true,
   // Skip LSP registration for files longer than this many lines (0 = no limit).
