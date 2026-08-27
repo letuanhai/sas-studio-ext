@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15
 
 - New dark mode for SAS Studio's own interface, in the options page: Off,
   Always on, or Follow system. With "Always on" the Ace editor switches to its
@@ -22,12 +22,11 @@
   `Alt+Shift+C` — was `Alt+Ctrl+C` — for its full path), which did nothing at
   all. Two causes: the global `Alt+C` hotkey ("Copy current tab URI") is bound
   in the capture phase and stopped the event before the open prompt ever saw
-  it, and copying itself
-  went through `navigator.clipboard`, which the browser only exposes on a
-  secure origin — over plain http it is simply absent, so every copy threw.
-  Global hotkeys now stand down while one of the extension's own prompts is
-  open, and all copying falls back to a `document.execCommand("copy")` path on
-  insecure origins. The "Copy Path" context-menu entries and "Copy current tab
+  it, and copying itself went through `navigator.clipboard`, which the browser
+  only exposes on a secure origin — over plain http it is simply absent, so
+  every copy threw. Global hotkeys now stand down while one of the extension's
+  own prompts is open, and all copying falls back to a
+  `document.execCommand("copy")` path on insecure origins. The "Copy Path" context-menu entries and "Copy current tab
   URI" were failing the same way over http and now work there too. Copying from
   the browser now shows the same "Copied to clipboard" notification those
   actions do, instead of being silent.
@@ -38,6 +37,9 @@
   "Clear" leaves an action unbound, "Default" restores the built-in key.
   Copy-path moved to `Alt+Shift+C` by default: `Ctrl+Alt+<letter>` is a common
   window-manager shortcut, and those never reach the page.
+- The options page has a table of contents: a sticky row of jump links under
+  the title, since the page had grown to seven sections and reaching a late one
+  meant scrolling past everything above it.
 
 ## 0.14
 
