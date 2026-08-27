@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.17
+
+- Autocompletion now offers words from your other open editors, not just the
+  file you are typing in. Ace's built-in word completion only ever looked at the
+  current document, so a macro or column name you had just written in another
+  tab was invisible. Entries are tagged `tab` and rank below the current file's
+  own words, and each tab's word list is recomputed only after it changes rather
+  than on every keystroke.
+- Library and table names from the SAS language server now actually appear.
+  The server has no data access of its own: it asks the client for the library
+  list, but only if the client opts in at startup, which the extension never
+  did — so `set ` and `data=` offered nothing. It now opts in and answers those
+  requests from SAS Studio's own library tree, the same source the file browser
+  uses. The answers are cached and dropped whenever SAS Studio refreshes its
+  library tree — after every run, on a library add/delete/rename, the Refresh
+  button and a session reset — so a `LIBNAME` you just submitted shows up
+  without a stale window and without polling.
+- Two bugs were keeping the language server's suggestions out of sight even when
+  it answered. Its entries were being pushed down the ranking along with the
+  plain-word ones, so they sorted below several hundred words from the open
+  files, and each registered editor left a stale duplicate of the server's
+  completer behind for every editor opened afterwards — one duplicate popup
+  entry and one redundant request each. Both fixed: server entries now lead the
+  list, once.
+- New completion for two things the SAS language server cannot answer at all.
+  Inside `proc sql;` it only ever offers the SELECT statement's option names —
+  its syntax data types the `FROM` clause as a plain value, so no library list
+  is ever requested — and it has no concept of columns anywhere. Both are now
+  answered from the library tree: `from`, `join`, `insert into`, `update` and
+  `create table` offer libraries and tables, and the columns of every table the
+  current step reads are offered throughout that step, scoped to one table when
+  you type `table.`. Columns are served from a cache that fills in the
+  background, so the popup never waits on a round trip, and lookups are skipped
+  while a program is running rather than queueing behind it.
+- The completion popup now says where each entry comes from. The language
+  server labels a library `Folder` and everything else — tables, keywords, data
+  set names it parsed out of your program — `Keyword`, which told you nothing.
+  Entries now read `library`, `SASHELP.` for a table of that libref, `CLASS.`
+  for a column of that table, and `program` for a data set name that came from
+  the code rather than the server. The popup is a little wider to fit them.
+- The command palette, the file/library browser and Ace's settings panel follow
+  dark mode now. They are separate overlays with their own light styling, so
+  turning dark mode on left a white box of pale text over a dark app. The
+  settings panel needed more than colours: it is built from native controls,
+  whose backgrounds the browser paints itself, so it is now told to draw them
+  dark. Those prompts also read at Ace's default 12px next to a 15px editor —
+  they use the configured editor font size now.
+- Moving several files at once by drag-and-drop asks for confirmation once, not
+  once per file, and the prompt lists everything that is about to move.
+
 ## 0.16
 
 - The SAS language server no longer slows the editor down on larger files, and
