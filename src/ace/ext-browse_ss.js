@@ -312,6 +312,7 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // Initialize key bindings. Keyed by action name (SSF_BROWSE_KEYS) rather
         // than by key string: the actual keys come from that table, overridden
         // per action by the options page (__ssExt.browseKeys).
+        /** @type {Record<string, Function>} */
         const actions = {
             // NB: don't bind `accept` directly - ace passes the editor as the first
             // arg, which would make accept()'s `asText` always truthy (open as text).
