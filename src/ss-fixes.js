@@ -1134,14 +1134,40 @@ Add a prefix to the path for different option:
       // Ask user for confirmation before move file when drag-n-drop in SAS Studio
 
       const projects = window.appDMS.projects;
+
+      // One prompt per DROP, not per item: dijit's dndSource.onDndDrop pastes
+      // every dragged node in a single synchronous forEach
+      // (dijit/tree/dndSource.js), so caching the answer for the rest of the
+      // tick is exactly one decision per drag-and-drop.
+      let drop = null;
+      const MAX_LISTED = 10;
+
+      function confirmDrop(item, target) {
+        if (drop) return drop.ok;
+        // dijit drags the tree's selection, so that's the whole moving set.
+        const selected = (projects.tree.get("selectedItems") || []).filter((i) => i && i.uri);
+        const items = selected.length > 1 ? selected : [item];
+        const what =
+          items.length > 1
+            ? `these ${items.length} items:\n` +
+              items
+                .slice(0, MAX_LISTED)
+                .map((i) => `  ${i.uri}`)
+                .join("\n") +
+              (items.length > MAX_LISTED ? `\n  ... and ${items.length - MAX_LISTED} more` : "")
+            : `the ${item.isDirectory ? "folder" : "file"}\n${item.uri}`;
+        drop = { ok: window.confirm(`Confirm to move ${what}\nto\n${target.uri}`) };
+        setTimeout(() => (drop = null), 0);
+        return drop.ok;
+      }
+
       function modifyPasteItem() {
         const o_pasteItem = projects.projectTreeStore.pasteItem;
         projects.projectTreeStore.pasteItem = function (...args) {
           // Continue if not drag and drop
           if (args[4] !== undefined) return o_pasteItem.call(this, ...args);
 
-          const msg = `Confirm to move the ${args[0].isDirectory ? "folder" : "file"}\n${args[0].uri}\nto\n${args[2].uri}`;
-          if (window.confirm(msg)) {
+          if (confirmDrop(args[0], args[2])) {
             return o_pasteItem.call(this, ...args);
           }
         };

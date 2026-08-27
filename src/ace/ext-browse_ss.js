@@ -148,7 +148,10 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // Initialize prompt
         var cmdLine = $singleLineEditor();
         cmdLine.session.setUndoManager(new UndoManager());
-        cmdLine.setOption("fontSize", 14);
+        // Follow the configured editor font size (ace's own default is 12px, a
+        // squint next to the editor); the completions popup below does the same.
+        const promptFontSize = window.__ssExt?.aceConfig?.options?.fontSize || 15;
+        cmdLine.setOption("fontSize", promptFontSize);
         // Set initial prompt value
         cmdLine.setValue(startPath, 1);
         cmdLine.setOption("placeholder", options.placeholder ?? PLACEHOLDER_TEXT);
@@ -205,7 +208,7 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         popup.autoSelect = false;
         popup.renderer.$maxLines = 15;
         popup.setRow(-1);
-        popup.setOption("fontSize", 15);
+        popup.setOption("fontSize", promptFontSize);
 
         // @ts-ignore
         popup.on("click", function (e) {

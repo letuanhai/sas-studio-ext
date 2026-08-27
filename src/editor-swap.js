@@ -545,6 +545,71 @@
     return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
   }
 
+  // The overlays ace builds for us - the command palette prompt, browse_ss, and
+  // the stock settings menu - are plain divs on document.body: their inner
+  // editors are created with no theme, so they take ace's DEFAULT one, and their
+  // containers are `background: white` in ace's own CSS. In dark mode that's a
+  // white box full of light text over a dark app. Point the default theme at
+  // whichever of our two themes is current (our SAS editors pass a theme
+  // explicitly, so they're unaffected) and mark the body so the static sheet
+  // below can dress the containers to match. Same for the font size: ace's
+  // default is 12px, which is a squint next to a 15px editor - the palette's own
+  // input takes the focused editor's size when there is one, but its completion
+  // list (and both, when the palette is opened with nothing focused) fall back
+  // to the default.
+  function syncOverlayDefaults() {
+    if (!ssExt.newAceLoaded) return;
+    const cfg = getAceConfig();
+    const dark = prefersDarkTheme();
+    try {
+      ace.config.setDefaultValue("editor", "theme", dark ? cfg.darkTheme : cfg.lightTheme);
+      ace.config.setDefaultValue("editor", "fontSize", cfg.options.fontSize);
+    } catch (e) {
+      console.warn("[SS Ext] could not set the ace defaults:", e);
+    }
+    if (document.body) document.body.classList.toggle("ssExtDark", dark);
+  }
+
+  const OVERLAY_DARK_CSS = `
+    body.ssExtDark .ace_prompt_container,
+    body.ssExtDark .ace_browse_ss_container {
+      background: #1f2227;
+      color: #c1c1c1;
+      box-shadow: 0 2px 8px 0 rgba(0,0,0,0.6);
+    }
+    body.ssExtDark .ace_browse_ss_hint { color: #8a8f98; }
+    body.ssExtDark #ace_settingsmenu,
+    body.ssExtDark #kbshortcutmenu {
+      background-color: #1f2227;
+      color: #c1c1c1;
+      box-shadow: -5px 4px 12px rgba(0,0,0,0.6);
+      /* The settings panel is a plain <table> of NATIVE controls (ace's own
+         .ace_optionsMenuEntry rules match nothing in the DOM it builds). A
+         background-color on a <select> is computed but not painted - Chromium
+         draws the platform widget - so let the platform draw it dark instead.
+         Inherited, so the selects, checkboxes and number inputs all follow. */
+      color-scheme: dark;
+    }
+    body.ssExtDark .ace_optionsMenuEntry:hover { background-color: rgba(255,255,255,0.08); }
+    body.ssExtDark .ace_optionsMenuKey { color: #9aa7ff; }
+    body.ssExtDark .ace_optionsMenuCommand { color: #6fc3c9; }
+    /* Buttons and text inputs are the exception: something in the page paints
+       them white, and with the panel's light text that leaves the labels
+       invisible. (Checkboxes are left to color-scheme - they read fine.) */
+    body.ssExtDark #ace_settingsmenu input:not([type=checkbox]),
+    body.ssExtDark #ace_settingsmenu button {
+      background: #2b2f36;
+      color: #c1c1c1;
+      border: 1px solid #4a4f57;
+    }
+    body.ssExtDark #ace_settingsmenu button:hover { background: #353a42; }
+    body.ssExtDark #ace_settingsmenu button[ace_selected_button=true] {
+      background: #454b55;
+      box-shadow: 1px 0px 2px 0px #1a1d21 inset;
+      border-color: #5c636e;
+    }
+  `;
+
   function getAceConfig() {
     const cfg = ssExt.aceConfig || {};
     return {
@@ -584,6 +649,10 @@
   function applyAceConfig(config) {
     ssExt.aceConfig = config;
     if (!ssExt.newAceLoaded) return; // nothing open yet to apply to
+
+    // sw.js calls this on every dark-mode change too, which is what keeps the
+    // prompts/settings panel in step with the app and the editors.
+    syncOverlayDefaults();
 
     const cfg = getAceConfig();
     allAdapters().forEach((a) => {
@@ -739,13 +808,30 @@
     // room for it. At ace's stock 300px a table-name meta would eat the column
     // names it labels. !important because importCssString prepends to <head>,
     // so this sheet sits ABOVE ace's own and would otherwise lose the tie.
+    // Only the editor's own popup: the command palette and browse_ss build their
+    // completion list from the same class but size it to their prompt box
+    // (`width:100%` inline, max 600/800px), and an !important rule beats an
+    // inline style, which left the list narrower than the input above it.
     ace.require("ace/lib/dom").importCssString(
-      ".ace_editor.ace_autocomplete{width:400px!important}",
+      ".ace_editor.ace_autocomplete{width:400px!important}" +
+        ".ace_prompt_container .ace_editor.ace_autocomplete," +
+        ".ace_browse_ss_container .ace_editor.ace_autocomplete{width:100%!important}",
       "ssExtCompletionPopup",
     );
 
+    ace.require("ace/lib/dom").importCssString(OVERLAY_DARK_CSS, "ssExtDarkOverlays");
+
     ssExt.newLib = { ace: ace };
     ssExt.newAceLoaded = true;
+
+    // One listener for the overlays: the per-adapter matchMedia handlers only
+    // cover editors that exist, and a prompt can be opened with none open.
+    if (window.matchMedia) {
+      window
+        .matchMedia("(prefers-color-scheme: dark)")
+        .addEventListener("change", syncOverlayDefaults);
+    }
+    syncOverlayDefaults();
 
     installDialogFocusPriorityPatch();
     installSettingsMenuPersistence();

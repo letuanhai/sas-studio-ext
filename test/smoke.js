@@ -86,6 +86,39 @@ function check(name, ok, detail) {
   }));
   check("ss-fixes injected and initialized", state.initialized && state.toolsMeta, state);
   check("reopenClosedTab tracking installed", state.closedTabsTracking && state.closeTabWrapped, state);
+
+  // -- confirmDropFile asks once per drop, not once per item ----------------------
+  // dijit pastes every dragged node in one synchronous forEach, so two pasteItem
+  // calls in the same tick are one drop. Declining keeps this from touching the
+  // server: the original pasteItem only runs on a yes.
+  const dropState = await page.evaluate(async () => {
+    const store = window.appDMS.projects.projectTreeStore;
+    const original = window.confirm;
+    let asked = 0;
+    let message = "";
+    window.confirm = (m) => {
+      asked++;
+      message = m;
+      return false; // decline - nothing is moved
+    };
+    const item = (uri) => ({ uri, isDirectory: false });
+    const target = { uri: "/folders/myfolders/ssext-smoke-target" };
+    try {
+      store.pasteItem(item("/folders/myfolders/a.sas"), target, target, false, undefined);
+      store.pasteItem(item("/folders/myfolders/b.sas"), target, target, false, undefined);
+      const perDrop = asked;
+      await new Promise((r) => setTimeout(r, 0)); // next tick = next drop
+      store.pasteItem(item("/folders/myfolders/c.sas"), target, target, false, undefined);
+      return { perDrop, nextDrop: asked, message };
+    } finally {
+      window.confirm = original;
+    }
+  });
+  check(
+    "drag-and-drop move asks once per drop, and again for the next one",
+    dropState.perDrop === 1 && dropState.nextDrop === 2,
+    dropState,
+  );
   if (state.tabCount < 1) {
     check("at least one tab open in session (needed for middle-click test)", false, state);
   } else {
@@ -1776,6 +1809,56 @@ function check(name, ok, detail) {
     "darkMode 'on' puts Ace on its dark theme regardless of the OS setting",
     !aceTheme.osIsDark && aceTheme.theme && aceTheme.theme === aceTheme.configured,
     aceTheme,
+  );
+
+  // ...and the overlays ace builds for us (prompt container styled `background:
+  // white` by ace, inner editors created with no theme at all) have to come
+  // along, or dark mode means a white box of light-on-light text.
+  const overlayDark = await page.evaluate(async () => {
+    window.__ssExt.commandPalette();
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (document.querySelector(".ace_prompt_container")) break;
+    }
+    const el = document.querySelector(".ace_prompt_container");
+    const inner = el && el.querySelector(".ace_editor");
+    const list = el && el.querySelector(".ace_autocomplete");
+    const rgb = el && getComputedStyle(el).backgroundColor.match(/\d+/g);
+    const width = (n) => (n ? Math.round(n.getBoundingClientRect().width) : 0);
+    const state = {
+      // The editor's own popup is widened to 400px for the meta column; the
+      // prompt's list sizes to the prompt box and must not inherit that.
+      inputWidth: width(inner),
+      listWidth: width(list),
+      // ace's default is 12px; the prompt should read at the editor's size.
+      fontSize: inner && getComputedStyle(inner).fontSize,
+      listFontSize: list && getComputedStyle(list).fontSize,
+      configuredFontSize: ((window.__ssExt.aceConfig || {}).options || {}).fontSize,
+      bodyMarked: document.body.classList.contains("ssExtDark"),
+      background: el && getComputedStyle(el).backgroundColor,
+      // A dark container: every channel well below mid-grey.
+      isDark: !!rgb && rgb.slice(0, 3).every((c) => Number(c) < 96),
+      innerIsDark: !!(inner && inner.classList.contains("ace_dark")),
+      innerTheme: inner && inner.className,
+    };
+    document.dispatchEvent(new KeyboardEvent("keydown", { keyCode: 27, bubbles: true }));
+    return state;
+  });
+  check(
+    "the palette/browse/settings overlays follow dark mode",
+    overlayDark.bodyMarked && overlayDark.isDark && overlayDark.innerIsDark,
+    overlayDark,
+  );
+  check(
+    "the prompt's completion list keeps the width of its input box",
+    Math.abs(overlayDark.listWidth - overlayDark.inputWidth) <= 4,
+    overlayDark,
+  );
+  check(
+    "the prompt uses the configured editor font size, not ace's 12px default",
+    overlayDark.fontSize === `${overlayDark.configuredFontSize}px` &&
+      overlayDark.listFontSize === `${overlayDark.configuredFontSize}px`,
+    overlayDark,
   );
 
   // The stylesheet is a <link> node we own (src/dark-inject.js), not
