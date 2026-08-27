@@ -195,6 +195,15 @@
         // Re-check: a big setText() may have landed while this promise was in flight.
         if (!this._lspEligible()) return;
         try {
+          // registerEditor pushes ace-linters' completer straight into
+          // editor.completers - which until this point is the SHARED array
+          // ext-language_tools hands every editor, so each registration leaves a
+          // stale LSP completer behind for every editor created later (duplicate
+          // entries in the popup, one redundant LSP request each). Give this
+          // editor its own array first, minus any that already leaked in.
+          this.aceEditor.completers = (this.aceEditor.completers || []).filter(
+            (c) => c.id !== "lspCompleters",
+          );
           provider.registerEditor(this.aceEditor);
           this._lspRegistered = true;
           installLspMarkerPatches(provider, this.aceEditor.session);
@@ -202,17 +211,23 @@
           // false - the LSP completer is merged in alongside ace's own
           // text/keyword/snippet completers, and the popup sorts by score, so
           // push the default completers' scores down so LSP entries list first.
+          // registerEditor above has ALREADY pushed ace-linters' own completer
+          // into this array, so it has to be skipped by id - dampening it too
+          // (which is what happened before) just shifts everything equally and
+          // leaves LSP items, which score 0, below the text completer's words.
           this.aceEditor.completers = (this.aceEditor.completers || []).map((completer) =>
-            Object.assign({}, completer, {
-              getCompletions: (ed, session, pos, prefix, callback) => {
-                completer.getCompletions(ed, session, pos, prefix, (err, results) => {
-                  (results || []).forEach((r) => {
-                    r.score = (r.score || 0) - 1e6;
-                  });
-                  callback(err, results);
-                });
-              },
-            }),
+            completer.id === "lspCompleters"
+              ? completer
+              : Object.assign({}, completer, {
+                  getCompletions: (ed, session, pos, prefix, callback) => {
+                    completer.getCompletions(ed, session, pos, prefix, (err, results) => {
+                      (results || []).forEach((r) => {
+                        r.score = (r.score || 0) - 1e6;
+                      });
+                      callback(err, results);
+                    });
+                  },
+                }),
           );
           // The semanticTokens/full request ace-linters fires on registration
           // races the server's didOpen handling and fails once; kick a refresh
@@ -550,6 +565,18 @@
     };
   }
 
+  // Every live AceEditorAdapter on the page: text viewers first, then code tabs.
+  function allAdapters() {
+    const adapters = ssExt._textViewers.map((e) => e.adapter).filter(Boolean);
+    if (typeof appDMS !== "undefined" && appDMS.tabs && appDMS.tabs.getAllTabObjects) {
+      appDMS.tabs.getAllTabObjects().forEach((t) => {
+        const a = t.editor && t.editor.editor;
+        if (a && a._isAceEditorAdapter) adapters.push(a);
+      });
+    }
+    return adapters;
+  }
+
   // Called by sw.js's storage.onChanged listener (aceConfig key) and by the
   // settings-menu persistence hook (installSettingsMenuPersistence, below).
   // Stores the config and live-applies it to every open adapter.
@@ -558,14 +585,7 @@
     if (!ssExt.newAceLoaded) return; // nothing open yet to apply to
 
     const cfg = getAceConfig();
-    const adapters = ssExt._textViewers.map((e) => e.adapter).filter(Boolean);
-    if (typeof appDMS !== "undefined" && appDMS.tabs && appDMS.tabs.getAllTabObjects) {
-      appDMS.tabs.getAllTabObjects().forEach((t) => {
-        const a = t.editor && t.editor.editor;
-        if (a && a._isAceEditorAdapter) adapters.push(a);
-      });
-    }
-    adapters.forEach((a) => {
+    allAdapters().forEach((a) => {
       try {
         a.applyConfig(cfg);
       } catch (e) {
@@ -672,6 +692,7 @@
     // here on - they're harmless since nothing in SAS Studio references .ace_*.
 
     await loadScript(`${libPath}/ext-language_tools.js`);
+    registerOtherEditorsCompleter();
     await loadScript(`${srcAcePath}/ext-browse_ss.js`);
     // Warm the command-history cache now (fire-and-forget - "SsCmdPaletteHistory",
     // inlined since CMD_HISTORY_KEY is defined later in this closure but not yet
@@ -718,6 +739,55 @@
     installSettingsMenuPersistence();
     // Register vim :w/:q/:wq/:x once the new ace (and its vim module) is available.
     await installVimExCommands();
+  }
+
+  // -- Completion from the other open editors --------------------------------------
+  // Ace's built-in text completer only ever looks at the current session, so a
+  // name defined in another open tab never shows up. This one harvests the words
+  // of every OTHER live adapter. It goes into ext-language_tools' global
+  // completers array (every editor aliases that array by reference), and it has
+  // to be registered before any editor exists: _maybeRegisterLsp replaces
+  // editor.completers with a mapped copy, which a later addCompleter can't reach.
+
+  // ace/autocomplete/text_completer's own word separator, so both agree on what
+  // counts as a word.
+  const WORD_SPLIT_RE = /[^a-zA-Z_0-9\$\-\u00C0-\u1FFF\u2C00-\uD7FF\w]+/;
+  const sessionWordCache = new WeakMap(); // session -> { words: string[]|null }
+
+  // Splitting every other tab's full text on every keystroke (live autocompletion)
+  // gets expensive fast, so cache per session and drop it on edit. One "change"
+  // listener per session ever - the entry object stays, only .words is cleared.
+  function sessionWords(session) {
+    let entry = sessionWordCache.get(session);
+    if (!entry) {
+      entry = { words: null };
+      sessionWordCache.set(session, entry);
+      session.on("change", () => (entry.words = null));
+    }
+    if (!entry.words) entry.words = session.getValue().split(WORD_SPLIT_RE).filter(Boolean);
+    return entry.words;
+  }
+
+  function registerOtherEditorsCompleter() {
+    if (ssExt._otherEditorsCompleterAdded) return;
+    ssExt._otherEditorsCompleterAdded = true;
+    ace.require("ace/ext/language_tools").addCompleter({
+      id: "ssextOtherEditors",
+      getCompletions: (editor, session, pos, prefix, callback) => {
+        const words = new Set();
+        allAdapters().forEach((a) => {
+          const other = a.aceEditor && a.aceEditor.session;
+          if (!other || other === session) return;
+          sessionWords(other).forEach((w) => words.add(w));
+        });
+        // score 0: below the local text completer's distance-based scores (and
+        // far below the LSP's - see _maybeRegisterLsp), which is the right order.
+        callback(
+          null,
+          [...words].map((w) => ({ caption: w, value: w, score: 0, meta: "tab" })),
+        );
+      },
+    });
   }
 
   // -- User-configurable snippets -------------------------------------------------
@@ -836,6 +906,68 @@
     };
   }
 
+  // -- Library/table names for LSP completion -------------------------------------
+  // Answered from SAS Studio's own library tree model - the same source
+  // src/ace/ext-browse_ss.js browses. "libraries" lists the libraries,
+  // "libraries~SASHELP" one library's members, and the ids come back in that same
+  // "~" form, so a library's id round-trips straight back as the next libId.
+  // Shape is the server's LibCompleteItem: { id, name, type: DATA|VIEW|LIBRARY }.
+  const libListCache = new Map(); // libId ?? "@libs" -> Promise<LibCompleteItem[]>
+  ssExt._libListCache = libListCache; // both exposed for test/smoke.js
+  ssExt._getLibList = getLibList;
+
+  function getLibList(libId) {
+    const key = libId || "@libs";
+    if (!libListCache.has(key)) {
+      installLibListInvalidation();
+      libListCache.set(
+        key,
+        queryLibList(libId).catch((e) => {
+          console.warn("[SS Ext] library list unavailable:", e);
+          libListCache.delete(key); // never cache a failure
+          return [];
+        }),
+      );
+    }
+    return libListCache.get(key);
+  }
+
+  function queryLibList(libId) {
+    // treeModel is recreated on session reset, so resolve it per call, and let a
+    // missing one resolve empty rather than leaving the request unanswered.
+    const libs = typeof appDMS !== "undefined" && appDMS.libraries;
+    if (!libs || !libs.treeModel) return Promise.resolve([]);
+    return Promise.resolve(libs.treeModel.query(libId || "libraries")).then((item) =>
+      ((item && item.children) || [])
+        .filter((c) => c.isLibrary || c.table)
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          type: c.isLibrary ? "LIBRARY" : c.type === "VIEW" ? "VIEW" : "DATA",
+        })),
+    );
+  }
+
+  // Libraries change whenever SAS Studio refreshes its library tree: every run end
+  // (DMSEditor's submit paths all call libraries.onRefresh()), every library
+  // add/delete/rename and the Refresh button (refreshTree()), plus session reset.
+  // Hooking both funnels beats a TTL - no stale window, no polling. onRefresh()
+  // self-gates on treeViewActive internally, so wrap it rather than relying on it
+  // reaching refreshTree.
+  function installLibListInvalidation() {
+    const libs = typeof appDMS !== "undefined" && appDMS.libraries;
+    if (!libs || ssExt._libListInvalidationPatched) return;
+    ssExt._libListInvalidationPatched = true;
+    ["onRefresh", "refreshTree"].forEach((name) => {
+      const original = libs[name];
+      if (typeof original !== "function") return;
+      libs[name] = function () {
+        libListCache.clear();
+        return original.apply(this, arguments);
+      };
+    });
+  }
+
   // Returns a promise of the shared LanguageProvider, or null if LSP is disabled/
   // unavailable. Memoized on ssExt._lspStarting so concurrent AceEditorAdapter
   // constructions share one worker/provider instead of racing to start several;
@@ -905,6 +1037,20 @@
           },
         });
         worker.addEventListener("message", (e) => {
+          // sas/getLibList is a request FROM the server: it has no data access of
+          // its own and asks the client for the library/table list (we opt in with
+          // initializationOptions.supportSASGetLibList below). ace-linters exposes
+          // no way to register an inbound request handler, and its connection would
+          // answer MethodNotFound as soon as it saw this - first response wins, and
+          // ours is async - so answer it here and DON'T forward the message.
+          const msg = e.data;
+          if (msg && msg.method === "sas/getLibList" && msg.id !== undefined) {
+            getLibList(msg.params && msg.params.libId).then((result) => {
+              worker.postMessage({ jsonrpc: "2.0", id: msg.id, result });
+            });
+            return;
+          }
+
           const caps = e.data && e.data.result && e.data.result.capabilities;
           if (caps) {
             ["hoverProvider", "documentHighlightProvider"].forEach((k) => {
@@ -936,7 +1082,12 @@
           modes: "sas",
           type: "webworker",
           worker,
+          // Without this the server never wires up its lib service and library/
+          // table names are simply absent from completion (server.ts's
+          // onInitialize -> setLibService). See the sas/getLibList handler above.
+          initializationOptions: { supportSASGetLibList: true },
         };
+
         const provider = window.AceLanguageClient.for(serverData, {
           functionality: { completion: { overwriteCompleters: false }, semanticTokens: true },
         });

@@ -386,6 +386,162 @@ function check(name, ok, detail) {
     );
   }
 
+  // -- Library/table names for LSP completion (sas/getLibList) ---------------------
+  // What the SAS language server asks the client for. Exercised directly (no LSP
+  // bundle needed): the list must come back in LibCompleteItem shape, a library's
+  // id must round-trip as the next lookup's libId, and SAS Studio's own library
+  // refresh must drop the cache so a new LIBNAME shows up.
+  const libListState = await page.evaluate(async () => {
+    const libs = await window.__ssExt._getLibList(null);
+    const lib = libs.find((l) => l.name.toUpperCase() === "SASHELP") || libs[0];
+    const tables = lib ? await window.__ssExt._getLibList(lib.id) : [];
+    const cachedBefore = window.__ssExt._libListCache.size;
+    window.appDMS.libraries.onRefresh();
+    return {
+      libCount: libs.length,
+      allLibraries: libs.every((l) => l.type === "LIBRARY" && !!l.id && !!l.name),
+      lib: lib && lib.id,
+      tableCount: tables.length,
+      allTables: tables.every((t) => (t.type === "DATA" || t.type === "VIEW") && !!t.name),
+      cachedBefore,
+      cachedAfterRefresh: window.__ssExt._libListCache.size,
+    };
+  });
+  check(
+    "sas/getLibList returns the libraries as LibCompleteItems",
+    libListState.libCount > 0 && libListState.allLibraries,
+    libListState,
+  );
+  check(
+    "a library's id lists that library's tables",
+    libListState.tableCount > 0 && libListState.allTables,
+    libListState,
+  );
+  check(
+    "a library-tree refresh invalidates the cached lists",
+    libListState.cachedBefore > 0 && libListState.cachedAfterRefresh === 0,
+    libListState,
+  );
+
+  // -- LSP completions actually reach the popup, and reach it first ----------------
+  // Both halves of this were silently broken at some point: the score-dampening
+  // workaround also dampened ace-linters' own completer (so LSP entries sank below
+  // plain text words), and registerEditor's push leaked into ext-language_tools'
+  // shared completers array (so every later editor carried duplicate LSP completers).
+  if (lspState.hasProvider) {
+    const lspCompletionState = await page.evaluate(async () => {
+      window.__ssExt.aceConfig = Object.assign({}, window.__ssExt.aceConfig, {
+        lsp: true,
+        lspMaxLines: 0,
+      });
+      const div = document.createElement("div");
+      div.id = "ssext_smoke_lsp_completion";
+      div.style.cssText = "position:fixed;left:0;top:0;width:800px;height:300px;z-index:99999";
+      document.body.appendChild(div);
+      const a = new window.__ssExt.AceEditorAdapter(div.id, "", "sas");
+      const ed = a.aceEditor;
+      for (let i = 0; i < 40; i++) {
+        if (a._lspRegistered) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      ed.setValue("data test;\n  set sashelp.", -1);
+      ed.focus();
+      ed.navigateFileEnd();
+      await new Promise((r) => setTimeout(r, 1500));
+      ed.execCommand("startAutocomplete");
+      let top = [];
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 250));
+        const c = ed.completer && ed.completer.completions;
+        if (c && c.filtered && c.filtered.length) {
+          top = c.filtered.slice(0, 5).map((x) => x.completerId);
+          break;
+        }
+      }
+      // A fresh editor must not inherit an LSP completer from the one above.
+      const div2 = document.createElement("div");
+      div2.id = "ssext_smoke_lsp_completion_fresh";
+      div2.style.cssText = "position:fixed;left:-9999px;top:0;width:400px;height:200px";
+      document.body.appendChild(div2);
+      const b = new window.__ssExt.AceEditorAdapter(div2.id, "x", "ace/mode/text");
+      const leaked = b.aceEditor.completers.filter((c) => c.id === "lspCompleters").length;
+      [
+        [b, div2],
+        [a, div],
+      ].forEach(([adapter, node]) => {
+        adapter.dispose();
+        node.remove();
+      });
+      return { registered: a._lspRegistered, top, leaked };
+    });
+    check(
+      "LSP completions (library/table names) rank above the text completers",
+      lspCompletionState.top.length > 0 &&
+        lspCompletionState.top.every((id) => id === "lspCompleters"),
+      lspCompletionState,
+    );
+    check(
+      "registering with the LSP doesn't leak completers into ace's shared list",
+      lspCompletionState.leaked === 0,
+      lspCompletionState,
+    );
+  }
+
+  // -- Completion from the other open editors --------------------------------------
+  // Words defined in one editor must be offered in another, and must follow edits.
+  // A registers as a text viewer (what allAdapters() walks) so this needs no second
+  // server-backed tab.
+  const otherEditorsState = await page.evaluate(async () => {
+    const mk = (id, text) => {
+      const div = document.createElement("div");
+      div.id = id;
+      div.style.cssText = "position:fixed;left:-9999px;top:0;width:400px;height:200px";
+      document.body.appendChild(div);
+      return { div, adapter: new window.__ssExt.AceEditorAdapter(id, text, "sas") };
+    };
+    const a = mk("ssext_smoke_words_a", "data zzqqmarker; set sashelp.class; run;");
+    const b = mk("ssext_smoke_words_b", "data zzqqownword; run;");
+    const entry = { adapter: a.adapter };
+    window.__ssExt._textViewers.push(entry);
+
+    const editor = b.adapter.aceEditor;
+    const completer = editor.completers.find((c) => c.id === "ssextOtherEditors");
+    const complete = () =>
+      new Promise((res) =>
+        completer.getCompletions(editor, editor.session, { row: 0, column: 0 }, "", (e, r) =>
+          res((r || []).map((x) => x.value)),
+        ),
+      );
+
+    const words = completer ? await complete() : [];
+    a.adapter.aceEditor.session.insert({ row: 0, column: 0 }, "zzqqedited ");
+    const afterEdit = completer ? await complete() : [];
+
+    window.__ssExt._textViewers.splice(window.__ssExt._textViewers.indexOf(entry), 1);
+    [a, b].forEach((x) => {
+      x.adapter.dispose();
+      x.div.remove();
+    });
+    return {
+      registered: !!completer,
+      hasOtherWord: words.includes("zzqqmarker"),
+      hasOwnWord: words.includes("zzqqownword"),
+      followsEdits: afterEdit.includes("zzqqedited"),
+    };
+  });
+  check(
+    "another editor's words are offered as completions, its own are not",
+    otherEditorsState.registered &&
+      otherEditorsState.hasOtherWord &&
+      !otherEditorsState.hasOwnWord,
+    otherEditorsState,
+  );
+  check(
+    "the other editor's word cache follows its edits",
+    otherEditorsState.followsEdits,
+    otherEditorsState,
+  );
+
   // Pick a real, non-empty file that isn't already open as a tab - opening an
   // already-open uri just re-focuses that tab instead of creating a viewer.
   // Enumerate the workspace root folder (entries with a `size` are files).
