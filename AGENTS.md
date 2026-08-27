@@ -54,11 +54,8 @@ Vimrc: `aceConfig.vimrc` is a small subset of vim config lines (`map`/`nmap`/`im
 - `dijit.byId(...)` / `dijit.registry` — Dojo widget access (trees are `projects.tree`, `library.tree`, `destination.tree`).
 - Beware: some SAS Studio methods are subtly broken by the app itself (e.g. `dijit.Tree._expandNode` is overridden to return undefined; `ss-fixes.js` re-binds the prototype original).
 
-## Reference documentation (read before touching the adapter)
+## Reference documentation
 
-- `SAS_EDITOR_API.md` — full `SAS.Editor` API reference (60+ methods).
-- `sas-editor.d.ts` — TypeScript definitions for that API.
-- `EDITOR_USAGE_MAP.md` — which SAS Studio files call which editor methods (DMSEditor is the heaviest consumer); use this to check compatibility impact of adapter changes.
 - `SASStudio-3.82/` — extracted SAS Studio source (its own git repo, gitignored from this one, with its own CLAUDE.md). Ground truth for how the app behaves; explore it rather than guessing.
 
 ## Development

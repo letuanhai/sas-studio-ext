@@ -285,8 +285,6 @@ first if `lib/` is incomplete, and leaving out everything development-only
   sassoftware/vscode-sas-extension with the embedded Pyright stripped
   (`tools/remove-pyright.patch` at the repo root); the extension works fine without
   it, just without LSP features
-- `SAS_EDITOR_API.md`, `sas-editor.d.ts`, `EDITOR_USAGE_MAP.md` — reference docs
-  for the `SAS.Editor` API surface `AceEditorAdapter` implements
 
 ## SAS language server (optional)
 

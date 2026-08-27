@@ -4,11 +4,6 @@
  * Injected into the page's MAIN world by sw.js on every toolbar click. Idempotent —
  * a second injection is a no-op because of the `window.__ssExt` guard below; the sw
  * then calls `window.__ssExt.toggle(libPath)` to actually flip state.
- *
- * Docs (read before touching AceEditorAdapter):
- * - SAS_EDITOR_API.md   - SAS.Editor API reference
- * - sas-editor.d.ts     - TypeScript definitions for that API
- * - EDITOR_USAGE_MAP.md - which SAS Studio files call which editor methods
  */
 (function () {
   "use strict";
@@ -25,7 +20,7 @@
   // ==========================================================================
   // AceEditorAdapter - implements the SAS.Editor API on top of Ace
   //
-  // Known-stubbed methods (audited against EDITOR_USAGE_MAP.md - only DMSEditor
+  // Known-stubbed methods (audited against SAS Studio's own callers - only DMSEditor
   // consumes these, and none of it depends on a real return value except getHTML):
   //   cut/copy/paste()     - browser handles native clipboard, no-op
   //   canPaste()            - always true, no consumer branches on false
