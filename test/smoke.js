@@ -210,8 +210,8 @@ function check(name, ok, detail) {
       sasAceVersion: window.ace.version,
       ourAceVersion: window.__ssAce.version,
       // SAS's stock editor tokenizes through ITS OWN build, at call time, in
-      // exactly these places (paths under
-      // SASStudio-3.82/resources/js/sas-commons/controls/_codeEditor/):
+      // exactly these places (paths under SAS Studio's own
+      // resources/js/sas-commons/controls/_codeEditor/):
       //   mode/SyntaxColorerAdapter.js  ace/edit_session .EditSession
       //   Mode.js                       ace/lib/oop .inherits, ace/mode/text .Mode,
       //                                 ace/mode/text_highlight_rules .TextHighlightRules
