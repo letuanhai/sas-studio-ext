@@ -334,6 +334,58 @@ function check(name, ok, detail) {
     lspMaxLinesState,
   );
 
+  // -- LSP semantic-token markers stay bounded (installLspMarkerPatches) -----------
+  // ace-linters creates one ace text marker per semantic token for the whole
+  // document on every edit/scroll, and never compacts the id-indexed store, which
+  // made large files slower and slower the longer the page stayed open. Both are
+  // patched: markers must cover roughly the viewport, not the file, and the store
+  // must not grow without bound across edits.
+  if (lspState.hasProvider) {
+    const markerState = await page.evaluate(async () => {
+      window.__ssExt.aceConfig = { lsp: true, lspMaxLines: 0 };
+      const text = Array.from(
+        { length: 800 },
+        (_, i) => `data work.t${i}; set sashelp.class; x${i} = age * ${i}; run;`,
+      ).join("\n");
+      const div = document.createElement("div");
+      div.id = "ssext_smoke_lsp_markers";
+      div.style.cssText = "position:fixed;left:0;top:0;width:800px;height:400px;z-index:99999";
+      document.body.appendChild(div);
+      const a = new window.__ssExt.AceEditorAdapter(div.id, text, "sas");
+      const session = a.aceEditor.session;
+      const live = () => {
+        let n = 0;
+        (session.$textMarkers || []).forEach(() => n++);
+        return n;
+      };
+      for (let i = 0; i < 60; i++) {
+        if (live() > 0) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      const afterFirst = live();
+      // Edit repeatedly: each round re-requests + re-creates the whole marker set.
+      for (let round = 0; round < 25; round++) {
+        a.aceEditor.insert("x");
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+      const state = { afterFirst, afterEdits: live(), storeLength: (session.$textMarkers || []).length };
+      a.dispose();
+      div.remove();
+      return state;
+    });
+    check(
+      "semantic-token markers cover the viewport, not the whole file",
+      markerState.afterFirst > 0 && markerState.afterFirst < 3000,
+      markerState,
+    );
+    check(
+      "the text-marker store stays bounded across many edits",
+      markerState.storeLength < 20000,
+      markerState,
+    );
+  }
+
   // Pick a real, non-empty file that isn't already open as a tab - opening an
   // already-open uri just re-focuses that tab instead of creating a viewer.
   // Enumerate the workspace root folder (entries with a `size` are files).

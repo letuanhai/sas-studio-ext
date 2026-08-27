@@ -197,6 +197,7 @@
         try {
           provider.registerEditor(this.aceEditor);
           this._lspRegistered = true;
+          installLspMarkerPatches(provider, this.aceEditor.session);
           // Workaround for ace-linters 2.2.0 with completion.overwriteCompleters:
           // false - the LSP completer is merged in alongside ace's own
           // text/keyword/snippet completers, and the popup sorts by score, so
@@ -769,6 +770,71 @@
     .ace_date, .ace_time, .ace_dt { color: #1a7f37; }
     .ace_namelit, .ace_hex, .ace_bitmask { color: #9a3131; }
   `;
+
+  // How many rows above/below the viewport keep semantic-token markers, so a
+  // scroll shows colored text before the re-request for the new range lands.
+  const SEMANTIC_TOKEN_MARGIN = 50;
+  // Trailing debounce on the token request - ace-linters asks for a fresh
+  // (whole-document) token set on every changeScrollTop, i.e. once per scroll
+  // frame, and once per edit batch.
+  const SEMANTIC_TOKEN_DEBOUNCE = 60;
+
+  // Three perf patches on ace-linters 2.2.0's SessionLanguageProvider, applied
+  // once per page against the prototype of the first registered session. All
+  // three are about semantic tokens, which the SAS server answers for the WHOLE
+  // document (semanticTokens/full) on every edit and every scroll:
+  //  1. one ace text marker is created per token, document-wide, even though
+  //     only rendered rows can ever show one, and $applyTextMarkers (which runs
+  //     on EVERY render) walks the whole set: ~8000 markers created+destroyed
+  //     per keystroke on a 1200-line file, 10-60ms of main-thread work per
+  //     render. Filtering to the visible range cuts it to a few hundred.
+  //  2. session.$textMarkers is an ARRAY indexed by an ever-growing marker id
+  //     that removeTextMarker only `delete`s from - the array length grows
+  //     unbounded (measured: ~150k per minute of typing) and every render
+  //     forEach()es over it, so the editor gets steadily slower the longer the
+  //     page has been open. Reset the store once nothing is left in it.
+  //  3. debounce the request itself, so a scroll doesn't fire one per frame.
+  function installLspMarkerPatches(provider, session) {
+    if (ssExt._lspMarkerPatched) return;
+    let slp;
+    try {
+      slp = provider.$getSessionLanguageProvider(session);
+    } catch (e) {}
+    if (!slp) return;
+    const proto = Object.getPrototypeOf(slp);
+    if (!proto || !proto.setSemanticTokenMarkers) return;
+    ssExt._lspMarkerPatched = true;
+
+    const origSet = proto.setSemanticTokenMarkers;
+    proto.setSemanticTokenMarkers = function (tokens) {
+      const renderer = this.editor && this.editor.renderer;
+      if (tokens && tokens.tokens && renderer) {
+        const first = renderer.getFirstVisibleRow() - SEMANTIC_TOKEN_MARGIN;
+        const last = renderer.getLastVisibleRow() + SEMANTIC_TOKEN_MARGIN;
+        tokens.tokens = tokens.tokens.filter((t) => t.row >= first && t.row <= last);
+      }
+      // Drop our markers first (the original does this too, harmlessly twice)
+      // so the store can be seen empty and reset. Skipped while anything else
+      // still holds a marker - ids in flight elsewhere must stay valid.
+      const store = this.session.$textMarkers;
+      if (store && store.length > 4096) {
+        this.clearSemanticTokenMarkers(false);
+        let live = false;
+        store.forEach(() => (live = true));
+        if (!live) {
+          this.session.$textMarkers = [];
+          this.session.$textMarkerId = 0;
+        }
+      }
+      return origSet.call(this, tokens);
+    };
+
+    const origGet = proto.getSemanticTokens;
+    proto.getSemanticTokens = function () {
+      clearTimeout(this._ssextTokenTimer);
+      this._ssextTokenTimer = setTimeout(() => origGet.call(this), SEMANTIC_TOKEN_DEBOUNCE);
+    };
+  }
 
   // Returns a promise of the shared LanguageProvider, or null if LSP is disabled/
   // unavailable. Memoized on ssExt._lspStarting so concurrent AceEditorAdapter
