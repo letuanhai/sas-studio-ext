@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- New dark mode for SAS Studio's own interface, in the options page: Off,
+  Always on, or Follow system. With "Always on" the Ace editor switches to its
+  dark theme as well, whatever the OS is set to, so the editor and the app
+  around it can't end up disagreeing; "Follow system" and "Off" both leave the
+  editor following the OS exactly as before. Changes apply to already-open tabs
+  immediately, in both directions, and the theme is in place before the page
+  first paints, so there is no flash of light on load.
+- That dark mode is a pre-generated stylesheet rather than a live theming
+  engine, which is the whole point of it. A general-purpose dark-mode extension
+  has to re-fetch and re-parse SAS Studio's ~95 nested-`@import` stylesheets on
+  every page load, and lose just one of them to a slow server and every icon
+  button renders as a bare text label with no icon. Its DOM observer also makes
+  typing in the Ace editor roughly 5x slower once the SAS language server is
+  attached, because Ace rewrites inline styles on every keystroke. A static
+  stylesheet has neither problem and measures indistinguishable from no dark
+  mode at all.
+
 ## 0.14
 
 - Removed remotely hosted code from the vendored libraries so the extension
