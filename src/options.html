@@ -53,6 +53,43 @@
         border-bottom: 1px solid var(--border);
         padding-bottom: 6px;
       }
+      /* Jump links to each section. Sticky so they stay reachable while
+      scrolling; scroll-margin-top on the targets keeps a jumped-to heading from
+      landing underneath the bar. */
+      #toc {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 8px;
+        margin-bottom: 12px;
+        padding: 10px 0;
+        border-bottom: 2px solid var(--border);
+        background: var(--bg);
+        /* The bar is opaque, but the page scrolls under it edge to edge - the
+        shadow keeps that boundary readable instead of text just vanishing. */
+        box-shadow: 0 4px 6px -4px rgba(0, 0, 0, 0.35);
+        font-size: 14px;
+      }
+      #toc a {
+        padding: 4px 10px;
+        border: 1px solid var(--btn-border);
+        border-radius: 999px;
+        background: var(--btn-bg);
+        color: var(--fg);
+        font-weight: 500;
+        text-decoration: none;
+      }
+      #toc a:hover {
+        background: var(--btn-hover);
+        border-color: var(--fg-muted);
+      }
+      :target,
+      h2,
+      h3 {
+        scroll-margin-top: 60px;
+      }
       .note {
         color: var(--fg-muted);
         font-size: 12px;
@@ -129,7 +166,17 @@
   <body>
     <h1>SS Ext Options</h1>
 
-    <h2>Appearance</h2>
+    <nav id="toc">
+      <a href="#appearance">Appearance</a>
+      <a href="#patches">Patches</a>
+      <a href="#hotkeys">Hotkeys</a>
+      <a href="#browse-keys">Browse prompt keys</a>
+      <a href="#editor">Editor</a>
+      <a href="#vim">Vim Keymap</a>
+      <a href="#snippets">Snippets</a>
+    </nav>
+
+    <h2 id="appearance">Appearance</h2>
     <p class="note">
       Dark theme for SAS Studio's own interface. Applies to open tabs immediately, in both directions. With "Always
       on" the Ace editor also switches to its dark theme regardless of the OS setting; "Follow system" and "Off"
@@ -146,11 +193,11 @@
       </select>
     </label>
 
-    <h2>Patches</h2>
+    <h2 id="patches">Patches</h2>
     <p class="note">Passive behavior changes, on by default. Applies on next page reload.</p>
     <div id="patches-list"></div>
 
-    <h2>Hotkeys</h2>
+    <h2 id="hotkeys">Hotkeys</h2>
     <p class="note">Applies on next page reload.</p>
     <table>
       <thead>
@@ -163,7 +210,7 @@
       <tbody id="hotkeys-list"></tbody>
     </table>
 
-    <h2>Browse prompt keys</h2>
+    <h2 id="browse-keys">Browse prompt keys</h2>
     <p class="note">
       Keys inside the file / library / tab browser (Alt+P, Alt+O, Alt+T). Applies to the next prompt you open, no
       reload needed. "Clear" leaves the action unbound; "Default" restores the built-in key.
@@ -179,7 +226,7 @@
       <tbody id="browse-keys-list"></tbody>
     </table>
 
-    <h2>Editor</h2>
+    <h2 id="editor">Editor</h2>
     <p class="note">
       Defaults for every Ace editor in SAS Studio (code editor, text viewer) and for the snippet editor below.
       Live-applies to open SAS Studio tabs on change. Theme is a dark/light pair (auto-switches with OS preference) -
@@ -200,7 +247,7 @@
     >
     <p class="note">Applies next time the Ace editor is activated.</p>
 
-    <h3>Vim Keymap</h3>
+    <h3 id="vim">Vim Keymap</h3>
     <p class="note">
       Applied to the shared vim keyboard handler (only takes effect once "Vim" is the active keyboard handler).
       One mapping per line, <code>"</code> starts a comment. Supported:
@@ -219,7 +266,7 @@
     <button id="save-vimrc">Save vim config</button>
     <span id="vimrc-save-status"></span>
 
-    <h2>Snippets</h2>
+    <h2 id="snippets">Snippets</h2>
     <p class="note">
       Native Ace snippet format (<code>snippet trigger</code> / tab-indented body). Additive over the built-in SAS
       snippets. Live-applies to open SAS Studio tabs on Save.
