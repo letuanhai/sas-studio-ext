@@ -17,8 +17,10 @@ the highest `v*` git tag (`v0.9` -> `0.10`).
 2. **Changelog** — read `git log v<last>..HEAD --oneline` AND the actual diff
    (`git diff v<last>..HEAD --stat`, then read the interesting hunks). Add a
    `## <version>` section at the top of `CHANGELOG.md`, matching the existing
-   style: prose bullets explaining *what changed and why*, wrapped at ~80 cols,
-   not commit subjects.
+   style: one prose bullet per user-visible change, saying *what changed and
+   why*, not commit subjects. **Each bullet is a summary of at most 3 lines**
+   (wrapped at ~80 cols) — the reasoning, measurements and mechanism belong in
+   the commit message, which is where anyone who wants them will look.
 3. **Verify** — re-walk the commit list and confirm every user-visible change
    landed in the new section, and that nothing already-released got duplicated.
    Purely internal churn (docs, test tweaks, refactors with no behaviour change)

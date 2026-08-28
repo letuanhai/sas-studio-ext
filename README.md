@@ -264,6 +264,9 @@ first if `lib/` is incomplete, and leaving out everything development-only
 - `popup.html`/`popup.js` — editor toggle, native-mouse toggle, command palette button
 - `options.html`/`options.js` — patch toggles, hotkey rebinding, editor config
   (theme pair, vim config), snippet editor
+- `changelog.html`/`changelog.js` — renders the shipped `CHANGELOG.md`; linked
+  from the options page's nav bar so that page doesn't grow another section
+- `page.css` — the palette/frame/nav bar shared by those two pages
 - `lib/ace/` — upstream Ace 1.43.3, built from source by `./tools/build_lib.sh` with
   its module registry renamed to `window.__ssAce` (identical to the `ace-builds`
   npm package otherwise; don't hand-edit anything under here).

@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>SS Ext Changelog</title>
+    <link rel="stylesheet" href="page.css" />
+    <style>
+      /* Versions go in a sticky column down the left instead of the options
+      page's pill bar: there is one per release and the list only grows. */
+      body {
+        max-width: 900px;
+      }
+      .layout {
+        display: flex;
+        align-items: flex-start;
+        gap: 28px;
+      }
+      #versions {
+        position: sticky;
+        top: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        flex: 0 0 auto;
+        padding-right: 16px;
+        border-right: 1px solid var(--border);
+      }
+      #versions a {
+        color: var(--fg-muted);
+        text-decoration: none;
+      }
+      #versions a:hover {
+        color: var(--fg);
+        text-decoration: underline;
+      }
+      #versions a.page-link {
+        margin-bottom: 6px;
+        color: var(--fg);
+      }
+      #changelog {
+        min-width: 0;
+      }
+      #changelog h2:first-child {
+        margin-top: 0;
+      }
+      ul {
+        margin: 8px 0 0;
+        padding-left: 20px;
+      }
+      li {
+        margin-bottom: 6px;
+      }
+      code {
+        font-family: monospace;
+        color: var(--fg-mono);
+        background: var(--btn-bg);
+        border-radius: 3px;
+        padding: 0 3px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>SS Ext Changelog</h1>
+
+    <div class="layout">
+      <nav id="versions">
+        <a class="page-link" href="options.html">← Options</a>
+      </nav>
+      <div id="changelog"></div>
+    </div>
+
+    <script src="changelog.js"></script>
+  </body>
+</html>

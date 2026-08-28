@@ -1,0 +1,98 @@
+/* Shared chrome for the extension's own pages (options.html, changelog.html):
+   palette, page frame and the sticky nav bar. Page-specific rules stay inline
+   in the page that needs them. */
+:root {
+  color-scheme: light dark;
+  --bg: #1e1e1e;
+  --fg: #ddd;
+  --fg-muted: #999;
+  --fg-mono: #ccc;
+  --border: #3a3a3a;
+  --border-soft: #2c2c2c;
+  --btn-bg: #2d2d2d;
+  --btn-border: #555;
+  --btn-hover: #3a3a3a;
+  --recording-bg: #6b3a3a;
+  --recording-border: #a55;
+  --ok: #6bcf6b;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fff;
+    --fg: #222;
+    --fg-muted: #666;
+    --fg-mono: #333;
+    --border: #ccc;
+    --border-soft: #e2e2e2;
+    --btn-bg: #f5f5f5;
+    --btn-border: #bbb;
+    --btn-hover: #e8e8e8;
+    --recording-bg: #f3c9c9;
+    --recording-border: #c66;
+    --ok: #2a7f2a;
+  }
+}
+body {
+  margin: 0 auto;
+  max-width: 800px;
+  padding: 16px 20px 60px;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--fg);
+}
+h1 {
+  font-size: 20px;
+}
+h2 {
+  font-size: 15px;
+  margin-top: 32px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+/* Jump links to each section. Sticky so they stay reachable while scrolling;
+scroll-margin-top on the targets keeps a jumped-to heading from landing
+underneath the bar. */
+#toc {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-bottom: 12px;
+  padding: 10px 0;
+  border-bottom: 2px solid var(--border);
+  background: var(--bg);
+  /* The bar is opaque, but the page scrolls under it edge to edge - the shadow
+  keeps that boundary readable instead of text just vanishing. */
+  box-shadow: 0 4px 6px -4px rgba(0, 0, 0, 0.35);
+  font-size: 14px;
+}
+#toc a {
+  padding: 4px 10px;
+  border: 1px solid var(--btn-border);
+  border-radius: 999px;
+  background: var(--btn-bg);
+  color: var(--fg);
+  font-weight: 500;
+  text-decoration: none;
+}
+#toc a:hover {
+  background: var(--btn-hover);
+  border-color: var(--fg-muted);
+}
+/* The link to the other page, rather than to a section of this one. */
+#toc a.page-link {
+  border-style: dashed;
+}
+:target,
+h2,
+h3 {
+  scroll-margin-top: 60px;
+}
+.note {
+  color: var(--fg-muted);
+  font-size: 12px;
+  margin: 4px 0 12px;
+}
