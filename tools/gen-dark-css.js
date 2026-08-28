@@ -264,8 +264,18 @@ function postProcess(css) {
       else if (verdict === "light") out.keep.push(...selectors);
       else out.failed.push(url);
     }
+    // `filter: invert()` inverts everything the element paints - its own
+    // background-color and its children included - which is harmless on an
+    // icon-sized box but wrong when the same artwork is also painted as the
+    // background of a big container. `.emptyWorkspaceSplash` is #tabsBC itself
+    // (the whole workspace area, shown when no tab is open), so inverting it
+    // turned the dark empty workspace light.
+    // ponytail: literal list - a size check would need the element to be in the
+    // DOM and laid out at generation time, which for this one depends on
+    // whether the session happens to have a tab open.
+    const NOT_AN_ICON = [".emptyWorkspaceSplash"];
     return {
-      invert: [...new Set(out.invert)],
+      invert: [...new Set(out.invert)].filter((sel) => !NOT_AN_ICON.some((c) => sel.includes(c))),
       keep: [...new Set(out.keep)],
       failed: out.failed,
       urls: byUrl.size,

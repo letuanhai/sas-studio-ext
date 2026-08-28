@@ -12977,6 +12977,26 @@ span.sce-ac-navigator-btn:hover {
     border-right-color: var(--darkreader-border-a7a7a7, #525556) !important;
     border-top-color: var(--darkreader-border-a7a7a7, #525556) !important;
 }
+.dgrid-column-resizer {
+    background-color: var(--darkreader-background-666666, #555959) !important;
+}
+.dgrid-resize-handle {
+    border-left-color: transparent !important;
+    outline-color: initial !important;
+}
+html.has-ie-6 .dgrid-resize-handle {
+    border-bottom-color: var(--darkreader-border-ffc0cb, #741121) !important;
+    border-left-color: var(--darkreader-border-ffc0cb, #741121) !important;
+    border-right-color: var(--darkreader-border-ffc0cb, #741121) !important;
+    border-top-color: var(--darkreader-border-ffc0cb, #741121) !important;
+}
+html.has-mozilla .dgrid .dgrid-resize-handle:focus,
+html.has-opera .dgrid .dgrid-resize-handle:focus {
+    outline-color: initial !important;
+}
+html.has-touch .dgrid-resize-handle {
+    border-left-color: transparent !important;
+}
 .dojoDndAvatar {
     color: var(--darkreader-text-000000, #e5e0d8) !important;
 }
@@ -13000,25 +13020,11 @@ span.sce-ac-navigator-btn:hover {
 .dojoDndCopy .dojoDndAvatarCanDrop .dojoDndAvatarHeader {
     background-repeat: no-repeat;
 }
-.dgrid-column-resizer {
-    background-color: var(--darkreader-background-666666, #555959) !important;
+.dgrid-header .dojoDndItemBefore {
+    border-left-color: var(--darkreader-border-000000, #8f8475) !important;
 }
-.dgrid-resize-handle {
-    border-left-color: transparent !important;
-    outline-color: initial !important;
-}
-html.has-ie-6 .dgrid-resize-handle {
-    border-bottom-color: var(--darkreader-border-ffc0cb, #741121) !important;
-    border-left-color: var(--darkreader-border-ffc0cb, #741121) !important;
-    border-right-color: var(--darkreader-border-ffc0cb, #741121) !important;
-    border-top-color: var(--darkreader-border-ffc0cb, #741121) !important;
-}
-html.has-mozilla .dgrid .dgrid-resize-handle:focus,
-html.has-opera .dgrid .dgrid-resize-handle:focus {
-    outline-color: initial !important;
-}
-html.has-touch .dgrid-resize-handle {
-    border-left-color: transparent !important;
+.dgrid-header .dojoDndItemAfter {
+    border-right-color: var(--darkreader-border-000000, #8f8475) !important;
 }
 .dgrid-hider-toggle {
     background-color: transparent !important;
@@ -13032,12 +13038,6 @@ html.has-touch .dgrid-resize-handle {
     border-left-color: var(--darkreader-border-000000, #8f8475) !important;
     border-right-color: var(--darkreader-border-000000, #8f8475) !important;
     border-top-color: var(--darkreader-border-000000, #8f8475) !important;
-}
-.dgrid-header .dojoDndItemBefore {
-    border-left-color: var(--darkreader-border-000000, #8f8475) !important;
-}
-.dgrid-header .dojoDndItemAfter {
-    border-right-color: var(--darkreader-border-000000, #8f8475) !important;
 }
 .dgrid-spacer-row th {
     border-bottom: none !important;
@@ -14036,7 +14036,6 @@ html.has-touch .dgrid-resize-handle {
 .sasWebAdministrationThumbnailIcon48,
 .sasEmptyCanvasTasksThumbnailIcon65,
 .dijitDisabled .sasEmptyCanvasTasksThumbnailIcon65,
-.emptyWorkspaceSplash,
 .sasEmptyCanvasThumbnailIcon65,
 .dijitDisabled .sasEmptyCanvasThumbnailIcon65,
 .sasHelpButtonIconRTL,
