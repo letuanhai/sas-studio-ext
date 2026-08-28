@@ -1009,17 +1009,31 @@ Add a prefix to the path for different option:
       setup: function () {
         if (window.__ssfClosedTabs) return;
         window.__ssfClosedTabs = [];
-        const tabs = window.appDMS.tabs;
-        tabs._closeTabOrig = tabs.closeTab;
-        tabs.closeTab = function (tab) {
-          if (["FILE", "DATA", "IMPORTTOOL"].includes(tab.type)) {
+        // Hook StackContainer.closeChild, not appDMS.tabs.closeTab: the tab's own
+        // X button goes TabController.onCloseButtonClick -> closeChild(page)
+        // without ever touching closeTab, while closeTab itself just resolves the
+        // page's parent and calls closeChild too - so this is the one point every
+        // close routes through.
+        const proto = window.dijit.layout.StackContainer.prototype;
+        const origCloseChild = proto.closeChild;
+        proto.closeChild = function (page) {
+          const result = origCloseChild.apply(this, arguments);
+          // onClose() can veto the close (or defer it - the unsaved-changes
+          // prompt closes again once answered), so only record a page that
+          // actually got destroyed.
+          const tab = page && page.tabObject;
+          if (
+            tab &&
+            (page._beingDestroyed || page._destroyed) &&
+            ["FILE", "DATA", "IMPORTTOOL"].includes(tab.type)
+          ) {
             const closedTab = {};
             ["name", "uri", "type", "fileType", "library"].forEach((prop) => {
               closedTab[prop] = tab[prop];
             });
             window.__ssfClosedTabs.push(closedTab);
           }
-          return tabs._closeTabOrig.call(this, tab);
+          return result;
         };
       },
     },

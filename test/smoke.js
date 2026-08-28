@@ -81,11 +81,11 @@ function check(name, ok, detail) {
     initialized: !!(window.__ssf && window.__ssf._initialized),
     toolsMeta: Array.isArray(window.SSF_TOOLS),
     closedTabsTracking: Array.isArray(window.__ssfClosedTabs),
-    closeTabWrapped: !!window.appDMS.tabs._closeTabOrig,
+    closeChildWrapped: /__ssfClosedTabs/.test(String(window.dijit.layout.StackContainer.prototype.closeChild)),
     tabCount: window.appDMS.tabs.getAllTabObjects().length,
   }));
   check("ss-fixes injected and initialized", state.initialized && state.toolsMeta, state);
-  check("reopenClosedTab tracking installed", state.closedTabsTracking && state.closeTabWrapped, state);
+  check("reopenClosedTab tracking installed", state.closedTabsTracking && state.closeChildWrapped, state);
 
   // -- confirmDropFile asks once per drop, not once per item ----------------------
   // dijit pastes every dragged node in one synchronous forEach, so two pasteItem
@@ -163,6 +163,22 @@ function check(name, ok, detail) {
       } else {
         check("reopenClosedTab restores tab (skipped: close failed)", false, afterClose);
       }
+    }
+
+    // -- the tab's own X button is tracked too (it never calls tabs.closeTab) -----
+    const xClosed = await page.evaluate(async () => {
+      const t = window.appDMS.tabs.getAllTabObjects().find((t) => t.type === "FILE");
+      if (!t) return null;
+      const btn = (t.tab ?? t).controlButton.domNode.querySelector("[class*=Close]");
+      if (!btn) return null;
+      btn.click();
+      await new Promise((r) => setTimeout(r, 1500));
+      return { name: t.name, stack: window.__ssfClosedTabs.map((c) => c.name) };
+    });
+    check("X-button close is tracked for reopen", !!xClosed && xClosed.stack.includes(xClosed.name), xClosed);
+    if (xClosed) {
+      await page.evaluate(() => window.__ssf.run("reopenClosedTab"));
+      await page.waitForTimeout(2500);
     }
   }
 
