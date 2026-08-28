@@ -1,6 +1,15 @@
 # Changelog
 
 
+## 0.18
+
+- The completion popup, the command palette and the browse prompts are
+  resizable: drag the box's corner for the width, the list's for its height. A
+  prompt's size is reused for the rest of the page session.
+- The changelog is readable from the extension itself, on its own page linked
+  from the options page's nav bar, and its entries are now short summaries
+  rather than essays.
+
 ## 0.17
 
 - Autocompletion offers words from your other open editors (tagged `tab`), not
