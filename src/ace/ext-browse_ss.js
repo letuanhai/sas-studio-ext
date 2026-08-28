@@ -668,8 +668,15 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
     }
 
     dom.importCssString(`.ace_browse_ss_container {
-        max-width: 800px;
-        width: 100%;
+        /* A fixed width (not max-width: 800px + width: 100%) because a max-width
+        would clamp the drag. This handle sizes the box's WIDTH only; the
+        completions list is position:absolute (so it isn't in the box at all),
+        follows this width, and carries its own vertical handle - see
+        editor-swap.js's RESIZABLE_CSS/installResizablePopups. */
+        width: 800px;
+        max-width: 100%;
+        resize: horizontal;
+        overflow: hidden;
         margin: 100px auto;
         padding: 3px;
         background: white;

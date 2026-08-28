@@ -35,6 +35,10 @@ independent UX fixes for the rest of SAS Studio.
   the options page like any other action) works even with no Ace editor focused:
   it lists every `SS-Ext: ...` action plus, if an Ace editor (code or text
   viewer) was focused when it opened, that editor's own commands applied to it
+- Resizable popups: the completion list has a native resize grabber in its
+  bottom-right corner, and so do the command palette / browse prompts — the box
+  itself sets the width (the list below it follows), the list sets its own
+  height. A dragged prompt size is reused for the rest of the page session
 - While Ace is active, "View file as text" opens in an editable Ace editor that
   mirrors the underlying (hidden) SimpleTextarea so SAS Studio's own load/refresh
   code keeps working. Editing marks the tab dirty (`*` in the title, like the code

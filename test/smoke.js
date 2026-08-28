@@ -981,6 +981,45 @@ function check(name, ok, detail) {
   check("command palette (no focus) lists SS-Ext entries", paletteNoFocusState.hasSsExtEntry, paletteNoFocusState);
   check("command palette (no focus) has no editor commands", !paletteNoFocusState.hasBareAceCommand, paletteNoFocusState);
   check("command palette lists SS-Ext browse entries", paletteNoFocusState.hasBrowseEntries, paletteNoFocusState);
+
+  // Resizable prompt: dragging the box's handle writes an inline width (the list
+  // follows it), dragging the list's writes an inline height - which ace would
+  // undo on its next autosize if installResizablePopups didn't turn it back into
+  // $maxLines/$minLines. Setting the inline styles here is exactly what the UA's
+  // own resize does.
+  const resized = await page.evaluate(() => {
+    const box = document.querySelector(".ace_prompt_container");
+    const pop = box.querySelector(".ace_autocomplete");
+    const before = { boxW: box.offsetWidth, popH: pop.offsetHeight };
+    box.style.width = "900px";
+    pop.style.height = pop.offsetHeight + 250 + "px";
+    return new Promise((r) =>
+      setTimeout(
+        () =>
+          r({
+            before,
+            boxW: box.offsetWidth,
+            popW: pop.offsetWidth,
+            popH: pop.offsetHeight,
+            maxLines: pop.__ssExtRenderer.$maxLines,
+            lines: pop.__ssExtLines,
+          }),
+        600,
+      ),
+    );
+  });
+  check("resized palette list keeps the dragged height", resized.popH > resized.before.popH + 200, resized);
+  check("dragged height became $maxLines", resized.maxLines === resized.lines && resized.lines > 15, resized);
+  check("resized palette list follows the box width", Math.abs(resized.popW - resized.boxW) < 10, resized);
+  // Put it back: the dragged size is remembered for the rest of the page
+  // session, and the palette checks below expect the stock one.
+  await page.evaluate((before) => {
+    const box = document.querySelector(".ace_prompt_container");
+    box.style.width = before.boxW - 6 + "px";
+    box.querySelector(".ace_autocomplete").style.height = before.popH + "px";
+  }, resized.before);
+  await page.waitForTimeout(600);
+
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await page.waitForTimeout(300);
   const paletteClosedAfterEsc = await page.evaluate(() => !document.querySelector(".ace_prompt_container"));

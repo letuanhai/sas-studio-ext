@@ -812,12 +812,23 @@
     // completion list from the same class but size it to their prompt box
     // (`width:100%` inline, max 600/800px), and an !important rule beats an
     // inline style, which left the list narrower than the input above it.
+    // The doubled class (rather than !important) is what outranks ace's own
+    // 300px rule here: an !important width would also beat the inline width a
+    // user drag writes, which is what makes the popup resizable at all.
     ace.require("ace/lib/dom").importCssString(
-      ".ace_editor.ace_autocomplete{width:400px!important}" +
+      ".ace_editor.ace_autocomplete.ace_autocomplete{width:400px}" +
         ".ace_prompt_container .ace_editor.ace_autocomplete," +
-        ".ace_browse_ss_container .ace_editor.ace_autocomplete{width:100%!important}",
+        ".ace_browse_ss_container .ace_editor.ace_autocomplete" +
+        // resize:vertical - the box's own handle is what sets the width here,
+        // which installResizablePopups mirrors onto this list's inline max-width
+        // (the 100% below is 100% of the full-screen overlay, since the list is
+        // position:absolute and the box isn't positioned).
+        "{width:100%!important;resize:vertical}",
       "ssExtCompletionPopup",
     );
+
+    ace.require("ace/lib/dom").importCssString(RESIZABLE_CSS, "ssExtResizablePopups");
+    installResizablePopups(ace);
 
     ace.require("ace/lib/dom").importCssString(OVERLAY_DARK_CSS, "ssExtDarkOverlays");
 
@@ -2239,6 +2250,116 @@
 
     return null;
   }
+
+  // -- Resizable popups ---------------------------------------------------------
+  // The CSS below puts a native resize handle on the completion popup and on the
+  // two prompt boxes. CSS alone isn't enough: ace re-derives an autosizing
+  // editor's height from $maxLines on every render, so a dragged height would be
+  // undone by the next keystroke. Translate it back into lines instead ($minLines
+  // too for the prompts, so a short list keeps the box the size it was dragged
+  // to; the editor's own completion popup only gets the cap, since a tall empty
+  // box floating at the caret is just in the way).
+  //
+  // This patches VirtualRenderer.prototype rather than wrapping AcePopup: both
+  // ext-language_tools and ext-prompt capture AcePopup in a module closure when
+  // they load, so by the time loadNewAce() can reach the export it's too late.
+  // $autosize is the one hook that runs per popup render AND has the renderer, so
+  // it doubles as the place to hand the observer its back-reference.
+  const PROMPT_BOX_SEL = ".ace_prompt_container, .ace_browse_ss_container";
+  /** Last dragged size per prompt box, by class name. Page session only. */
+  const promptSizes = {};
+  function installResizablePopups(ace) {
+    if (ssExt._resizablePopupsPatched) return;
+    ssExt._resizablePopupsPatched = true;
+    const proto = ace.require("ace/virtual_renderer").VirtualRenderer.prototype;
+    const origAutosize = proto.$autosize;
+    const observer = new ResizeObserver(function (entries) {
+      for (const entry of entries) {
+        const el = entry.target;
+        const r = el.__ssExtRenderer;
+        // A prompt box: keep its list exactly as wide as it is. The list is
+        // position:absolute, so its containing block is the full-screen overlay,
+        // not the box - its width:100% is the whole window and it is the inline
+        // max-width (600/800px, set by the prompt) that actually sizes it.
+        if (!r) {
+          const pop = el.querySelector(".ace_autocomplete");
+          const cs = getComputedStyle(el);
+          if (pop)
+            pop.style.maxWidth =
+              el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) + "px";
+          continue;
+        }
+        if (r.destroyed || !r.lineHeight) continue;
+        // First sighting: each prompt open builds a fresh popup element, so the
+        // size a user dragged only survives through promptSizes (page session
+        // only - nothing is persisted to storage).
+        if (el.__ssExtBox === undefined) {
+          el.__ssExtBox = el.closest(PROMPT_BOX_SEL);
+          if (el.__ssExtBox) {
+            observer.observe(el.__ssExtBox);
+            const saved = promptSizes[el.__ssExtBox.className];
+            if (saved) {
+              el.__ssExtLines = saved.lines;
+              el.__ssExtBox.style.width = saved.width;
+              r.onResize(true);
+            }
+          }
+        }
+        const h = el.clientHeight;
+        const w = el.clientWidth;
+        // Hidden, or detached because the prompt just closed: nothing to measure,
+        // and measuring anyway would save a junk size for the next open.
+        if (!h || !w) continue;
+        // A height ace didn't ask for is a user drag (tolerance: one line, since
+        // desiredHeight includes borders/scroll margin that clientHeight doesn't).
+        const dragged = Math.abs(h - r.desiredHeight) > r.lineHeight;
+        if (dragged) {
+          el.__ssExtLines = Math.max(1, Math.round(h / r.lineHeight));
+          r.$maxPixelHeight = null;
+        }
+        if (dragged || w !== el.__ssExtWidth) r.onResize(true);
+        el.__ssExtWidth = w;
+        if (el.__ssExtBox)
+          promptSizes[el.__ssExtBox.className] = {
+            lines: el.__ssExtLines,
+            // The COMPUTED width - offsetWidth would add the padding back on
+            // every open and the box would creep wider each time.
+            width: getComputedStyle(el.__ssExtBox).width,
+          };
+      }
+    });
+    proto.$autosize = function () {
+      const el = this.container;
+      if (!el.__ssExtRenderer && el.classList.contains("ace_autocomplete")) {
+        el.__ssExtRenderer = this;
+        observer.observe(el);
+      }
+      if (el.__ssExtLines) {
+        this.$maxLines = el.__ssExtLines;
+        if (el.__ssExtBox) this.$minLines = el.__ssExtLines;
+      }
+      return origAutosize.call(this);
+    };
+  }
+
+  // In a prompt the completion list is NOT laid out inside the white box - ace's
+  // own .ace_editor.ace_autocomplete is position:absolute, so the box is just the
+  // input and the list floats below it at its static position. Hence two handles
+  // with one job each: the box owns the WIDTH (the list follows it through the
+  // width:100% rule in ssExtCompletionPopup), the list owns its own HEIGHT.
+  // div.* (not .*) so this beats ace's own prompt sheet, which importCssString
+  // prepends AFTER ours and so wins every same-specificity tie; a plain width
+  // rather than ace's max-width:603px + width:100%, because a max-width would
+  // clamp the drag. No !important anywhere - the inline width/height a drag
+  // writes has to win.
+  const RESIZABLE_CSS = `
+    .ace_editor.ace_autocomplete { resize: both; }
+    div.ace_prompt_container {
+      width: 603px;
+      max-width: 100%;
+      resize: horizontal;
+      overflow: hidden;
+    }`;
 
   // -- Stock Ace settings panel (Ctrl-,/showSettingsMenu) persistence ------------
   // ext-settings_menu.js bundles its own "ace/ext/options" module (OptionPanel) -
