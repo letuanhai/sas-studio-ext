@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Chromium extension (Manifest V3) that enhances SAS Studio 3.8 (a legacy Dojo 1.x web app) by monkey-patching in the page's MAIN world. Two main features: toggling SAS Studio's built-in editor for a modern Ace editor at runtime, and various independent UX fixes (formerly a Tampermonkey userscript, now fully absorbed into the extension — nothing to install separately anymore). Everything works by reverse-engineered runtime patching — no build step or bundler for the extension's own code (`./tools/build_lib.sh` only generates the gitignored `lib/`), and `test/smoke.js` is the test suite.
 
-A live SAS Studio instance for testing runs at `http://192.168.1.72/SASStudio/38/`. **It is rate-limited: run only ONE `test/smoke.js` (or ad-hoc playwright script) against it at a time.** Parallel or rapid-fire runs exhaust its sessions and it starts returning HTTP 503 (then 000 while it restarts) for minutes — serialize your runs and, if you hit 503, wait for it to recover rather than retrying in a loop.
+A live SAS Studio instance for testing runs at `http://sas-ue.lan/SASStudio/38/`. **It is rate-limited: run only ONE `test/smoke.js` (or ad-hoc playwright script) against it at a time.** Parallel or rapid-fire runs exhaust its sessions and it starts returning HTTP 503 (then 000 while it restarts) for minutes — serialize your runs and, if you hit 503, wait for it to recover rather than retrying in a loop.
 
 **Do not commit (or push) until the user explicitly asks.** Make and verify changes in the working tree and wait; the user decides when — and to which branch — anything gets committed.
 

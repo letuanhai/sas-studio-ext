@@ -23,7 +23,7 @@
  * CSS changes or you want to re-tune the palette.
  *
  * Run:  node tools/gen-dark-css.js
- * Env:  SS_URL      SAS Studio URL      (default http://192.168.1.72/SASStudio/38/)
+ * Env:  SS_URL      SAS Studio URL      (default http://sas-ue.lan/SASStudio/38/)
  *       CHROME_BIN  Chromium executable (default: playwright's bundled chromium)
  * Needs `playwright` resolvable (see test/smoke.js's header for the NODE_PATH /
  * CHROME_BIN recipe when it is only present as an npx cache) and network access
@@ -38,7 +38,7 @@ const path = require("path");
 
 const DARKREADER_VERSION = "4.9.128";
 const ROOT = path.resolve(__dirname, "..");
-const URL = process.env.SS_URL || "http://192.168.1.72/SASStudio/38/";
+const URL = process.env.SS_URL || "http://sas-ue.lan/SASStudio/38/";
 
 // Palette knobs. Dark Reader's own defaults with a touch of warmth - this is
 // the one place to re-tune the look.

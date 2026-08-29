@@ -3,7 +3,7 @@
  * SAS Studio instance and exercises the page-side features.
  *
  * Run:  node test/smoke.js
- * Env:  SS_URL      SAS Studio URL      (default http://192.168.1.72/SASStudio/38/)
+ * Env:  SS_URL      SAS Studio URL      (default http://sas-ue.lan/SASStudio/38/)
  *       CHROME_BIN  Chromium executable (default: playwright's bundled chromium)
  * Needs the `playwright` module resolvable (npx playwright / NODE_PATH / local install)
  * and at least one closable FILE tab open in the SAS Studio session.
@@ -34,7 +34,7 @@
 const { chromium } = require("playwright");
 
 const EXT = require("path").resolve(__dirname, "..");
-const URL = process.env.SS_URL || "http://192.168.1.72/SASStudio/38/";
+const URL = process.env.SS_URL || "http://sas-ue.lan/SASStudio/38/";
 
 let failures = 0;
 function check(name, ok, detail) {
