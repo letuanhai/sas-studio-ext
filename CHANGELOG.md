@@ -1,6 +1,13 @@
 # Changelog
 
 
+## 0.19
+
+- Reopening a closed tab now works for tabs closed with the tab's own X button,
+  not just those closed from the menu or with the middle mouse button.
+- In dark mode the empty workspace (shown when no tab is open) stays dark
+  instead of flipping to a light pane.
+
 ## 0.18
 
 - The completion popup, the command palette and the browse prompts are
