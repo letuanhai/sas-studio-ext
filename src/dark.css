@@ -14109,4 +14109,35 @@ html.has-touch .dgrid-resize-handle {
     background-color: var(--darkreader-neutral-background) !important;
 }
 
+
+/* Results tab: the ODS HTML output is inlined into the app's own DOM under a
+ * per-run .ods_<uuid> class (id="ods_<uuid>"), carrying its own <style> block,
+ * so nothing Dark Reader saw on the app page can reach it. Its default
+ * (HTMLBlue) palette is four near-white backgrounds and three dark text
+ * colours, so flatten those here rather than remapping ~60 ODS classes.
+ * ponytail: ODS graphics are PNGs and stay light - inverting them would wreck
+ * real colours; revisit only if graph-heavy output turns out to matter.
+ */
+[id^="ods_"] {
+    background-color: var(--darkreader-neutral-background) !important;
+    color: var(--darkreader-neutral-text) !important;
+}
+[id^="ods_"] * {
+    background-color: transparent !important;
+    color: inherit !important;
+    border-color: var(--darkreader-border-cccccc, #4a4a4a) !important;
+}
+[id^="ods_"] [class*="header"],
+[id^="ods_"] [class*="footer"],
+[id^="ods_"] .batch {
+    background-color: var(--darkreader-background-eeeeee, #2f3031) !important;
+}
+[id^="ods_"] a:link {
+    color: #6ea8fe !important;
+}
+[id^="ods_"] a:visited,
+[id^="ods_"] a:active {
+    color: #c58af9 !important;
+}
+
 }
