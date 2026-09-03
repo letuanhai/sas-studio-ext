@@ -219,6 +219,65 @@ snippets are additive over ace's own built-in SAS snippets and live-apply to
 every open SAS Studio tab immediately (no reload needed) via a
 `chrome.storage.onChanged` listener in `sw.js`.
 
+## SurfingKeys interop
+
+SurfingKeys binds `keydown` on `window` in the **capture** phase, so it sees
+every key before Ace does and `stopImmediatePropagation()`s the ones it claims.
+It also blurs any editable that receives focus programmatically. Fix both from
+*your SurfingKeys config* — nothing in this extension can reliably outrank a
+capture listener on `window`:
+
+```js
+// --- SurfingKeys x Ace vim -----------------------------------------------
+
+// 1. Let programmatic focus stick. SurfingKeys' Normal-mode focus handler
+//    blurs any editable focused without a preceding mousedown, which is
+//    exactly what Alt+. (Focus code editor) does.
+settings.stealFocusOnLoad = false;
+
+// 2. While Ace has focus SurfingKeys is in Insert mode, where it claims Esc
+//    (blur + exit) plus a set of emacs line-editing keys that collide with
+//    Ace vim's Ctrl-u / Ctrl-e / Ctrl-f / Alt-w ... Drop all of them, so in
+//    both vim normal and vim insert mode every key reaches Ace.
+['<Esc>', '<Ctrl-e>', '<Ctrl-a>', '<Ctrl-f>', '<Ctrl-u>', '<Ctrl-g>',
+ '<Alt-b>', '<Alt-f>', '<Alt-w>', '<Alt-d>'].forEach(function (k) {
+    api.iunmap(k);
+});
+
+// 3. Ctrl-[ becomes the only way out of an input. SurfingKeys exports no
+//    insert.exit(), but its Insert mode exits itself on the first keydown it
+//    sees with a non-editable target (and swallows that key) - so blur, then
+//    hand it one.
+api.imapkey('<Ctrl-[>', 'Leave the input, back to SurfingKeys normal mode', function () {
+    document.activeElement && document.activeElement.blur();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27 }));
+});
+```
+
+Resulting behaviour:
+
+| key | where | what happens |
+| --- | --- | --- |
+| `Alt+.` | anywhere | this extension's `focusCodeEditor` puts the caret in Ace, in any SurfingKeys mode |
+| `Esc` | Ace | reaches Ace vim (insert -> normal); SurfingKeys ignores it |
+| any key | Ace vim normal mode | reaches Ace vim |
+| `Ctrl-[` | Ace or any input | blurs it, SurfingKeys returns to normal mode |
+
+`Esc` keeps its stock SurfingKeys meaning everywhere it is not an insert-mode
+binding — closing the omnibar, hints, and pending keystrokes are untouched.
+
+Two things that look like they should work and do not: `unmap('<Esc>')` only
+takes `Esc` out of `Mode.specialKeys`, leaving Insert mode's own `<Esc>`
+binding (blur + exit) in place; and `map('<Ctrl-[>', '<Esc>')` makes the two
+keys *indistinguishable*, because `Mode.handleMapKey` rewrites every
+Esc-equivalent to the same trie key before looking it up — which is why
+`iunmap('<Esc>')` then also disables `Ctrl-[`. Keeping `Ctrl-[` as its own
+ordinary binding is what lets the two behave differently.
+
+If you would rather not carry the above, the blunt alternative is
+`settings.blocklistPattern = /your-sas-host/i`, which turns SurfingKeys off on
+SAS Studio entirely.
+
 ## Known Limitations
 
 - Only tested with SAS Studio 3.82
