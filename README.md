@@ -263,6 +263,13 @@ Resulting behaviour:
 | any key | Ace vim normal mode | reaches Ace vim |
 | `Ctrl-[` | Ace or any input | blurs it, SurfingKeys returns to normal mode |
 
+Scrolling needs no config: Ace's gutter and scroller used to be scroll
+containers (`overflow: hidden` over deliberately oversized content), which is
+what SurfingKeys' scroll-target search latched onto — scrolling the line
+numbers alone and leaving them out of step with the text. Both are
+`overflow: clip` now, so they cannot be scrolled at all and `j`/`k`/`d`/`u`
+land on Ace's real scrollbar, which scrolls the editor properly.
+
 `Esc` keeps its stock SurfingKeys meaning everywhere it is not an insert-mode
 binding — closing the omnibar, hints, and pending keystrokes are untouched.
 

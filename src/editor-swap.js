@@ -811,6 +811,25 @@
       "ssExtVimCursorFix",
     );
 
+    // Ace's gutter and scroller are `overflow: hidden` over oversized content
+    // (.ace_gutter-layer is a literal height:1000000px), so both are real scroll
+    // containers with scrollHeight >> clientHeight - ace just never uses that,
+    // it translates its layers instead. Anything that scrolls elements by feel
+    // rather than by ace's API therefore hits them: SurfingKeys' scroll-target
+    // search picks the gutter (and its hasScroll() probe even WRITES scrollTop
+    // to test it), which slides the line numbers out of step with the text with
+    // no way back short of a reload. `overflow: clip` keeps the clipping and
+    // takes the scroll container away, so scrollTop is pinned at 0 for good;
+    // ace never reads or writes either element's scrollTop (checked), and the
+    // real scrollbars (.ace_scrollbar-*, actual overflow:scroll divs whose
+    // scroll event ace listens to) still hand SurfingKeys a working target.
+    // Two classes, so no !important is needed to outrank ace's own rules
+    // despite importCssString prepending this sheet to <head>.
+    ace.require("ace/lib/dom").importCssString(
+      ".ace_editor .ace_gutter,.ace_editor .ace_scroller{overflow:clip}",
+      "ssExtNoStrayScroll",
+    );
+
     // The completion popup's meta column (library / SASHELP. / CLASS. / program)
     // is flex: 0 0 auto, so it never shrinks - the CAPTION ellipsizes to make
     // room for it. At ace's stock 300px a table-name meta would eat the column

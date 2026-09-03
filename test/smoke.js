@@ -314,6 +314,24 @@ function check(name, ok, detail) {
   const activated = await page.evaluate((lp) => window.__ssExt.toggle(lp), libPath);
   check("Ace editor replacement activates", activated && activated.active === true, activated);
 
+  // -- stray scrolling (SurfingKeys) -----------------------------------------------
+  // The gutter/scroller must not be scroll containers: anything that scrolls by
+  // feel (SurfingKeys picks the gutter, and even writes scrollTop to probe it)
+  // would otherwise slide the line numbers out of step with the text.
+  const scrollPin = await page.evaluate(() => {
+    const el = document.querySelector(".ace_editor .ace_gutter");
+    const sc = document.querySelector(".ace_editor .ace_scroller");
+    if (!el || !sc) return { found: false };
+    el.scrollTop = 80;
+    sc.scrollTop = 80;
+    return { found: true, gutter: el.scrollTop, scroller: sc.scrollTop };
+  });
+  check(
+    "gutter/scroller cannot be scrolled out of sync",
+    scrollPin.found && scrollPin.gutter === 0 && scrollPin.scroller === 0,
+    scrollPin,
+  );
+
   // -- SAS language server (LSP) ---------------------------------------------------
   // Activation above already swapped any open SAS tabs to Ace (ace/mode/sas
   // triggers ensureLsp() from the adapter constructor) - poll for the worker/
