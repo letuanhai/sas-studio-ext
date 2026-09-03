@@ -152,3 +152,46 @@ assert.equal(enclosingFold(doc, 0), null);
 assert.equal(enclosingFold(doc, 9), null);
 
 console.log("PASS  vim fold motions");
+// ---------------------------------------------------------------------------
+// src/editor-swap.js - the vim mark gutter decorations, read off the same
+// editor.state.cm.state.vim.marks structure ace's vim keeps them in.
+const { vimMarksOf, refreshVimMarkGutter } = global.window.__ssExt._vimMarks;
+
+const mark = (line, ch) => ({ find: () => ({ line, ch }) });
+const decorations = [];
+const fakeEditor = {
+  state: { cm: { state: { vim: { marks: { b: mark(7, 2), a: mark(3, 0), "<": mark(0, 0) } } } } },
+  session: {
+    addGutterDecoration: (row, cls) => decorations.push(["add", row, cls]),
+    removeGutterDecoration: (row, cls) => decorations.push(["remove", row, cls]),
+  },
+};
+
+// Sorted by name, and vim's own '<' bookkeeping mark is not a letter mark.
+assert.deepEqual(vimMarksOf(fakeEditor), [
+  { name: "a", row: 3, column: 0 },
+  { name: "b", row: 7, column: 2 },
+]);
+assert.deepEqual(vimMarksOf({}), []); // no vim handler attached
+
+refreshVimMarkGutter(fakeEditor);
+// Class per mark by char code, so `a` (97) and `A` (65) can't collide.
+assert.deepEqual(decorations, [
+  ["add", 3, "ssExtVimMark-97"],
+  ["add", 7, "ssExtVimMark-98"],
+]);
+decorations.length = 0;
+refreshVimMarkGutter(fakeEditor);
+assert.deepEqual(decorations, []); // unchanged marks must not re-render the gutter
+
+// A moved mark clears its old row before decorating the new one.
+fakeEditor.state.cm.state.vim.marks.a = mark(4, 0);
+refreshVimMarkGutter(fakeEditor);
+assert.deepEqual(decorations, [
+  ["remove", 3, "ssExtVimMark-97"],
+  ["remove", 7, "ssExtVimMark-98"],
+  ["add", 4, "ssExtVimMark-97"],
+  ["add", 7, "ssExtVimMark-98"],
+]);
+
+console.log("PASS  vim mark gutter");

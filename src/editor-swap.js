@@ -513,6 +513,7 @@
     applyAceConfig,
     AceEditorAdapter, // exposed mainly for test/debug (smoke.js probes config seeding directly)
     _foldNav: { nextFoldStart, prevFoldEnd, enclosingFold }, // pure, covered by test/units.js
+    _vimMarks: { vimMarksOf, refreshVimMarkGutter }, // ditto
   };
   window.__ssExt = ssExt;
 
@@ -2122,6 +2123,115 @@
     });
   }
 
+  // -- Vim marks -------------------------------------------------------------------
+  // ace's vim keeps marks on the CodeMirror adapter (editor.state.cm.state.vim.marks,
+  // name -> Marker) and gives them no UI at all: no :marks listing, nothing in the
+  // gutter. Both are added here off vim's own data - vim.js already shifts those
+  // Markers on every edit, so nothing has to track rows itself.
+  //
+  // The gutter is via session.addGutterDecoration (one class per mark letter, its CSS
+  // ::after prints the letter); the scrollbar overview is deliberately left alone -
+  // ace's decorator layer draws fixed-width bars with no room for a label.
+  const VIM_MARK_CLASS = "ssExtVimMark";
+
+  // Only the letter marks - '/</>/[/] etc. are vim's own bookkeeping, and real vim
+  // doesn't gutter those either. Class names go by char code: HTML class selectors
+  // are case-sensitive, so `a` and `A` must not collide.
+  function vimMarksOf(editor) {
+    const cm = editor && editor.state && editor.state.cm;
+    const marks = (cm && cm.state && cm.state.vim && cm.state.vim.marks) || {};
+    return Object.keys(marks)
+      .filter((name) => /^[a-zA-Z]$/.test(name))
+      .sort()
+      .map((name) => {
+        const pos = marks[name].find && marks[name].find();
+        return pos && { name, row: pos.line, column: pos.ch };
+      })
+      .filter(Boolean);
+  }
+
+  // Idempotent: re-applies the whole decoration set, so it can be called from any
+  // event. Bails out unchanged, since it runs on every keystroke (each add/remove
+  // signals the gutter to re-render).
+  function refreshVimMarkGutter(editor) {
+    const session = editor.session;
+    if (!session) return;
+    const previous = editor.$ssExtMarkRows || [];
+    const current = vimMarksOf(editor).map((m) => ({
+      row: m.row,
+      cls: `${VIM_MARK_CLASS}-${m.name.charCodeAt(0)}`,
+    }));
+    if (JSON.stringify(previous) === JSON.stringify(current)) return;
+    previous.forEach((d) => session.removeGutterDecoration(d.row, d.cls));
+    current.forEach((d) => session.addGutterDecoration(d.row, d.cls));
+    editor.$ssExtMarkRows = current;
+  }
+
+  function vimMarkStyles() {
+    const letters = "abcdefghijklmnopqrstuvwxyz";
+    return (
+      (letters + letters.toUpperCase())
+        .split("")
+        .map((c) => `.${VIM_MARK_CLASS}-${c.charCodeAt(0)}::after{content:"${c}"}`)
+        .join("\n") +
+      // The gutter cell is position:absolute, so this rides in its left padding,
+      // left of the line number and clear of the fold widget on the right.
+      `\n[class*="${VIM_MARK_CLASS}-"]::after{position:absolute;left:2px;opacity:.65;font-size:.85em}`
+    );
+  }
+
+  // Hooks the vim handler's own attach/detach rather than our adapter: it is called
+  // for every editor that gets the vim keyboard handler, including a switch made at
+  // runtime from ace's settings menu, and detach is where cm (and its marks) dies.
+  function installVimMarkGutter(vim, ace) {
+    const handler = vim.handler;
+    if (handler.$ssExtMarkGutter) return;
+    handler.$ssExtMarkGutter = true;
+    ace.require("ace/lib/dom").importCssString(vimMarkStyles(), "ssExtVimMarks");
+    const origAttach = handler.attach;
+    const origDetach = handler.detach;
+    handler.attach = function (editor) {
+      origAttach.call(this, editor);
+      const refresh = () => refreshVimMarkGutter(editor);
+      editor.$ssExtMarkRefresh = refresh;
+      // vim.js signals vim-command-done from clearInputState, i.e. BEFORE the command
+      // it announces has run - refreshing inline would list `ma` one command late.
+      editor.state.cm.on("vim-command-done", () => setTimeout(refresh, 0));
+      editor.on("change", refresh); // an edit shifts the marks below it
+      refresh();
+    };
+    handler.detach = function (editor) {
+      const refresh = editor.$ssExtMarkRefresh;
+      if (refresh) editor.off("change", refresh); // the cm listener dies with cm.destroy()
+      editor.$ssExtMarkRefresh = null;
+      (editor.$ssExtMarkRows || []).forEach((d) => editor.session.removeGutterDecoration(d.row, d.cls));
+      editor.$ssExtMarkRows = [];
+      origDetach.call(this, editor);
+    };
+  }
+
+  // :marks - vim's own listing, which ace's vim never implemented, shown the same way
+  // its :registers is (a bottom notification box). Short enough not to need a prompt.
+  function showVimMarks(cm) {
+    const editor = cm.ace;
+    const marks = vimMarksOf(editor);
+    const text = marks.length
+      ? "mark  line   col  text\n" +
+        marks
+          .map(
+            (m) =>
+              ` ${m.name}   ${String(m.row + 1).padStart(5)} ${String(m.column).padStart(5)}  ` +
+              editor.session.getLine(m.row).trim().slice(0, 60)
+          )
+          .join("\n")
+      : "No marks set";
+    const box = document.createElement("div");
+    box.style.whiteSpace = "pre";
+    box.style.fontFamily = "monospace";
+    box.textContent = text;
+    if (cm.openNotification) cm.openNotification(box, { bottom: true, duration: 8000 });
+  }
+
   async function installVimExCommands() {
     if (ssExt._vimExInstalled) return;
     ssExt._vimExInstalled = true; // guard now so concurrent loads don't double-register
@@ -2158,12 +2268,19 @@
         }
         if (window.__ssf && window.__ssf.run) window.__ssf.run("runCurrentProgram");
       });
+      Vim.defineEx("marks", "marks", showVimMarks);
 
       // Own catch: a fold-motion failure must not take the ex-commands down with it.
       try {
         installVimFoldMotions(vim);
       } catch (e) {
         console.warn("[SS Ext] vim fold motions zj/zk/[z/]z not installed:", e);
+      }
+      // Same: the gutter markers are cosmetic, :marks and the rest must survive them.
+      try {
+        installVimMarkGutter(vim, ssExt.newLib.ace);
+      } catch (e) {
+        console.warn("[SS Ext] vim mark gutter markers not installed:", e);
       }
 
       const vimrcText = (ssExt.aceConfig && ssExt.aceConfig.vimrc) || "";
