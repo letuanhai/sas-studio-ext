@@ -1382,7 +1382,7 @@
         try {
           relabelLspCompletions(results, session, pos);
         } catch (e) {
-          /* labels are cosmetic - never lose the completions over one */
+          /* labels/ranges are a nicety - never lose the completions over one */
         }
         callback(err, results);
       });
@@ -1392,6 +1392,7 @@
   function relabelLspCompletions(results, session, pos) {
     if (!results || !results.length) return;
     const kindOf = (r) => r.item && r.item.kind;
+    pinMacroRanges(results, session, pos);
     const listsLibraries = results.some((r) => kindOf(r) === KIND_FOLDER);
     const typed = /([A-Za-z_]\w*)\.[A-Za-z_]*$/.exec(session.getLine(pos.row).slice(0, pos.column));
     const tables = typed ? resolvedTableNames(typed[1]) : null;
@@ -1401,6 +1402,24 @@
       else if (kind !== KIND_KEYWORD) return;
       else if (tables && tables.has(String(r.caption).toUpperCase())) r.meta = tableMeta(typed[1]);
       else if (listsLibraries) r.meta = "program";
+    });
+  }
+
+  // The server's own completion prefix keeps a leading % or & (_getPrefix: /[%&]\w*$/),
+  // and it labels macro FUNCTIONS with the % included ("%LENGTH") while macro
+  // variables come back bare. Ace's prefix stops at the sigil - so accepting
+  // "%LENGTH" over a typed "%le" only replaces the "le" and leaves "%%LENGTH".
+  // An explicit replace range over the sigil fixes it without widening ace's
+  // identifier regexp, which would break the bare-& variables the same way.
+  function pinMacroRanges(results, session, pos) {
+    const m = /%\w*$/.exec(session.getLine(pos.row).slice(0, pos.column));
+    if (!m) return;
+    const range = {
+      start: { row: pos.row, column: m.index },
+      end: { row: pos.row, column: pos.column },
+    };
+    results.forEach((r) => {
+      if (!r.range && String(r.caption || "").startsWith("%")) r.range = range;
     });
   }
 

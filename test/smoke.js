@@ -744,7 +744,13 @@ function check(name, ok, detail) {
     const keywordZone = [item("length", 14)];
     relabelLspCompletions(keywordZone, { getLine: () => "  x = sashelp." }, { row: 0, column: 14 });
 
+    // `%le|` - macro function labels carry the % the server matched, so the
+    // insert has to replace the typed one instead of stacking a second %.
+    const macroZone = [item("%LENGTH", 3), item("%LEFT", 3)];
+    relabelLspCompletions(macroZone, { getLine: () => "  %le" }, { row: 0, column: 5 });
+
     return {
+      macroRange: JSON.stringify(macroZone[0].range),
       library: metaOf(libraryZone, "SASHELP"),
       program: metaOf(libraryZone, "t"),
       table: metaOf(tableZone, "CLASS"),
@@ -752,11 +758,13 @@ function check(name, ok, detail) {
     };
   });
   check(
-    "language-server entries are labelled library / <LIBREF>. / program",
+    "language-server entries are labelled library / <LIBREF>. / program, macro % replaced",
     metaState.library === "library" &&
       metaState.table === "SASHELP." &&
       metaState.program === "program" &&
-      metaState.keyword === "Keyword",
+      metaState.keyword === "Keyword" &&
+      metaState.macroRange ===
+        JSON.stringify({ start: { row: 0, column: 2 }, end: { row: 0, column: 5 } }),
     metaState,
   );
 
