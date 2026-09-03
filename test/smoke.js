@@ -2027,6 +2027,212 @@ function check(name, ok, detail) {
     offAfterReload,
   );
 
+  // -- Keyboard entry points into SAS Studio's own widgets --------------------------
+  // These are pure widget lookups, so what they guard against is SAS Studio's own
+  // internals drifting - only a live check sees that. Runs last: the tab-group part
+  // creates a real split, then puts the tab back.
+  const paneFocus = await page.evaluate(() => {
+    window.__ssf.run("focusCodeEditor");
+    window.__ssf.run("focusPaneBar");
+    return {
+      active: document.activeElement.id,
+      selected: window.appDMS.tabs.getFocusedTab().editor.sasSuiteTabContainer.selectedChildWidget.type,
+    };
+  });
+  check("focusPaneBar focuses the selected pane's tab button", /tablist/.test(paneFocus.active), paneFocus);
+  // dijit's _KeyNavContainer takes over from there - that's the whole point.
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(400);
+  const paneAfter = await page.evaluate(
+    () => window.appDMS.tabs.getFocusedTab().editor.sasSuiteTabContainer.selectedChildWidget.type,
+  );
+  check("arrow keys then move between panes", paneFocus.selected !== paneAfter, { paneFocus, paneAfter });
+
+  const tabBarFocus = await page.evaluate(() => {
+    window.__ssf.run("focusCodeEditor");
+    window.__ssf.run("focusTabBar");
+    return document.activeElement.id;
+  });
+  check("focusTabBar focuses the open-file tab strip", /mainTabs_tablist/.test(tabBarFocus), { tabBarFocus });
+
+  // Must beat the noTreeFocusSteal patch, which suppresses tree focus coming from
+  // outside the tree - dijit's focus() goes through focusChild, not focusNode.
+  const treeFocus = await page.evaluate(() => {
+    window.__ssf.run("focusCodeEditor");
+    window.__ssf.run("focusSideBarTree");
+    return { id: document.activeElement.id, cls: (document.activeElement.className || "").toString() };
+  });
+  check("focusSideBarTree reaches the tree from the editor", /dijitTreeLabel/.test(treeFocus.cls), treeFocus);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(300);
+  const treeAfter = await page.evaluate(() => document.activeElement.id);
+  check("arrow keys then navigate the tree", treeAfter && treeAfter !== treeFocus.id, { treeFocus, treeAfter });
+
+  const noSplitWarned = await page.evaluate(() => {
+    window.__ssf.run("switchTabGroup");
+    return document.body.innerText.includes("No tab group split");
+  });
+  check("switchTabGroup warns instead of throwing with no split", noSplitWarned, { noSplitWarned });
+
+  // A lone tab can't be split off - the group it would leave behind would be empty.
+  const lonelyRefused = await page.evaluate(() => {
+    const before = window.appDMS.tabs.getAllTabObjects().length;
+    window.__ssf.run("moveTabToOtherGroup");
+    return { before, warned: document.body.innerText.includes("nothing to split it from"), split: !!window.appDMS.tabs.secondaryTabContainer };
+  });
+  check(
+    `moveTabToOtherGroup refuses when the current tab is the only one${lonelyRefused.before === 1 ? "" : " (skipped: more than one tab open)"}`,
+    lonelyRefused.before !== 1 || (lonelyRefused.warned && !lonelyRefused.split),
+    lonelyRefused,
+  );
+
+  await page.evaluate(() => window.appDMS.tabs.onNewProgram());
+  await page.waitForTimeout(2500);
+  // moveTabToOtherGroup creates the split itself when there isn't one.
+  const split = await page.evaluate(() => {
+    const tabs = window.appDMS.tabs;
+    tabs.selectTab(tabs.getAllTabObjects()[1]);
+    window.__ssf.run("moveTabToOtherGroup");
+    tabs.selectTab(tabs.mainTabs[0]);
+    window.__ssf.run("focusCodeEditor");
+    return { main: tabs.mainTabs.map((t) => t.title), secondary: (tabs.secondaryTabs || []).map((t) => t.title) };
+  });
+  await page.waitForTimeout(1200);
+  check("moveTabToOtherGroup splits the tab area when there is no split yet", split.secondary.length === 1, split);
+  const groupToggle = await page.evaluate(async () => {
+    const focused = () => window.appDMS.tabs.getFocusedTab()?.title;
+    const start = focused();
+    window.__ssf.run("switchTabGroup");
+    await new Promise((r) => setTimeout(r, 600));
+    const other = focused();
+    const otherActive = (document.activeElement.className || "").toString();
+    window.__ssf.run("switchTabGroup");
+    await new Promise((r) => setTimeout(r, 600));
+    return { start, other, back: focused(), otherActive };
+  });
+  check(
+    "switchTabGroup toggles between the two tab groups and focuses the editor",
+    split.secondary.length === 1 &&
+      groupToggle.other === split.secondary[0] &&
+      groupToggle.back === groupToggle.start &&
+      /textview|ace_/.test(groupToggle.otherActive),
+    { split, groupToggle },
+  );
+  // Moving the last tab back out un-splits - which also leaves the session as we
+  // found it, so this is both the check and the cleanup.
+  // The main group can never be emptied - SAS Studio has no such state.
+  const emptyMainRefused = await page.evaluate(() => {
+    const tabs = window.appDMS.tabs;
+    tabs.selectTab(tabs.mainTabs[0]);
+    window.__ssf.run("moveTabToOtherGroup");
+    return {
+      warned: document.body.innerText.includes("Last tab in the main group"),
+      main: tabs.mainTabs.map((t) => t.title),
+      secondary: (tabs.secondaryTabs || []).map((t) => t.title),
+    };
+  });
+  check(
+    "moveTabToOtherGroup refuses to empty the main group",
+    emptyMainRefused.warned && emptyMainRefused.main.length === 1 && emptyMainRefused.secondary.length === 1,
+    emptyMainRefused,
+  );
+
+  // Splitting, un-splitting and splitting AGAIN used to throw from inside
+  // _addSecondaryTabContainer: tabsContextMenuCopyUri shared one MenuItem widget
+  // between the two tab menus, and destroying the secondary menu destroyed it.
+  const roundTrips = await page.evaluate(async () => {
+    const tabs = window.appDMS.tabs;
+    const wait = () => new Promise((r) => setTimeout(r, 600));
+    const states = [];
+    for (let i = 0; i < 3; i++) {
+      // last tab out of the secondary group -> un-split
+      tabs.selectTab(tabs.secondaryTabs[0]);
+      window.__ssf.run("moveTabToOtherGroup");
+      await wait();
+      states.push({ i, step: "unsplit", ok: !tabs.secondaryTabContainer && tabs.mainTabs.length === 2 });
+      // and back out -> a brand new secondary container
+      tabs.selectTab(tabs.mainTabs[1]);
+      window.__ssf.run("moveTabToOtherGroup");
+      await wait();
+      states.push({
+        i,
+        step: "resplit",
+        ok: !!tabs.secondaryTabContainer && tabs.mainTabs.length === 1 && tabs.secondaryTabs.length === 1,
+      });
+      // switchTabGroup must still work BOTH ways afterwards
+      tabs.selectTab(tabs.mainTabs[0]);
+      window.__ssf.run("switchTabGroup");
+      await wait();
+      const toSecondary = tabs.secondaryTabs.includes(tabs.getFocusedTab());
+      window.__ssf.run("switchTabGroup");
+      await wait();
+      states.push({ i, step: "switch", ok: toSecondary && tabs.mainTabs.includes(tabs.getFocusedTab()) });
+    }
+    return states;
+  });
+  check(
+    "split / un-split / re-split survives repeated round trips, switchTabGroup with it",
+    roundTrips.length === 9 && roundTrips.every((s) => s.ok),
+    roundTrips.filter((s) => !s.ok),
+  );
+
+  // Copy Path stays on BOTH tab menus - the shared-instance bug moved it off the
+  // main one as soon as a secondary group existed.
+  const copyPathItems = await page.evaluate(() => {
+    const label = (m) => (m ? m.getChildren().filter((c) => c.label === "Copy Path").length : null);
+    return { main: label(window.appDMS.tabs.mainTabMenu), secondary: label(window.appDMS.tabs.secondaryTabMenu) };
+  });
+  check("Copy Path is on both tab context menus, once each", copyPathItems.main === 1 && copyPathItems.secondary === 1, copyPathItems);
+
+  // Moving the last tab back out un-splits - also the cleanup that leaves the
+  // session as we found it.
+  const unsplit = await page.evaluate(async () => {
+    const tabs = window.appDMS.tabs;
+    tabs.selectTab(tabs.secondaryTabs[0]);
+    window.__ssf.run("moveTabToOtherGroup");
+    await new Promise((r) => setTimeout(r, 600));
+    return { stillSplit: !!tabs.secondaryTabContainer, main: tabs.mainTabs.map((t) => t.title) };
+  });
+  check("moving the last tab back out un-splits the tab area", !unsplit.stillSplit && unsplit.main.length === 2, unsplit);
+
+  // unsplitTabGroups with SEVERAL tabs on the far side - the one case moving tabs
+  // one at a time doesn't reach (the main group can never be emptied down to it).
+  const noSplitYet = await page.evaluate(() => {
+    window.__ssf.run("unsplitTabGroups");
+    return document.body.innerText.includes("Tab area isn't split");
+  });
+  check("unsplitTabGroups warns when there is no split", noSplitYet, { noSplitYet });
+
+  await page.evaluate(() => window.appDMS.tabs.onNewProgram());
+  await page.waitForTimeout(2500);
+  const bulkUnsplit = await page.evaluate(async () => {
+    const tabs = window.appDMS.tabs;
+    const wait = () => new Promise((r) => setTimeout(r, 600));
+    // Two tabs out to the right, leaving one behind in the main group.
+    for (const t of tabs.mainTabs.slice(1)) {
+      tabs.selectTab(t);
+      window.__ssf.run("moveTabToOtherGroup");
+      await wait();
+    }
+    const split = { main: tabs.mainTabs.length, secondary: (tabs.secondaryTabs || []).length };
+    const focusedBefore = tabs.getFocusedTab()?.title;
+    window.__ssf.run("unsplitTabGroups");
+    await wait();
+    return { split, focusedBefore, focusedAfter: tabs.getFocusedTab()?.title, stillSplit: !!tabs.secondaryTabContainer, main: tabs.mainTabs.length };
+  });
+  check(
+    "unsplitTabGroups moves every tab back and collapses the split",
+    bulkUnsplit.split.secondary === 2 && !bulkUnsplit.stillSplit && bulkUnsplit.main === 3,
+    bulkUnsplit,
+  );
+  check(
+    "...keeping the focused tab focused",
+    bulkUnsplit.focusedAfter === bulkUnsplit.focusedBefore,
+    bulkUnsplit,
+  );
+  // Close the extra tab this block opened.
+  await page.evaluate(() => window.__ssf.run("closeCurrentTab"));
+
   await ctx.close();
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed");
   process.exit(failures ? 1 : 0);

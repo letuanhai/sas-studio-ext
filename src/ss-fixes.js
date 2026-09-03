@@ -122,6 +122,142 @@
     allPanes[nextPaneIndex][1].selectChild(allPanes[nextPaneIndex][0]);
   }
 
+  // -- Keyboard entry points into SAS Studio's own widgets -------------------------
+  // The tab bar, the pane bar and the side-bar trees are all dijit _KeyNavContainers,
+  // so once one of them holds DOM focus the arrow keys already navigate it (and
+  // Enter/Space activate) - there is just no way IN from the keyboard, since nothing
+  // in the app moves focus there. Each of these puts focus on the container's
+  // currently selected child and then gets out of the way; dijit does the rest.
+
+  // Put the caret in a tab's editor. Shared by focusCodeEditor and switchTabGroup,
+  // which needs to focus a tab that isn't the focused one yet.
+  function focusTabEditor(tab) {
+    // Text viewer tab: focus its Ace overlay directly.
+    const viewer = getTextViewerForTab(tab);
+    if (viewer) {
+      viewer.adapter.focus();
+      return;
+    }
+    const editorTab = tab?.editor;
+    if (!editorTab) return;
+    editorTab.editContentPane.getParent().selectChild(editorTab.editContentPane);
+    editorTab.editor.focus();
+  }
+
+  // SAS Studio splits the tab area into at most TWO groups: mainTabContainer, plus
+  // a secondaryTabContainer created on demand by _dropTab (drag a tab to the right
+  // or bottom edge) and destroyed again by _onTabRemove when its last tab leaves.
+  // With only two, "switch groups" is a toggle. Tab objects live in the matching
+  // mainTabs/secondaryTabs arrays, which is how we tell which side we're on.
+  function switchTabGroup() {
+    const tabs = window.appDMS.tabs;
+    if (!tabs.secondaryTabContainer) {
+      showNotification({ message: "No tab group split - drag a tab to the right or bottom edge to split", isError: true });
+      return;
+    }
+    const inSecondary = (tabs.secondaryTabs || []).includes(tabs.getFocusedTab());
+    const container = inSecondary ? tabs.mainTabContainer : tabs.secondaryTabContainer;
+    const list = (inSecondary ? tabs.mainTabs : tabs.secondaryTabs) || [];
+    // selectedChildWidget can be the dummy placeholder SAS parks in an empty
+    // container, which is in no tab list - fall back to the group's first real tab.
+    const target = list.find((t) => t.tab === container.selectedChildWidget) || list[0];
+    if (!target) return;
+    tabs.selectTab(target);
+    focusTabEditor(target);
+  }
+
+  // Move the focused tab into the other group, splitting if there is no split yet.
+  // _dropTab is exactly what a drag to the edge calls, so it creates the secondary
+  // container when needed and destroys it again once its last tab leaves - moving
+  // the only tab on the right back to the main group un-splits for free.
+  function moveTabToOtherGroup() {
+    const tabs = window.appDMS.tabs;
+    const tab = tabs.getFocusedTab();
+    if (!tab) {
+      showNotification({ message: "No tab to move", isError: true });
+      return;
+    }
+    const inSecondary = (tabs.secondaryTabs || []).includes(tab);
+    // A tab leaving the main group has to leave something behind - SAS Studio has no
+    // empty main group, and its own drag doesn't allow one either. Going the other
+    // way is always fine: emptying the secondary group just un-splits.
+    if (!inSecondary && (tabs.mainTabs || []).length < 2) {
+      showNotification({
+        message:
+          tabs.getAllTabObjects().length < 2
+            ? "Only one tab open - there is nothing to split it from"
+            : "Last tab in the main group - move one back first",
+        isError: true,
+      });
+      return;
+    }
+    // "" is the main container. A tab going the other way keeps an existing split's
+    // orientation - passing the other region would make _dropTab rebuild the container.
+    const region = inSecondary ? "" : tabs.secondaryTabContainer?.region || "right";
+    tabs._dropTab(region, tab.tab, inSecondary ? tabs.secondaryTabContainer : tabs.mainTabContainer);
+    focusTabEditor(tab);
+  }
+
+  // Collapse the split in one go. _dropTab splices each moved tab out of
+  // secondaryTabs as it goes, so iterate over a snapshot; it destroys the container
+  // itself once the last tab leaves, which is what actually removes the split.
+  function unsplitTabGroups() {
+    const tabs = window.appDMS.tabs;
+    const container = tabs.secondaryTabContainer;
+    if (!container) {
+      showNotification({ message: "Tab area isn't split", isError: true });
+      return;
+    }
+    const focused = tabs.getFocusedTab();
+    [...(tabs.secondaryTabs || [])].forEach((t) => tabs._dropTab("", t.tab, container));
+    // Every move selects the tab it just dropped, so put the caret back where it was.
+    if (focused) {
+      tabs.selectTab(focused);
+      focusTabEditor(focused);
+    }
+  }
+
+  function focusTabBar() {
+    const button = window.appDMS.tabs.getFocusedTab()?.tab?.controlButton;
+    if (!button) {
+      showNotification({ message: "No open tab to focus", isError: true });
+      return;
+    }
+    button.focus();
+  }
+
+  function focusPaneBar() {
+    const editorTab = window.appDMS.tabs.getFocusedTab()?.editor;
+    // Panes can be dragged out into rightTabs/bottomTabs, which don't exist until
+    // they hold something - so focus the strip that actually owns the selected pane
+    // rather than assuming the main one.
+    const containers = [editorTab?.sasSuiteTabContainer, editorTab?.rightTabs, editorTab?.bottomTabs].filter(Boolean);
+    const holder = containers.find((c) => c.selectedChildWidget === editorTab.selectedTab) || containers[0];
+    const button = holder?.selectedChildWidget?.controlButton;
+    if (!button) {
+      showNotification({ message: "Current tab has no pane bar", isError: true });
+      return;
+    }
+    button.focus();
+  }
+
+  function focusSideBarTree() {
+    // Only the selected accordion pane is visible, so this picks whichever tree is
+    // on screen; selectTreePane covers the case where the open pane has no tree at
+    // all (Tasks, Snippets, ...) and getCurrentTargetTree fell back to projects.
+    // ponytail: in maximized view nothing is visible and this focuses a hidden tree
+    // - toggleMaxView first. Un-maximizing here would be a surprising side effect.
+    const tree = getCurrentTargetTree(["library", "projects"]);
+    if (!tree) {
+      showNotification({ message: "No side bar tree to focus", isError: true });
+      return;
+    }
+    selectTreePane(tree.id.split(".")[0]);
+    // Survives the noTreeFocusSteal patch: dijit's _KeyNavContainer.focus() goes
+    // through focusChild, not the focusNode() that patch suppresses.
+    tree.focus();
+  }
+
   // Reload content of the currently focused file in SAS Studio
   // The Ace text-viewer entry (from editor-swap.js's __ssExt._textViewers) for a
   // tab, or null. Lets tab-scoped actions treat a "View as text" tab like an editor.
@@ -1062,21 +1198,13 @@ Add a prefix to the path for different option:
     },
     selectNextPane: { fn: () => selectNextPane() },
     selectPreviousPane: { fn: () => selectNextPane(-1) },
-    focusCodeEditor: {
-      fn: function () {
-        const tab = window.appDMS.tabs.getFocusedTab();
-        // Text viewer tab: focus its Ace overlay directly.
-        const viewer = getTextViewerForTab(tab);
-        if (viewer) {
-          viewer.adapter.focus();
-          return;
-        }
-        const currentTab = tab?.editor;
-        if (!currentTab) return;
-        currentTab.editContentPane.getParent().selectChild(currentTab.editContentPane);
-        currentTab.editor.focus();
-      },
-    },
+    focusCodeEditor: { fn: () => focusTabEditor(window.appDMS.tabs.getFocusedTab()) },
+    switchTabGroup: { fn: switchTabGroup },
+    moveTabToOtherGroup: { fn: moveTabToOtherGroup },
+    unsplitTabGroups: { fn: unsplitTabGroups },
+    focusTabBar: { fn: focusTabBar },
+    focusPaneBar: { fn: focusPaneBar },
+    focusSideBarTree: { fn: focusSideBarTree },
     commandPalette: {
       // Global in-page hotkey/action: works even when the Ace editor replacement
       // isn't active and nothing is focused. editor-swap.js is pre-injected (with
@@ -1276,20 +1404,32 @@ Add a prefix to the path for different option:
 
     tabsContextMenuCopyUri: function () {
       const tabs = window.appDMS.tabs;
-      const copyUriMenuItem = new dijit.MenuItem({
-        label: "Copy Path",
-        onClick: function () {
-          const currentTargetUri = window.dijit.byNode(this.getParent().currentTarget)?.page?.tabObject?.uri;
-          if (currentTargetUri) copyTextWithNotice(currentTargetUri);
-        },
-      });
+      // One item PER MENU, not one shared instance: a dijit widget has a single
+      // parent and addChild MOVES it, so sharing one took Copy Path off the main
+      // tab menu the moment a secondary tab group was created - and destroying that
+      // group (its last tab moving back) destroyed the shared item along with the
+      // menu, so the NEXT split threw "insertBefore: parameter 1 is not of type
+      // 'Node'" from inside _addSecondaryTabContainer. That left a half-built
+      // secondaryTabContainer behind, which is what then broke switchTabGroup and
+      // every later tab move.
+      const newCopyUriMenuItem = () =>
+        new dijit.MenuItem({
+          label: "Copy Path",
+          onClick: function () {
+            const currentTargetUri = window.dijit.byNode(this.getParent().currentTarget)?.page?.tabObject?.uri;
+            if (currentTargetUri) copyTextWithNotice(currentTargetUri);
+          },
+        });
 
-      tabs.mainTabMenu.addChild(copyUriMenuItem, 0);
+      tabs.mainTabMenu.addChild(newCopyUriMenuItem(), 0);
 
       const _orig_createTabsPopup = tabs.createTabsPopup;
       tabs.createTabsPopup = function (tabMenu) {
-        const r = _orig_createTabsPopup.apply(this, tabMenu);
-        tabMenu.addChild(copyUriMenuItem, 0);
+        // .apply(this, tabMenu) called the original with NO arguments (apply wants
+        // an array), so the secondary group's tab menu never got SAS Studio's own
+        // items - only ours.
+        const r = _orig_createTabsPopup.call(this, tabMenu);
+        tabMenu.addChild(newCopyUriMenuItem(), 0);
         return r;
       };
     },
