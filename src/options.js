@@ -42,6 +42,15 @@
 
   // -- Patches --------------------------------------------------------------------
 
+  // Three-way, so a select rather than one of the patch checkboxes; read by
+  // ss-fixes.js's runFocus patch via sw.js's __ssf.init(settings).
+  async function initRunFocus() {
+    const select = document.getElementById("run-focus");
+    const { runFocus } = await chrome.storage.local.get("runFocus");
+    select.value = runFocus || DEFAULT_RUN_FOCUS;
+    select.addEventListener("change", () => chrome.storage.local.set({ runFocus: select.value }));
+  }
+
   async function renderPatches() {
     const { fixes } = await chrome.storage.local.get("fixes");
     const saved = fixes || {};
@@ -475,6 +484,7 @@
   }
 
   initDarkMode();
+  initRunFocus();
   renderPatches();
   // Resolve + persist the keyboard layout map before any hotkey is recorded;
   // this page is a secure context, the http SAS Studio page isn't, so this is

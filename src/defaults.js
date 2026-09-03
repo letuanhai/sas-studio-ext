@@ -57,6 +57,22 @@ snippet sqlpass
 var DEFAULT_DARK_MODE = "off";
 
 /**
+ * What a run is allowed to do to the pane selection (chrome.storage.local's
+ * `runFocus`, passed to __ssf.init() by sw.js and read by ss-fixes.js's
+ * runFocus patch):
+ *
+ *   "app"  - SAS Studio's own behavior: the Log pane when the first log line
+ *            arrives, then Results / Output data when the run completes
+ *   "log"  - the Log pane at run START only; nothing at the end (the default -
+ *            seeing the log while it runs is useful, being thrown out of the
+ *            code you were reading when it finishes is not)
+ *   "none" - never; the updated pane's chip is outlined instead
+ *
+ * "log" and "none" both outline the chip of any pane they held you back from.
+ */
+var DEFAULT_RUN_FOCUS = "log";
+
+/**
  * Default Ace editor configuration - the "default for new editors" that the
  * in-page settings panel and options.html both read/write via
  * chrome.storage.local.aceConfig (see editor-swap.js/sw.js/options.js).

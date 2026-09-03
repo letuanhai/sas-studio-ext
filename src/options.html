@@ -106,6 +106,27 @@
 
     <h2 id="patches">Patches</h2>
     <p class="note">Passive behavior changes, on by default. Applies on next page reload.</p>
+    <label
+      >Pane focus on execution
+      <select id="run-focus">
+        <option value="log">Log pane</option>
+        <option value="none">Keep focus</option>
+        <option value="app">SAS Studio default</option>
+      </select>
+    </label>
+    <ul class="note">
+      <li><strong>Log pane</strong> - switch to the Log pane when execution starts, and stay there when it finishes.</li>
+      <li><strong>Keep focus</strong> - never change the focused pane automatically, at any point of the execution.</li>
+      <li>
+        <strong>SAS Studio default</strong> - switch to the Log pane when execution starts, then to Results / Output
+        Data (whichever was produced) when it finishes.
+      </li>
+    </ul>
+    <p class="note">
+      Both non-default options outline the tab of a pane that has new content instead of switching to it: Results and
+      Output Data only, since the Log is written to throughout the execution. The outline blinks once per update and
+      stays until you go to that pane.
+    </p>
     <div id="patches-list"></div>
 
     <h2 id="hotkeys">Hotkeys</h2>

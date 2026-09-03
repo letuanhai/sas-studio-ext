@@ -41,7 +41,11 @@
   // mode), so genuine .txt gets SAS highlighting too. Fine for SAS Studio.
   function aceModeFor(name) {
     try {
-      const m = ace.require("ace/ext/modelist").getModeForPath(name).mode;
+      // SAS Studio uniquifies tab titles by appending " <n>" (SASStudioTabs'
+      // _incrementTitle), and that title is what the tab's `name` ends up being -
+      // so a "run.log" tab is really called "run.log 1" and the extension is no
+      // longer at the end. Drop the counter before asking modelist.
+      const m = ace.require("ace/ext/modelist").getModeForPath(name.replace(/ \d+$/, "")).mode;
       if (m && m !== "ace/mode/text") return m;
     } catch (e) {}
     return "ace/mode/sas";
@@ -1817,7 +1821,10 @@
       aceModeFor(item && item.name),
     );
     // Always editable (like a normal editor); the dirty state drives the tab
-    // marker and Save button, and Ctrl/Cmd+S / vim :w save.
+    // marker and Save button, and Ctrl/Cmd+S / vim :w save. That includes the
+    // ss-fixes log tab, which has no file behind it: editing it is harmless (F5
+    // puts the log back), and saveTextViewer's no-uri guard turns a stray Ctrl+S
+    // into one error message.
     adapter.readOnly(false);
 
     const entry = {

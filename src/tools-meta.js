@@ -106,6 +106,13 @@ Add a prefix to the path for different option:
       hotkey: { key: "l", altKey: true },
     },
     {
+      name: "openLogInTextTab",
+      kind: "action",
+      label: "Open submission log in a text tab",
+      title: "Open the log of the last submission in its own text tab (SAS log highlighting, folding and search instead of the Log pane). Refresh / F5 re-reads it from the tab it came from.",
+      hotkey: { key: "l", altKey: true, shiftKey: true },
+    },
+    {
       name: "toggleMaxView",
       kind: "action",
       label: "Toggle maximized view",
@@ -167,6 +174,20 @@ Add a prefix to the path for different option:
       label: "Focus code editor",
       title: "Focus the code editor of the current tab",
       hotkey: { key: ".", altKey: true },
+    },
+    {
+      name: "switchPaneGroup",
+      label: "Switch pane group",
+      kind: "action",
+      title: "Move to the next pane group of the current tab (main / right / bottom) and focus its selected pane",
+      hotkey: { key: ";", altKey: true },
+    },
+    {
+      name: "movePaneToOtherGroup",
+      kind: "action",
+      label: "Move pane to other group",
+      title: "Move the current pane out to the right pane group, splitting the tab if it isn't split yet - or back into the main group if it's already out. The main group can't be emptied.",
+      hotkey: { key: ";", altKey: true, shiftKey: true },
     },
     {
       name: "switchTabGroup",

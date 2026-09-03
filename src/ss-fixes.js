@@ -10,7 +10,8 @@
  *   appears. Guarded against double-call.
  * - `run(name)` invokes a single named action on demand (used by the popup).
  *
- * `settings = { fixes: {name: bool}, hotkeys: {name: keymap|null}, keyLayout }` -
+ * `settings = { fixes: {name: bool}, hotkeys: {name: keymap|null}, keyLayout,
+ * runFocus }` -
  * missing entries default to enabled (unless the SSF_TOOLS entry is `defaultOff`)
  * / the metadata default hotkey (from tools-meta.js's SSF_TOOLS, which must be
  * loaded first). `hotkeys[name] === null` means explicitly unbound. `keyLayout`
@@ -107,6 +108,13 @@
     tabs.getFocusedTab().editor?.editor?.focus?.();
   }
 
+  // The pane strips of a code tab: the main one, plus the two SAS Studio creates on
+  // demand when a pane is dragged to the right/bottom edge (and destroys again when
+  // their last pane leaves), so they only exist while they hold something.
+  function paneGroups(editorTab) {
+    return [editorTab?.sasSuiteTabContainer, editorTab?.rightTabs, editorTab?.bottomTabs].filter(Boolean);
+  }
+
   /**
    * select the nth next pane in current tab
    * @param {number=1} n number of pane to jump forward, default to 1
@@ -114,8 +122,8 @@
   function selectNextPane(n) {
     const editorTab = window.appDMS.tabs.getFocusedTab().editor;
     const allPanes = [];
-    [editorTab.sasSuiteTabContainer, editorTab.rightTabs, editorTab.bottomTabs].forEach((container) => {
-      container?.getChildren().forEach((pane) => allPanes.push([pane, container]));
+    paneGroups(editorTab).forEach((container) => {
+      container.getChildren().forEach((pane) => allPanes.push([pane, container]));
     });
     const currentPaneIndex = allPanes.findIndex((i) => i[0].type === editorTab.selectedTab.type);
     const nextPaneIndex = ((currentPaneIndex + (n ?? 1)) % allPanes.length + allPanes.length) % allPanes.length; // wrap array index around
@@ -217,6 +225,172 @@
     }
   }
 
+  // innerText of a node that may be inside a hidden pane. innerText needs layout:
+  // on a display:none element it silently degrades to textContent, which loses
+  // every line break AND drags the <style> block of the log document in with the
+  // text. So render a clone offscreen and read that instead.
+  // ponytail: clones the whole node, so a huge log is copied once. Cheap next to
+  // the render the pane itself already did; revisit if a 100 MB log ever shows up.
+  function renderedText(node) {
+    if (!node) return "";
+    const clone = node.cloneNode(true);
+    clone.style.cssText = "position:fixed;left:-99999px;top:0";
+    document.body.appendChild(clone);
+    try {
+      return clone.innerText;
+    } finally {
+      clone.remove();
+    }
+  }
+
+  // -- The submission log as a text tab --------------------------------------------
+  // The log endpoint serves HTML (it's what the Log pane loads through
+  // set("href", logURL)), so the text comes off the pane that already rendered it
+  // rather than being fetched and parsed a second time.
+
+  function logTextOfTab(tabObject) {
+    return renderedText(tabObject && tabObject.editor && tabObject.editor.logAreaContentPane?.domNode);
+  }
+
+  // Tab objects have no stable id of their own (a new program has none at all), but
+  // their BorderContainer widget does - and it's a string, which matters: the tab
+  // objects are JSON-stringified into the user's tab preferences on every change,
+  // so holding the source TAB here would make that throw on the circular reference
+  // and silently stop persisting tabs.
+  function refreshLogTab(item) {
+    const source = (window.appDMS.tabs.getAllTabObjects() || []).find(
+      (t) => t.tab && t.tab.id === item.__ssfLogSourceTabId,
+    );
+    const text = logTextOfTab(source);
+    if (!text.trim()) {
+      showNotification({
+        message: source ? "That tab has no log yet" : "The tab this log came from is closed",
+        isError: true,
+      });
+      return;
+    }
+    // The SimpleTextarea is the single write path: editor-swap's createFileView
+    // patch mirrors value writes into the Ace overlay, so this updates the Ace
+    // viewer and the plain-textarea (Ace off) case alike.
+    item.tab?.tabHolder?.simpleTextArea?.set("value", text);
+  }
+
+  function openLogInTextTab() {
+    const source = window.appDMS.tabs.getFocusedTab();
+    const text = logTextOfTab(source);
+    if (!text.trim()) {
+      showNotification({ message: "No log to open - run a program first", isError: true });
+      return;
+    }
+    const tabs = window.appDMS.tabs;
+    // Same two calls AppDMS makes for a "view file as text" tab, so the log lands in
+    // the stock text viewer (and, with the Ace replacement on, in its Ace overlay -
+    // *.log gives it ace/mode/saslog through aceModeFor).
+    const tab = tabs._newTab({
+      name: (source.editor.name || "program").replace(/\.[^./]*$/, "") + ".log",
+      // Custom type: _newTab's default branch just uniquifies the title, and
+      // loadPersistedTabs' switch ignores an unknown type - so a restored session
+      // doesn't try to reopen a log that no longer exists anywhere.
+      type: "ssextlog",
+      fileType: "LOG", // what makes createFileView build the Refresh toolbar
+      id: "ssextlog" + Date.now(), // the toolbar's dijit id is derived from this
+      __ssfLogSourceTabId: source.tab.id,
+    });
+    if (!tab) return;
+    window.appDMS.createFileView(tab, tab.tab, text, "perspectiveTabContainer_" + tab.tab.id);
+    tabs._finalizeTab(tab);
+  }
+
+  // "app" | "log" | "none" - see DEFAULT_RUN_FOCUS in defaults.js. Lives on
+  // __ssf (not a closure variable) because the patch reads it on every call:
+  // that alone makes the options-page select live, with sw.js's storage listener
+  // just assigning to it - nothing to re-wrap, no reload.
+  function runFocusMode() {
+    return window.__ssf.runFocus || "log";
+  }
+
+  // A pane's chip in the pane bar (Code / Log / Results / Output data).
+  function paneChip(pane) {
+    return (pane && pane.controlButton && pane.controlButton.domNode) || null;
+  }
+
+  // "This pane has new content": blink the chip's border once, then leave it up
+  // until the pane is selected. Re-running the animation on a chip that already
+  // has the border blinks it again (a second run before you looked at the first),
+  // which is exactly what the Web Animations API does for free - no class dance,
+  // no forced reflow. Skipped when SAS Studio is allowed to just take you there
+  // ("app"), and when you are already looking at the pane.
+  function markPaneUpdated(editorTab, pane) {
+    if (runFocusMode() === "app" || !pane || pane === editorTab.selectedTab) return;
+    const node = paneChip(pane);
+    if (!node) return;
+    if (!document.getElementById("ssf-pane-updated-style")) {
+      const st = document.createElement("style");
+      st.id = "ssf-pane-updated-style";
+      // outline, not border: it doesn't take part in layout, so the chip doesn't
+      // move. Negative offset keeps it inside the chip's own box.
+      st.textContent = ".ssf-pane-updated{outline:2px solid #c8a000;outline-offset:-2px}";
+      document.head.appendChild(st);
+    }
+    node.classList.add("ssf-pane-updated");
+    node.animate([{ outlineColor: "#c8a000" }, { outlineColor: "transparent" }], {
+      duration: 180,
+      iterations: 4,
+      direction: "alternate",
+    });
+  }
+
+  // Put the keyboard on a pane: the editor pane gets the caret, any other pane its
+  // chip in the pane bar (from where dijit's arrow keys take over, as focusPaneBar).
+  function focusPane(editorTab, pane) {
+    if (pane === editorTab.editContentPane) editorTab.editor.focus();
+    else pane?.controlButton?.focus();
+  }
+
+  // Pane-group counterparts of switchTabGroup/moveTabToOtherGroup. Panes get up to
+  // THREE strips (main + right + bottom), so "switch" cycles rather than toggles.
+  function switchPaneGroup() {
+    const editorTab = window.appDMS.tabs.getFocusedTab()?.editor;
+    const groups = paneGroups(editorTab);
+    if (groups.length < 2) {
+      showNotification({
+        message: "Panes aren't split - move a pane to the other group first, or drag one to the right or bottom edge",
+        isError: true,
+      });
+      return;
+    }
+    // -1 (selectedTab in none of them, e.g. right after a drag) -> start at the first.
+    const i = groups.findIndex((g) => g.selectedChildWidget === editorTab.selectedTab);
+    const next = groups[(i + 1) % groups.length];
+    const pane = next.selectedChildWidget;
+    if (!pane) return;
+    next.selectChild(pane);
+    focusPane(editorTab, pane);
+  }
+
+  // Move the selected pane out to the right strip, or - if it's already in a side
+  // strip - back into the main one. dropTab is what a drag to the edge calls, so it
+  // creates the side strip when needed and destroys it again when its last pane
+  // leaves; "" is the main strip (same call resetTabLayout makes).
+  function movePaneToOtherGroup() {
+    const editorTab = window.appDMS.tabs.getFocusedTab()?.editor;
+    const main = editorTab?.sasSuiteTabContainer;
+    const pane = editorTab?.selectedTab;
+    const source = paneGroups(editorTab).find((g) => g.getChildren().indexOf(pane) > -1);
+    if (!pane || !source) {
+      showNotification({ message: "No pane to move", isError: true });
+      return;
+    }
+    const inMain = source === main;
+    // Same constraint as the tab groups: the main strip can't be left empty.
+    if (inMain && main.getChildren().length < 2) {
+      showNotification({ message: "Last pane in the main group - move one back first", isError: true });
+      return;
+    }
+    editorTab.dropTab(inMain ? "right" : "", "", pane, source);
+    focusPane(editorTab, pane);
+  }
+
   function focusTabBar() {
     const button = window.appDMS.tabs.getFocusedTab()?.tab?.controlButton;
     if (!button) {
@@ -228,10 +402,8 @@
 
   function focusPaneBar() {
     const editorTab = window.appDMS.tabs.getFocusedTab()?.editor;
-    // Panes can be dragged out into rightTabs/bottomTabs, which don't exist until
-    // they hold something - so focus the strip that actually owns the selected pane
-    // rather than assuming the main one.
-    const containers = [editorTab?.sasSuiteTabContainer, editorTab?.rightTabs, editorTab?.bottomTabs].filter(Boolean);
+    // Focus the strip that actually owns the selected pane, not just the main one.
+    const containers = paneGroups(editorTab);
     const holder = containers.find((c) => c.selectedChildWidget === editorTab.selectedTab) || containers[0];
     const button = holder?.selectedChildWidget?.controlButton;
     if (!button) {
@@ -270,6 +442,14 @@
 
   function reloadCurrentFile() {
     const currentTab = window.appDMS.tabs.getFocusedTab();
+
+    // Our own log tab: no file behind it, so re-read the source tab's Log pane.
+    // Checked before the text-viewer branch below, which only knows about viewers
+    // that have an Ace overlay (i.e. only while the Ace replacement is on).
+    if (currentTab && currentTab.__ssfLogSourceTabId) {
+      refreshLogTab(currentTab);
+      return;
+    }
 
     // Text viewer tab: re-fetch from the server exactly as its Refresh button does
     // (onTextRefresh with the file item the button was wired with). The mirror
@@ -1179,6 +1359,20 @@ Add a prefix to the path for different option:
         logURL ? window.open(logURL, "_blank") : alert("No logURL to open!");
       },
     },
+    openLogInTextTab: {
+      // Refresh for our log tabs: createFileView wires its toolbar button to
+      // appDMS.onTextRefresh(item), so wrapping that once covers the button, and
+      // reloadCurrentFile (F5) routes here too. Installed at init, before any of
+      // our tabs exist, so no createFileView hitch can capture the original.
+      setup: function () {
+        const o_onTextRefresh = window.appDMS.onTextRefresh;
+        window.appDMS.onTextRefresh = function (item) {
+          if (item && item.__ssfLogSourceTabId) return refreshLogTab(item);
+          return o_onTextRefresh.apply(this, arguments);
+        };
+      },
+      fn: openLogInTextTab,
+    },
     // onMaxView() decides from the accordion's display, so it stays in sync with
     // SAS Studio's own Alt+F11 / menu entry.
     toggleMaxView: { fn: () => window.appDMS.onMaxView() },
@@ -1199,6 +1393,8 @@ Add a prefix to the path for different option:
     selectNextPane: { fn: () => selectNextPane() },
     selectPreviousPane: { fn: () => selectNextPane(-1) },
     focusCodeEditor: { fn: () => focusTabEditor(window.appDMS.tabs.getFocusedTab()) },
+    switchPaneGroup: { fn: switchPaneGroup },
+    movePaneToOtherGroup: { fn: movePaneToOtherGroup },
     switchTabGroup: { fn: switchTabGroup },
     moveTabToOtherGroup: { fn: moveTabToOtherGroup },
     unsplitTabGroups: { fn: unsplitTabGroups },
@@ -1834,6 +2030,98 @@ Add a prefix to the path for different option:
       };
     },
 
+    // Not in SSF_TOOLS, so the options page renders no checkbox for it and
+    // ssfPatchEnabled() (absent -> enabled) always applies it: what it actually
+    // does is decided per call by `runFocusMode`, the three-way "runFocus" select.
+    runFocus: function () {
+      // A run moves you twice: to the Log pane when the first log line arrives
+      // (updateLog, while this.running is still true), then to Results / Output
+      // data / the Log when it completes (submitComplete -> setOutputStates /
+      // outputLoaded / setPackage, all after running was set back to false).
+      // Every one of those goes through DMSEditor.selectTab and nothing else
+      // does - a click on a pane chip, our own selectNextPane/focusPaneBar and
+      // SAS's setNextFocus all call the dijit container's selectChild directly.
+      // So `this.running` tells start from end, and one wrap covers both.
+      const DMSEditor = window.require("webdms/DMSEditor");
+      const o_selectTab = DMSEditor.prototype.selectTab;
+      DMSEditor.prototype.selectTab = function (pane) {
+        const allowed =
+          runFocusMode() === "app" ||
+          (runFocusMode() === "log" && this.running && pane === this.logContentPane);
+        if (allowed || !pane || pane === this.selectedTab) return o_selectTab.apply(this, arguments);
+      };
+
+      // Which pane actually has something new is NOT what the suppressed
+      // selectTab calls say: a data step that creates a table selects Results
+      // (which got an empty document) and never selects the brand-new Output
+      // data pane at all. So mark from the two places that only run when there
+      // IS new content, and leave the Log alone - it streams throughout the run,
+      // so an outline on it means nothing.
+      //   setOutputStates(a, ...) - SAS's own "did this run produce output?"
+      //     branch, `a` being submitComplete's NoOutputGenerated flag. Its
+      //     no-output branch wipes the Results pane, so drop any stale mark.
+      //   createDataTab(...)      - only called when there are data sets to show.
+      // ponytail: the interactive perspective completes through
+      // interactiveSubmitComplete, which calls neither - no marks there.
+      const o_setOutputStates = DMSEditor.prototype.setOutputStates;
+      DMSEditor.prototype.setOutputStates = function (noOutput) {
+        const r = o_setOutputStates.apply(this, arguments);
+        // SAS's own test, loose == included: false and "" both mean "has output".
+        if (noOutput == null || noOutput == "") markPaneUpdated(this, this.outputContentPane);
+        else paneChip(this.outputContentPane)?.classList.remove("ssf-pane-updated");
+        return r;
+      };
+
+      const o_createDataTab = DMSEditor.prototype.createDataTab;
+      DMSEditor.prototype.createDataTab = function () {
+        const r = o_createDataTab.apply(this, arguments);
+        markPaneUpdated(this, this.dataContentPane);
+        return r;
+      };
+
+      // Completion also moves the keyboard, without going through selectTab:
+      // setNextFocus() selectChild()s the log pane and focuses its chip, and the
+      // other branch focuses the Results chip through the shared dijit/focus
+      // module 250ms later (submitComplete). Suppressing the first is a wrap;
+      // the second is inside that timeout, so swap the instance's `focus` for a
+      // no-op until it has fired (DMSEditor only uses it in three places, one of
+      // which is setNextFocus, already neutralized).
+      const o_setNextFocus = DMSEditor.prototype.setNextFocus;
+      DMSEditor.prototype.setNextFocus = function () {
+        if (runFocusMode() !== "app") return;
+        return o_setNextFocus.apply(this, arguments);
+      };
+
+      const o_submitComplete = DMSEditor.prototype.submitComplete;
+      DMSEditor.prototype.submitComplete = function () {
+        if (runFocusMode() !== "app" && this.focus && !this._ssfFocusHeld) {
+          const realFocus = this.focus;
+          this._ssfFocusHeld = true;
+          this.focus = { focus: function () {} };
+          setTimeout(() => {
+            this.focus = realFocus;
+            this._ssfFocusHeld = false;
+          }, 1000);
+        }
+        return o_submitComplete.apply(this, arguments);
+      };
+
+      // Clearing the mark hangs off the dijit container's selectChild, not
+      // DMSEditor.onTabSelect: SAS connects that one with dojo.connect(...,
+      // e.hitch(this, this.onTabSelect)), which resolves the method ONCE at tab
+      // construction, so a prototype wrap installed later never runs for tabs
+      // that already existed - the mark then never cleared for them, whichever
+      // way the pane was selected. selectChild is the one call every path (chip
+      // click, pane-bar arrow keys, our own actions, SAS's own code) goes
+      // through, for every container, always.
+      const StackContainer = window.require("dijit/layout/StackContainer");
+      const o_selectChild = StackContainer.prototype.selectChild;
+      StackContainer.prototype.selectChild = function (page) {
+        paneChip(page)?.classList.remove("ssf-pane-updated");
+        return o_selectChild.apply(this, arguments);
+      };
+    },
+
     aceEditorOnLoad: function () {
       // Off by default (SSF_TOOLS' defaultOff). sw.js seeds ssExt.libPath before
       // calling init(), so the same call the toggleEditor action makes works here.
@@ -1857,6 +2145,7 @@ Add a prefix to the path for different option:
     settings = settings || {};
     const fixes = settings.fixes || {};
     const hotkeys = settings.hotkeys || {};
+    if (settings.runFocus) window.__ssf.runFocus = settings.runFocus;
     // Keyboard layout captured by the options page (tools-meta.js) - this page
     // can't resolve it itself (getLayoutMap is secure-context only).
     Object.assign(window.ssfKeyLayout, settings.keyLayout || {});
@@ -1914,5 +2203,6 @@ Add a prefix to the path for different option:
     }
   }
 
-  window.__ssf = { init, run, saveFocusedFileAtPath, copyText, copyTextWithNotice };
+  // runFocus: "app" | "log" | "none", live-assignable (see runFocusMode above).
+  window.__ssf = { init, run, saveFocusedFileAtPath, copyText, copyTextWithNotice, runFocus: "log" };
 })();

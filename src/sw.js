@@ -158,15 +158,22 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // keyLayout: the navigator.keyboard.getLayoutMap() result captured by the
     // options page - that API is secure-context only, so the (http) SAS Studio
     // page can't resolve it itself. Absent -> ss-fixes falls back to US layout.
-    const { fixes, hotkeys, keyLayout, browsePaths, browseKeys, darkMode } = await chrome.storage.local.get([
-      "fixes",
-      "hotkeys",
-      "keyLayout",
-      "browsePaths",
-      "browseKeys",
-      "darkMode",
-    ]);
-    const settings = { fixes: fixes || {}, hotkeys: hotkeys || {}, keyLayout: keyLayout || {} };
+    const { fixes, hotkeys, keyLayout, browsePaths, browseKeys, darkMode, runFocus } =
+      await chrome.storage.local.get([
+        "fixes",
+        "hotkeys",
+        "keyLayout",
+        "browsePaths",
+        "browseKeys",
+        "darkMode",
+        "runFocus",
+      ]);
+    const settings = {
+      fixes: fixes || {},
+      hotkeys: hotkeys || {},
+      keyLayout: keyLayout || {},
+      runFocus: runFocus || DEFAULT_RUN_FOCUS,
+    };
 
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -324,6 +331,31 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
   // Browse prompt keys (options page): same deal as the roots below - read when
   // a prompt opens, so an assignment is all it takes. Not host-scoped: which key
   // does what isn't a property of the server.
+  // Pane focus on run: the patch reads __ssf.runFocus on every call, so a plain
+  // assignment is the whole live apply - no reload, nothing to re-wrap.
+  if (changes.runFocus) {
+    const mode = changes.runFocus.newValue || DEFAULT_RUN_FOCUS;
+    try {
+      const tabs = await chrome.tabs.query({ url: "*://*/SASStudio/*" });
+      await Promise.all(
+        tabs.map((tab) =>
+          chrome.scripting
+            .executeScript({
+              target: { tabId: tab.id },
+              func: (m) => {
+                if (window.__ssf) window.__ssf.runFocus = m;
+              },
+              args: [mode],
+              world: "MAIN",
+            })
+            .catch(() => {}), // no-op if ss-fixes.js isn't loaded in that tab
+        ),
+      );
+    } catch (error) {
+      console.error("[SS Ext] Error live-applying run focus:", error);
+    }
+  }
+
   if (changes.browseKeys) {
     const keys = changes.browseKeys.newValue || {};
     try {

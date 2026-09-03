@@ -2094,6 +2094,254 @@ function check(name, ok, detail) {
   const treeAfter = await page.evaluate(() => document.activeElement.id);
   check("arrow keys then navigate the tree", treeAfter && treeAfter !== treeFocus.id, { treeFocus, treeAfter });
 
+  // -- Pane groups, the run-focus-steal patch and the log editor tab ----------------
+  // All three are about one code tab's own panes, so they share the tab this block
+  // opens (and closes again at the end). The run is a one-liner against sashelp so
+  // it comes back fast, but it IS a real submission to the shared session.
+  await page.evaluate(() => window.appDMS.tabs.onNewProgram());
+  await page.waitForTimeout(2500);
+
+  const paneSplit = await page.evaluate(async () => {
+    const ed = () => window.appDMS.tabs.getFocusedTab().editor;
+    const wait = () => new Promise((r) => setTimeout(r, 600));
+    window.__ssf.run("switchPaneGroup");
+    const noSplitWarn = document.body.innerText.includes("Panes aren't split");
+    window.__ssf.run("movePaneToOtherGroup"); // the Code pane, out to the right
+    await wait();
+    const out = { right: !!ed().rightTabs, main: ed().sasSuiteTabContainer.getChildren().length };
+    // and back again - which destroys the strip it just created
+    window.__ssf.run("movePaneToOtherGroup");
+    await wait();
+    return { noSplitWarn, out, backRight: !!ed().rightTabs, backMain: ed().sasSuiteTabContainer.getChildren().length };
+  });
+  check("switchPaneGroup warns instead of throwing with no pane split", paneSplit.noSplitWarn, paneSplit);
+  check("movePaneToOtherGroup splits the panes out to the right", paneSplit.out.right, paneSplit);
+  check(
+    "...and moving it back destroys the strip again",
+    !paneSplit.backRight && paneSplit.backMain === paneSplit.out.main + 1,
+    paneSplit,
+  );
+
+  const paneGroupSwitch = await page.evaluate(async () => {
+    const ed = () => window.appDMS.tabs.getFocusedTab().editor;
+    const wait = () => new Promise((r) => setTimeout(r, 600));
+    // Move the LOG pane out so the editor pane stays in the main group.
+    ed().sasSuiteTabContainer.selectChild(ed().logContentPane);
+    window.__ssf.run("movePaneToOtherGroup");
+    await wait();
+    window.__ssf.run("focusCodeEditor");
+    await wait();
+    const from = ed().selectedTab.type;
+    window.__ssf.run("switchPaneGroup");
+    await wait();
+    const to = ed().selectedTab.type;
+    window.__ssf.run("switchPaneGroup");
+    await wait();
+    const back = ed().selectedTab.type;
+    window.__ssf.run("resetLayoutCurrentTab"); // cleanup: one group again
+    await wait();
+    return { from, to, back, groups: [ed().rightTabs, ed().bottomTabs].filter(Boolean).length };
+  });
+  check(
+    "switchPaneGroup cycles between the pane groups",
+    paneGroupSwitch.from === "editor" && paneGroupSwitch.to === "log" && paneGroupSwitch.back === "editor",
+    paneGroupSwitch,
+  );
+  check("resetLayoutCurrentTab puts the panes back in one group", paneGroupSwitch.groups === 0, paneGroupSwitch);
+
+  // The main group can't be emptied - same constraint as the tab groups.
+  const lastPaneRefused = await page.evaluate(async () => {
+    const ed = window.appDMS.tabs.getFocusedTab().editor;
+    const panes = ed.sasSuiteTabContainer.getChildren().slice(1);
+    for (const p of panes) {
+      ed.sasSuiteTabContainer.selectChild(p);
+      window.__ssf.run("movePaneToOtherGroup");
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    ed.sasSuiteTabContainer.selectChild(ed.sasSuiteTabContainer.getChildren()[0]);
+    window.__ssf.run("movePaneToOtherGroup");
+    const state = { warned: document.body.innerText.includes("Last pane in the main group"), main: ed.sasSuiteTabContainer.getChildren().length };
+    window.__ssf.run("resetLayoutCurrentTab");
+    await new Promise((r) => setTimeout(r, 600));
+    return state;
+  });
+  check(
+    "movePaneToOtherGroup refuses to empty the main pane group",
+    lastPaneRefused.warned && lastPaneRefused.main === 1,
+    lastPaneRefused,
+  );
+
+  // Two real (tiny) submissions, one per runFocus mode that changes anything.
+  // Default is "log": the Log pane at run START only, nothing at the end.
+  const runTabTitle = await page.evaluate(() => window.appDMS.tabs.getFocusedTab().title);
+  const runProgram = async (code) => {
+    await page.evaluate((c) => {
+      const ed = window.appDMS.tabs.getFocusedTab().editor;
+      ed.logURL = null;
+      ed.setEditContent(c);
+      window.__ssf.run("focusCodeEditor");
+      window.__ssf.run("runCurrentProgram");
+    }, code);
+    await page
+      .waitForFunction(() => !!window.appDMS.tabs.getFocusedTab().editor.logURL, null, { timeout: 60000 })
+      .catch(() => {});
+    await page.waitForTimeout(3500); // submitComplete's own 250ms focus timeout, and then some
+  };
+  const paneState = () =>
+    page.evaluate(() => {
+      const ed = window.appDMS.tabs.getFocusedTab().editor;
+      const chip = (p) => !!(p && p.controlButton && p.controlButton.domNode.classList.contains("ssf-pane-updated"));
+      return {
+        selected: ed.selectedTab && ed.selectedTab.type,
+        results: chip(ed.outputContentPane),
+        data: chip(ed.dataContentPane),
+        hasDataPane: !!ed.dataContentPane,
+        log: chip(ed.logContentPane),
+        active: (document.activeElement && document.activeElement.className) || "",
+        logText: (ed.logAreaContentPane.domNode.textContent || "").slice(0, 400),
+      };
+    });
+
+  await page.waitForTimeout(500);
+  await runProgram("proc print data=sashelp.class(obs=1); run;");
+  const afterLogMode = await paneState();
+  check('runFocus "log": a run selects the Log pane at start', afterLogMode.selected === "log", afterLogMode);
+  check("...but the completed run leaves it there and outlines Results instead", afterLogMode.results, afterLogMode);
+  // SAS Studio's own submit preamble - present in every log it renders.
+  check("the run produced a log to read", /OPTIONS NONOTES/.test(afterLogMode.logText), afterLogMode);
+
+  // "none": nothing moves at all. Set through storage, so this also covers sw.js's
+  // live apply - the patch reads __ssf.runFocus per call, so no reload is needed.
+  await sw.evaluate(() => chrome.storage.local.set({ runFocus: "none" }));
+  await page.waitForTimeout(500);
+  const modePushed = await page.evaluate(() => window.__ssf.runFocus);
+  check("a runFocus change reaches the open tab without a reload", modePushed === "none", { modePushed });
+  await page.evaluate(() => window.__ssf.run("focusCodeEditor"));
+  await page.waitForTimeout(400);
+  // Output data AND results this time: the data pane is a brand new widget that
+  // SAS never selectTab()s when there are results too, so it is only marked
+  // because createDataTab is - the case the selectTab-only marking missed.
+  await runProgram("data work.ssext_probe; set sashelp.class; run; proc print data=work.ssext_probe(obs=1); run;");
+  const afterNoneMode = await paneState();
+  check('runFocus "none": the run leaves the editor pane selected', afterNoneMode.selected === "editor", afterNoneMode);
+  // submitComplete focuses the Results chip (or, on the log pane, setNextFocus's)
+  // 250ms after the run ends - neither may happen here.
+  check("...and the keyboard where it was, not on a pane chip", !/dijitTab/.test(afterNoneMode.active), afterNoneMode);
+  check("...outlining Results and the new Output data pane", afterNoneMode.results && afterNoneMode.data, afterNoneMode);
+  // The log streams throughout a run, so an outline on it would mean nothing.
+  check("...and never the Log pane", !afterNoneMode.log, afterNoneMode);
+  await sw.evaluate(() => chrome.storage.local.remove("runFocus"));
+  await page.waitForTimeout(300);
+
+  // Turn the Ace replacement back on (the last reload of the dark-mode block left it
+  // off) - the log tab's mode is the whole point, and only the Ace path has one.
+  await page.addScriptTag({ path: require("path").join(EXT, "src", "editor-swap.js") });
+  await page.evaluate((lp) => window.__ssExt.toggle(lp), libPath);
+  await page.waitForTimeout(1500);
+
+  // Opened with the editor pane selected, i.e. with the Log pane display:none - the
+  // case where a plain innerText degrades to textContent (no line breaks, and the
+  // log document's <style> block dragged in as text).
+  const logTab = await page.evaluate(async () => {
+    window.__ssf.run("openLogInTextTab");
+    await new Promise((r) => setTimeout(r, 2500));
+    const tab = window.appDMS.tabs.getFocusedTab();
+    const entry = window.__ssExt._textViewers.find((e) => e.tabHolder === tab.tab.tabHolder);
+    const text = entry.adapter.getText() || "";
+    return {
+      title: tab.title,
+      isViewer: !!entry,
+      mode: entry.adapter.aceEditor && entry.adapter.aceEditor.session.$modeId,
+      readOnly: entry.adapter.aceEditor.getReadOnly(),
+      lines: text.split("\n").length,
+      head: text.slice(0, 200),
+    };
+  });
+  check(
+    "openLogInTextTab opens the log in a .log text-viewer tab, line breaks and all",
+    logTab.isViewer && /\.log( \d+)?$/.test(logTab.title) && /OPTIONS NONOTES/.test(logTab.head) && logTab.lines > 5,
+    logTab,
+  );
+  check("...without the log document's stylesheet as text", !/sasError\s*\{/.test(logTab.head), logTab);
+  // The tab name is what picks the mode (aceModeFor), and SAS Studio appends a
+  // " <n>" counter to it - "Program 1.log 1" must still resolve to saslog.
+  check("...in saslog mode", logTab.mode === "ace/mode/saslog", logTab);
+  // Editable like any other text viewer - F5 puts the log back anyway.
+  check("...and editable", !logTab.readOnly, logTab);
+
+  // Refresh (F5 / the viewer's own Refresh button, both via appDMS.onTextRefresh)
+  // re-reads the source tab's Log pane - here stood in for by a direct write to it,
+  // which is what a second run would leave behind.
+  const refreshed = await page.evaluate(async (runTab) => {
+    const tabs = window.appDMS.tabs;
+    const src = tabs.getAllTabObjects().find((t) => t.title === runTab);
+    src.editor.logAreaContentPane.set("content", "<pre>SSEXT REFRESH MARKER</pre>");
+    await new Promise((r) => setTimeout(r, 300));
+    window.__ssf.run("reloadCurrentFile");
+    await new Promise((r) => setTimeout(r, 500));
+    const tab = tabs.getFocusedTab();
+    const entry = window.__ssExt._textViewers.find((e) => e.tabHolder === tab.tab.tabHolder);
+    return { text: entry.adapter.getText(), stillFocused: tab.title };
+  }, runTabTitle);
+  check("F5 on the log tab re-reads the log from the tab it came from", /SSEXT REFRESH MARKER/.test(refreshed.text), refreshed);
+
+  await page.evaluate((lp) => window.__ssExt.toggle(lp), libPath);
+  await page.waitForTimeout(1000);
+
+  // Selecting a marked pane clears the mark - through the dijit container's
+  // selectChild, so it holds for a tab that existed before the patch was installed,
+  // for the pane-bar arrow keys and for a plain click alike.
+  const marks = await page.evaluate(async (runTab) => {
+    const tabs = window.appDMS.tabs;
+    tabs.selectTab(tabs.getAllTabObjects().find((t) => t.title === runTab));
+    await new Promise((r) => setTimeout(r, 600));
+    const ed = tabs.getFocusedTab().editor;
+    const marked = (p) => p.controlButton.domNode.classList.contains("ssf-pane-updated");
+    const before = { results: marked(ed.outputContentPane), data: marked(ed.dataContentPane) };
+    // Step to the Results pane with the hotkey action - one call at a time, since
+    // selectNextPane reads editorTab.selectedTab, which dijit only updates once
+    // its own transition has run.
+    for (let i = 0; i < 4 && ed.selectedTab !== ed.outputContentPane; i++) {
+      window.__ssf.run("selectNextPane");
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    // The pane chips have no stable dom id of their own - tag the one to click.
+    ed.dataContentPane.controlButton.domNode.setAttribute("data-ssext-probe", "data-chip");
+    return {
+      before,
+      reachedResults: ed.selectedTab === ed.outputContentPane,
+      afterResults: marked(ed.outputContentPane),
+    };
+  }, runTabTitle);
+  // ...and a plain mouse click on the chip, the path that used to work only
+  // sometimes (a dojo.connect'd onTabSelect captured at tab-construction time).
+  await page.click('[data-ssext-probe="data-chip"]');
+  await page.waitForTimeout(400);
+  const dataCleared = await page.evaluate(
+    () =>
+      !window.appDMS.tabs
+        .getFocusedTab()
+        .editor.dataContentPane.controlButton.domNode.classList.contains("ssf-pane-updated"),
+  );
+  check(
+    "selecting a marked pane clears its mark (hotkey and chip click)",
+    marks.before.results && marks.before.data && marks.reachedResults && !marks.afterResults && dataCleared,
+    { marks, dataCleared },
+  );
+
+  // Close the two tabs this block opened (by title - the session may have had tabs
+  // open before). Both hold unsaved content, so clear the dirty flag first,
+  // otherwise closing pops a save prompt.
+  await page.evaluate(async (runTab) => {
+    const tabs = window.appDMS.tabs;
+    for (const t of tabs.getAllTabObjects().filter((t) => t.title === runTab || t.title.startsWith(runTab + ".log"))) {
+      if (t.editor) t.editor.editorContentChanged = false;
+      tabs.closeTab(t);
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }, runTabTitle);
+  await page.waitForTimeout(500);
+
   const noSplitWarned = await page.evaluate(() => {
     window.__ssf.run("switchTabGroup");
     return document.body.innerText.includes("No tab group split");
