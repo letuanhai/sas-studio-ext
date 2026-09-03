@@ -1,2 +1,1 @@
 - lua lsp with sas module docs
-- status bar while running minimized is too bright to read text in darkmode

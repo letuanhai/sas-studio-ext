@@ -1816,19 +1816,29 @@ Add a prefix to the path for different option:
 
         // Amber tint on the status bar + a Cancel link wired to the same
         // callback the dialog's own Cancel button used (postBusyDialog's _cb).
+        // The tint is a class, styled by injectRunStyle()'s sheet - dijit's own
+        // .statusBar rule sets the background !important, and dark.css sets it
+        // again from inside its @layer, which even an inline !important loses
+        // to (for important declarations a layer outranks unlayered styles).
+        // Hence the sheet joins that same layer; see injectRunStyle().
+        injectRunStyle();
         const bar = document.getElementById("studio_status_bar");
-        // !important - dijit's .statusBar rule sets the background !important,
-        // so a plain inline style loses to it.
-        if (bar) bar.style.setProperty("background", "#ffe9a8", "important");
+        if (bar) bar.classList.add("ssf-run-bar");
         if (bar && cancelCb) {
           // Cancel floated to the right side of the bar, leaving SAS's own
-          // status text on the left untouched.
-          const link = document.createElement("a");
+          // status text on the left untouched. A span, not an <a>: dark.css
+          // colours links from a nested layer we can't outrank, which left
+          // this one mid-blue on amber.
+          const link = document.createElement("span");
           link.id = "ssf-run-cancel";
-          link.href = "#";
+          link.setAttribute("role", "button");
+          link.tabIndex = 0;
           link.textContent = "Cancel";
+          link.onkeydown = function (e) {
+            if (e.key === "Enter" || e.key === " ") link.onclick(e);
+          };
           link.style.cssText =
-            "float:right;margin-right:12px;color:#0b5cab;font-weight:bold;cursor:pointer;text-decoration:underline;";
+            "float:right;margin-right:12px;font-weight:bold;cursor:pointer;text-decoration:underline;";
           link.onclick = function (e) {
             e.preventDefault();
             cancelCb();
@@ -1858,7 +1868,7 @@ Add a prefix to the path for different option:
 
       function restoreStatusBar() {
         const bar = document.getElementById("studio_status_bar");
-        if (bar) bar.style.removeProperty("background");
+        if (bar) bar.classList.remove("ssf-run-bar");
         const link = document.getElementById("ssf-run-cancel");
         if (link) link.remove();
         if (bar) {
@@ -1867,18 +1877,38 @@ Add a prefix to the path for different option:
         }
       }
 
-      // Spinner-icon + amber-label animation for the running tab, injected once.
+      // Status-bar tint + spinner-icon/amber-label for the running tab, once.
+      // Everything lives in `@layer ssext-dark` - the layer src/dark.css uses.
+      // An important declaration inside a layer beats every unlayered one, our
+      // own stylesheet and inline styles included, so the only way to override
+      // dark.css is to join its layer, where plain specificity decides again
+      // (these selectors are more specific, and the sheet also comes later).
+      // Off dark mode the layer simply doesn't exist yet, which changes
+      // nothing: a layered important still outranks dijit's unlayered ones.
       function injectRunStyle() {
         if (document.getElementById("ssf-run-style")) return;
         const st = document.createElement("style");
         st.id = "ssf-run-style";
         st.textContent =
+          "@layer ssext-dark{" +
           "@keyframes ssf-spin{to{transform:rotate(360deg)}}" +
           ".dijitTab.ssf-running .dijitTabButtonIcon{background-image:none!important;position:relative}" +
           ".dijitTab.ssf-running .dijitTabButtonIcon::after{content:'';position:absolute;left:1px;top:1px;" +
           "width:12px;height:12px;box-sizing:border-box;border:2px solid #c8a000;border-top-color:transparent;" +
           "border-radius:50%;animation:ssf-spin .7s linear infinite}" +
-          ".dijitTab.ssf-running{background:#ffe9a8!important}";
+          // The amber is light in both modes, so the text on it has to be
+          // forced dark - dark mode leaves it near-white, unreadable on amber.
+          // Class repeated for specificity - the tab's dark background comes
+          // from a three-class rule in the same layer, which a plain
+          // `.dijitTab.ssf-running` would lose to (importance ties there, so
+          // specificity decides).
+          ".dijitTab.ssf-running.ssf-running.ssf-running," +
+          ".dijitTab.ssf-running.ssf-running.ssf-running *" +
+          "{background-color:#ffe9a8!important;color:#222!important}" +
+          "#studio_status_bar.ssf-run-bar{background:#ffe9a8!important}" +
+          "#studio_status_bar.ssf-run-bar,#studio_status_bar.ssf-run-bar *{color:#222!important}" +
+          "#studio_status_bar.ssf-run-bar #ssf-run-cancel{color:#0b5cab!important}" +
+          "}";
         document.head.appendChild(st);
       }
 
