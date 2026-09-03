@@ -1,6 +1,37 @@
 # Changelog
 
 
+## 0.20
+
+- Vim marks are visible: the letter shows in the gutter on the marked line, and
+  `:marks` lists them all. Ace's vim kept them entirely hidden until now;
+  `:delmarks` already worked and the gutter follows it.
+- New vim fold motions `zj` / `zk` / `[z` / `]z` move between and around folds.
+  Ace's vim only ever shipped the fold toggles, so folds could be opened and
+  closed but not navigated.
+- `showVimMappings` lists every vim key mapping — the ~190 built-ins and your
+  own vimrc's — in a searchable prompt, so you can find what a key does without
+  reading Ace's source. Bindable to a hotkey, or run it from the command palette.
+- The keyboard reaches SAS Studio's own widgets: `Alt+Shift+1/2/3` focus the tab
+  bar, the current tab's pane bar and the side-bar tree, from where the arrow
+  keys already navigate. Nothing in the app moved focus there before.
+- Split tab groups are keyboard-driven too: `Alt+,` switches groups,
+  `Alt+Shift+,` moves the focused tab across (creating or collapsing the split),
+  and `unsplitTabGroups` brings every tab back at once.
+- Fixed "Copy Path" disappearing from the tab menu the first time you split the
+  tab area, which then broke every later split and tab move.
+- Fold widgets now appear at both ends of a block, so a `data`/`proc` step can
+  be folded from its `run;` as well as from its opening line.
+- `.log` files opened as text get their own mode and fold each `%INCLUDE` block
+  between the matching `NOTE:` lines. They previously fell back to plain text.
+- The Results tab follows dark mode. SAS Studio inlines the run's ODS HTML into
+  the app with its own light palette, so the output stayed near-white on a dark
+  app. Graphs are PNGs and stay light.
+- Fixed macro completion inserting a doubled `%` — accepting `%LENGTH` over a
+  typed `%le` produced `%%LENGTH`.
+- The README explains how to run SurfingKeys alongside Ace's vim mode without it
+  swallowing `Esc` or undoing the focus-editor hotkey.
+
 ## 0.19
 
 - Reopening a closed tab now works for tabs closed with the tab's own X button,
