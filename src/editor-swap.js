@@ -755,6 +755,11 @@
     // those modes must already be registered before any editor is created.
     await loadScript(`${libPath}/mode-python.js`);
     await loadScript(`${libPath}/mode-lua.js`);
+    // ace/mode/saslog extends ace/mode/sas and ace's define() has no dynamic
+    // dependency loading, so both have to be registered up front (both are local
+    // extension resources, so this costs no network round trip).
+    await loadScript(`${srcAcePath}/mode-sas.js`);
+    await loadScript(`${srcAcePath}/mode-saslog.js`);
     // Note: the build's internal require/define are closure-local and it only
     // ever assigns its own namespace object, so window.require/window.define
     // (Dojo's AMD loader) and window.ace (SAS's) are all left alone. Its

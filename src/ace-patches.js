@@ -9,7 +9,8 @@
  *   - decorators.js  (d076a5bf, 96d537fd): theme-aware scrollbar cursor bar +
  *     selection-range bars in the scrollbar overview.
  *   - autocomplete.js + snippets.js (dc18672a): pass Esc through to vim mode.
- *   - ext/modelist.js (6a521be3): a SAS entry so the mode is listed.
+ *   - ext/modelist.js (6a521be3): a SAS entry so the mode is listed, plus the
+ *     "log" entry retargeted at our ace/mode/saslog.
  * The SAS mode/snippets themselves are separate files under src/ace/. The
  * fork's ext/statusbar.js changes are intentionally not reproduced — the
  * extension never loads that module.
@@ -177,6 +178,12 @@
     // once whichever file registers the module has loaded.
     var modelist = ace.require("ace/ext/modelist");
     pushSasMode(modelist);
+    // .log -> ace/mode/saslog (src/ace/mode-saslog.js). modelist's own "Log"
+    // entry points at ace/mode/log, which has no file in this build and 404s.
+    if (modelist.modesByName.log && modelist.modesByName.log.mode !== "ace/mode/saslog") {
+      modelist.modesByName.log.mode = "ace/mode/saslog";
+      modelist.modesByName.log.caption = "SAS Log";
+    }
   }
 
   function patchStatusbar(ace) {
