@@ -508,6 +508,7 @@
     loadNewAce,
     browse,
     commandPalette,
+    showVimMappings,
     applySnippets,
     applyAceConfig,
     AceEditorAdapter, // exposed mainly for test/debug (smoke.js probes config seeding directly)
@@ -1980,6 +1981,77 @@
   // (src-noconflict build) - that used to land in SAS's old library whenever
   // loadNewAce ran with the toggle inactive (browse/palette before activation),
   // which left vim itself working but :w/:q/:wq/:x and the vimrc silently gone.
+  // The "Show vim key mappings" action (SSF_TOOLS -> command palette / a
+  // rebindable hotkey): lists EVERY mapping - vim.js's ~190 built-ins plus the
+  // user's. ace's vim has no listing of its own; the one thing it does expose is
+  // the keymap array itself (exports.handler.defaultKeymap), which is the complete
+  // set, with Vim.map's unshifted user entries on top. Far too long for vim's
+  // notification box, so it opens in the same ace prompt the command palette uses -
+  // the filter input searches both the keys and what they do ("dd", "delete",
+  // "addCursorAbove").
+  //
+  // It is deliberately NOT wired to a `:map` ex-command: the ex dialog's close()
+  // ends with editor.focus(), so a prompt opened from there loses the focus again
+  // (deferring the open past the close didn't hold either).
+  const VIM_MODE_CHAR = { normal: "n", insert: "i", visual: "v", operatorPending: "o" };
+
+  // What an entry does, in vim.js's own terms: a keyToKey mapping's right-hand
+  // side, otherwise the operator/motion/action it dispatches (plus the ace command
+  // name for the `aceCommand` action, which is the only interesting actionArg).
+  function vimMappingTarget(m) {
+    if (m.toKeys) return m.toKeys;
+    const name = [m.operator, m.motion, m.action].filter(Boolean).join(" ") || m.type;
+    const aceCommand = m.actionArgs && m.actionArgs.name;
+    return aceCommand ? `${name} ${aceCommand}` : name;
+  }
+
+  function vimMappingEntries() {
+    // ponytail: the array ace exported when keybinding-vim.js loaded. Vim.mapclear()
+    // replaces the module's own reference with a fresh array, so after a :mapclear
+    // this lists stale entries - reload to resync.
+    const vim = ssExt.newLib.ace.require("ace/keyboard/vim");
+    const keymap = (vim && vim.handler && vim.handler.defaultKeymap) || [];
+    return keymap.map((m) => ({
+      value: `${String(m.keys).padEnd(14)}${vimMappingTarget(m)}`,
+      // No context means the mapping applies in every mode.
+      meta: VIM_MODE_CHAR[m.context] || "all",
+    }));
+  }
+
+  async function doShowVimMappings() {
+    if (!ssExt.libPath) {
+      console.error("[SS Ext] showVimMappings: no libPath known yet - can't load the Ace library");
+      return;
+    }
+    // loadNewAce awaits installVimExCommands, which is what loads keybinding-vim.js.
+    await loadNewAce(ssExt.libPath);
+    openVimMappingsPrompt(focusedAceEditor(), vimMappingEntries());
+  }
+
+  // Serialized through the same _pending chain as toggle()/browse()/commandPalette().
+  function showVimMappings() {
+    ssExt._pending = (ssExt._pending || Promise.resolve()).then(doShowVimMappings, doShowVimMappings);
+    return ssExt._pending;
+  }
+
+  function openVimMappingsPrompt(editor, entries) {
+    const FilteredList = ssExt.newLib.ace.require("ace/autocomplete").FilteredList;
+    ssExt.newLib.ace.require("ace/ext/prompt").prompt(editor || null, "", {
+      name: "vimMappings",
+      selection: [0, Number.MAX_VALUE],
+      onAccept: function () {}, // a listing: picking a row just closes the prompt
+      getPrefix: function (cmdLine) {
+        return cmdLine.getValue().substring(0, cmdLine.getCursorPosition().column);
+      },
+      getCompletions: function (cmdLine) {
+        // Clone like prompt.commands does - FilteredList mutates its input.
+        const cloned = JSON.parse(JSON.stringify(entries));
+        const filtered = new FilteredList(cloned).filterCompletions(cloned, this.getPrefix(cmdLine));
+        return filtered.length > 0 ? filtered : [{ value: "No matching mappings", error: 1 }];
+      },
+    });
+  }
+
   async function installVimExCommands() {
     if (ssExt._vimExInstalled) return;
     ssExt._vimExInstalled = true; // guard now so concurrent loads don't double-register

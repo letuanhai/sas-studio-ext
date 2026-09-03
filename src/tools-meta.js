@@ -199,6 +199,13 @@ Add a prefix to the path for different option:
       hotkey: { key: "t", altKey: true },
     },
     {
+      name: "showVimMappings",
+      kind: "action",
+      label: "Show vim key mappings",
+      title: "List every vim mapping (built-in and from the vim config) in a searchable prompt",
+      hotkey: null, // unbound by default; assignable in the options page
+    },
+    {
       name: "toggleEditor",
       kind: "action",
       label: "Toggle Ace editor",

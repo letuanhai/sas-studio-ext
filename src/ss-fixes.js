@@ -1096,6 +1096,11 @@ Add a prefix to the path for different option:
     browseTabs: {
       fn: () => window.__ssExt && window.__ssExt.browse && window.__ssExt.browse("tabs"),
     },
+    showVimMappings: {
+      // Lists every vim mapping (built-in + vimrc) in an ace prompt. Same no-arg
+      // pattern as commandPalette; it loads the ace lib itself if needed.
+      fn: () => window.__ssExt && window.__ssExt.showVimMappings && window.__ssExt.showVimMappings(),
+    },
     toggleEditor: {
       // Toggle the Ace editor replacement on/off (same as the popup's toggle
       // button). editor-swap.js is pre-injected with libPath seeded by sw.js on

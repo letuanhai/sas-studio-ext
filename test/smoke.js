@@ -1479,6 +1479,38 @@ function check(name, ok, detail) {
   });
   check("vimrc applies via applyAceConfig", vimrcApplied.applied && vimrcApplied.lastText === "imap jj <Esc>", vimrcApplied);
 
+  // (f) The "Show vim key mappings" action (an SSF_TOOLS entry, so it's a command
+  // palette row and a bindable hotkey) opens a prompt listing every mapping -
+  // vim.js's built-ins plus the user's (the vimrc's "imap jj <Esc>" from just
+  // above, which sorts first because Vim.map unshifts).
+  const mapListing = await page.evaluate(async () => {
+    window.__ssf.run("showVimMappings");
+    for (let i = 0; i < 40 && !document.querySelector(".ace_prompt_container"); i++)
+      await new Promise((r) => setTimeout(r, 50));
+    const prompt = document.querySelector(".ace_prompt_container");
+    const rows = [...document.querySelectorAll(".ace_autocomplete .ace_line")].map((n) => n.textContent);
+    const focused = !!(prompt && prompt.contains(document.activeElement));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
+    return {
+      opened: !!prompt,
+      focused,
+      rows,
+      inPalette: (window.SSF_TOOLS || []).some((t) => t.name === "showVimMappings" && t.kind === "action"),
+      keymapLength: window.__ssAce.require("ace/keyboard/vim").handler.defaultKeymap.length,
+    };
+  });
+  check("showVimMappings opens the mapping list", mapListing.opened, {
+    opened: mapListing.opened,
+    rowCount: mapListing.rows.length,
+  });
+  check("the mapping list takes the focus", mapListing.focused, mapListing);
+  check("showVimMappings is a command palette action", mapListing.inPalette, mapListing);
+  check(
+    "the mapping list has the user's mapping first, and the built-ins too",
+    /jj\s+<Esc>/.test(mapListing.rows[0] || "") && mapListing.keymapLength > 100,
+    { first: mapListing.rows[0], keymapLength: mapListing.keymapLength },
+  );
+
   // Clean up storage state so reruns are deterministic.
   await sw.evaluate(() => chrome.storage.local.remove("aceConfig"));
 
