@@ -76,6 +76,9 @@ var DEFAULT_ACE_CONFIG = {
     keyboardHandler: "ace/keyboard/vim",
     useSoftTabs: true,
     tabSize: 4,
+    // Fold widgets on both the opening AND the closing line of a block
+    // (ace's default "markbegin" only marks the opening one).
+    foldStyle: "markbeginend",
   },
   vimrc: "",
   // SAS language server (completions/hover/diagnostics via ace-linters + a web
