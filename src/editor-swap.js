@@ -512,6 +512,7 @@
     applySnippets,
     applyAceConfig,
     AceEditorAdapter, // exposed mainly for test/debug (smoke.js probes config seeding directly)
+    _foldNav: { nextFoldStart, prevFoldEnd, enclosingFold }, // pure, covered by test/units.js
   };
   window.__ssExt = ssExt;
 
@@ -2052,6 +2053,75 @@
     });
   }
 
+  // -- Vim fold navigation ---------------------------------------------------------
+  // ace's vim ships zc/zo/za/zf/zd (fold toggling) but nothing to move BETWEEN folds,
+  // and ace has no command for it either - the fold widgets the gutter renders from
+  // are the only thing to go on. These three walk them; installVimFoldMotions() maps
+  // them onto vim's zj / zk / [z / ]z.
+  //
+  // ponytail: a linear scan per keypress, uncached - session.getFoldWidget is bound
+  // straight to the fold mode, so every row re-runs its regexes. Memoize per session
+  // if it ever shows up on a huge log.
+
+  // zj: the start row of the next fold below `row`, or null.
+  function nextFoldStart(session, row) {
+    for (let r = row + 1; r < session.getLength(); r++) {
+      if (session.getFoldWidget(r) === "start") return r;
+    }
+    return null;
+  }
+
+  // zk: the end row of the previous fold above `row`, or null. Reads the "end"
+  // widgets, i.e. needs foldStyle "markbeginend" (DEFAULT_ACE_CONFIG's) - with ace's
+  // own "markbegin" default no row ever reports one and zk finds nothing.
+  function prevFoldEnd(session, row) {
+    for (let r = row - 1; r >= 0; r--) {
+      if (session.getFoldWidget(r) === "end") return r;
+    }
+    return null;
+  }
+
+  // [z / ]z: the innermost fold range containing `row`, or null. Walks up to the
+  // nearest "start" whose range still reaches `row`; sibling folds that opened and
+  // closed on the way up are skipped.
+  function enclosingFold(session, row) {
+    for (let r = row; r >= 0; r--) {
+      if (session.getFoldWidget(r) !== "start") continue;
+      const range = session.getFoldWidgetRange(r);
+      if (range && range.end.row >= row) return range;
+    }
+    return null;
+  }
+
+  function installVimFoldMotions(vim) {
+    const Vim = vim.Vim;
+    if (Vim.$ssExtFoldMotions) return;
+    Vim.$ssExtFoldMotions = true;
+    const Pos = vim.CodeMirror.Pos;
+    // No `context`, so they work in visual and operator-pending mode too (d]z).
+    // mapCommand unshifts onto defaultKeymap, so [z/]z win over the generic
+    // `[<character>`/`]<character>` moveToSymbol motions already in there.
+    const define = (name, keys, pickRow) => {
+      Vim.defineMotion(name, (cm, head) => {
+        const session = cm.ace && cm.ace.session;
+        if (!session || !session.getFoldWidget) return head;
+        const row = pickRow(session, head.line);
+        return row == null ? head : new Pos(row, 0);
+      });
+      Vim.mapCommand(keys, "motion", name, {});
+    };
+    define("ssExtNextFoldStart", "zj", nextFoldStart);
+    define("ssExtPrevFoldEnd", "zk", prevFoldEnd);
+    define("ssExtFoldStart", "[z", (s, r) => {
+      const fold = enclosingFold(s, r);
+      return fold && fold.start.row;
+    });
+    define("ssExtFoldEnd", "]z", (s, r) => {
+      const fold = enclosingFold(s, r);
+      return fold && fold.end.row;
+    });
+  }
+
   async function installVimExCommands() {
     if (ssExt._vimExInstalled) return;
     ssExt._vimExInstalled = true; // guard now so concurrent loads don't double-register
@@ -2088,6 +2158,13 @@
         }
         if (window.__ssf && window.__ssf.run) window.__ssf.run("runCurrentProgram");
       });
+
+      // Own catch: a fold-motion failure must not take the ex-commands down with it.
+      try {
+        installVimFoldMotions(vim);
+      } catch (e) {
+        console.warn("[SS Ext] vim fold motions zj/zk/[z/]z not installed:", e);
+      }
 
       const vimrcText = (ssExt.aceConfig && ssExt.aceConfig.vimrc) || "";
       vimrcText.split("\n").forEach((line) => applyVimrcLine(Vim, line));

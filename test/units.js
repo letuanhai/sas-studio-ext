@@ -118,3 +118,37 @@ const truncated = { getLine: (r) => log[r], getLength: () => 5 };
 assert.equal(foldMode.getFoldWidgetRange(truncated, "markbeginend", 1), undefined);
 
 console.log("PASS  saslog %INCLUDE folding");
+// ---------------------------------------------------------------------------
+// src/editor-swap.js - the vim zj/zk/[z/]z row pickers. The file is a MAIN-world
+// IIFE, but nothing at load time touches more than `window`, so it exposes its
+// three pure helpers on __ssExt for exactly this.
+require(path.join(__dirname, "..", "src", "editor-swap.js"));
+const { nextFoldStart, prevFoldEnd, enclosingFold } = global.window.__ssExt._foldNav;
+
+// Rows 1-8 = an outer fold, 2-4 and 6-7 = two siblings nested inside it.
+const folds = { 1: [1, 8], 2: [2, 4], 6: [6, 7] };
+const ends = { 4: true, 7: true, 8: true };
+const doc = {
+  getLength: () => 10,
+  getFoldWidget: (r) => (folds[r] ? "start" : ends[r] ? "end" : ""),
+  getFoldWidgetRange: (r) =>
+    folds[r] && { start: { row: folds[r][0], column: 0 }, end: { row: folds[r][1], column: 0 } },
+};
+
+assert.equal(nextFoldStart(doc, 0), 1);
+assert.equal(nextFoldStart(doc, 1), 2); // a nested fold below counts
+assert.equal(nextFoldStart(doc, 4), 6);
+assert.equal(nextFoldStart(doc, 6), null); // nothing below the last fold
+assert.equal(prevFoldEnd(doc, 9), 8);
+assert.equal(prevFoldEnd(doc, 8), 7);
+assert.equal(prevFoldEnd(doc, 4), null); // still inside the outer fold, none closed yet
+// The innermost enclosing fold wins, and a sibling that closed before the cursor
+// (2-4, seen while walking up from row 5) must not be mistaken for it.
+assert.deepEqual(enclosingFold(doc, 3).start.row, 2);
+assert.deepEqual(enclosingFold(doc, 5).start.row, 1);
+assert.deepEqual(enclosingFold(doc, 5).end.row, 8);
+assert.equal(enclosingFold(doc, 1).start.row, 1); // on the start row: that fold, not the outer one
+assert.equal(enclosingFold(doc, 0), null);
+assert.equal(enclosingFold(doc, 9), null);
+
+console.log("PASS  vim fold motions");

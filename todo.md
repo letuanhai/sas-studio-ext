@@ -3,4 +3,5 @@
 - ~~vim multi-cursor keybinding~~ nothing to do: ace's vim keymap already binds
   Ctrl+Alt+K / Ctrl+Alt+J (add cursor above/below) and Ctrl+Alt+Shift+K/J (skip current)
 - other extensions take over the hotkeys, especially Esc got stolen by SurfingKeys
-- add vim mode mappings to navigate folds: zj zk [z ]z
+- ~~add vim mode mappings to navigate folds: zj zk [z ]z~~ done: `installVimFoldMotions()` in
+  `src/editor-swap.js`, row pickers covered by `test/units.js`
