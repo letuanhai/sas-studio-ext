@@ -2313,8 +2313,7 @@ function check(name, ok, detail) {
       afterResults: marked(ed.outputContentPane),
     };
   }, runTabTitle);
-  // ...and a plain mouse click on the chip, the path that used to work only
-  // sometimes (a dojo.connect'd onTabSelect captured at tab-construction time).
+  // ...and a plain mouse click on the chip.
   await page.click('[data-ssext-probe="data-chip"]');
   await page.waitForTimeout(400);
   const dataCleared = await page.evaluate(
@@ -2328,6 +2327,60 @@ function check(name, ok, detail) {
     marks.before.results && marks.before.data && marks.reachedResults && !marks.afterResults && dataCleared,
     { marks, dataCleared },
   );
+
+  // The pre-existing-tab case, which every tab in this session is too young to
+  // be: DMSEditor's constructor dojo.connect()s the pane container's selectChild,
+  // and dojo/aspect answers that with an own `selectChild` on the container whose
+  // around-advice holds the PROTOTYPE FUNCTION AS CAPTURED THEN. A tab built
+  // before our patch (the blank editor at startup, anything restored from the
+  // last session) therefore selects panes through the pristine prototype for the
+  // rest of the page's life. Calling it directly is exactly that path.
+  const staleClear = await page.evaluate(async (runTab) => {
+    const tabs = window.appDMS.tabs;
+    const ed = tabs.getAllTabObjects().find((t) => t.title === runTab).editor;
+    const chip = ed.outputContentPane.controlButton.domNode;
+    const container = ed.outputContentPane.getParent();
+    container.selectChild(ed.editContentPane);
+    await new Promise((r) => setTimeout(r, 500));
+    chip.classList.add("ssf-pane-updated");
+    const pristine = window.require("dijit/layout/StackContainer").prototype.selectChild;
+    pristine.call(container, ed.outputContentPane);
+    await new Promise((r) => setTimeout(r, 500));
+    const cleared = !chip.classList.contains("ssf-pane-updated");
+    chip.classList.remove("ssf-pane-updated");
+    return { cleared, ownSelectChild: Object.prototype.hasOwnProperty.call(container, "selectChild") };
+  }, runTabTitle);
+  check(
+    "a pane selected through the pristine prototype selectChild still clears its mark",
+    staleClear.cleared && staleClear.ownSelectChild,
+    staleClear,
+  );
+
+  // The mark that could never be cleared: with the panes SPLIT, one pane per strip
+  // is on screen, but DMSEditor.selectedTab is a single value - so a pane visible
+  // in a side strip used to be outlined anyway, and clearing hangs off selectChild,
+  // which you never call on a pane you can already see. Nothing is marked here.
+  const splitPane = await page.evaluate(async () => {
+    const ed = window.appDMS.tabs.getFocusedTab().editor;
+    // Results is the selected pane after the click above - move it out to its own strip.
+    window.__ssf.run("movePaneToOtherGroup");
+    await new Promise((r) => setTimeout(r, 1200));
+    window.__ssf.run("focusCodeEditor");
+    await new Promise((r) => setTimeout(r, 400));
+    return {
+      resultsInOwnStrip: ed.outputContentPane.getParent().selectedChildWidget === ed.outputContentPane,
+      selected: ed.selectedTab && ed.selectedTab.type,
+    };
+  });
+  await runProgram("data work.ssext_probe2; set sashelp.class; run; proc print data=work.ssext_probe2(obs=1); run;");
+  const afterSplitRun = await paneState();
+  check(
+    "a run never outlines a pane a split layout keeps on screen (Output data still is)",
+    splitPane.resultsInOwnStrip && splitPane.selected !== "output" && !afterSplitRun.results && afterSplitRun.data,
+    { splitPane, afterSplitRun },
+  );
+  await page.evaluate(() => window.__ssf.run("resetLayoutCurrentTab"));
+  await page.waitForTimeout(1500);
 
   // Close the two tabs this block opened (by title - the session may have had tabs
   // open before). Both hold unsaved content, so clear the dirty flag first,

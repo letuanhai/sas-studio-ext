@@ -314,14 +314,27 @@
     return (pane && pane.controlButton && pane.controlButton.domNode) || null;
   }
 
+  // Is this pane the one its OWN strip is showing? Not the same question as
+  // `pane === editorTab.selectedTab`: selectedTab is a single value, but a split
+  // pane layout has one visible pane PER strip, so a pane sitting in the right or
+  // bottom strip is on screen the whole time while selectedTab names something in
+  // the main strip. Marking it then left an outline that nothing could clear -
+  // clearing hangs off selectChild, and you never select a pane you can already
+  // see. Its own container's selectedChildWidget is the question actually being
+  // asked, and it is right in the unsplit case too.
+  function paneVisible(pane) {
+    const c = pane && pane.getParent && pane.getParent();
+    return !!c && c.selectedChildWidget === pane;
+  }
+
   // "This pane has new content": blink the chip's border once, then leave it up
   // until the pane is selected. Re-running the animation on a chip that already
   // has the border blinks it again (a second run before you looked at the first),
   // which is exactly what the Web Animations API does for free - no class dance,
   // no forced reflow. Skipped when SAS Studio is allowed to just take you there
   // ("app"), and when you are already looking at the pane.
-  function markPaneUpdated(editorTab, pane) {
-    if (runFocusMode() === "app" || !pane || pane === editorTab.selectedTab) return;
+  function markPaneUpdated(pane) {
+    if (runFocusMode() === "app" || !pane || paneVisible(pane)) return;
     const node = paneChip(pane);
     if (!node) return;
     if (!document.getElementById("ssf-pane-updated-style")) {
@@ -2097,7 +2110,7 @@ Add a prefix to the path for different option:
       DMSEditor.prototype.setOutputStates = function (noOutput) {
         const r = o_setOutputStates.apply(this, arguments);
         // SAS's own test, loose == included: false and "" both mean "has output".
-        if (noOutput == null || noOutput == "") markPaneUpdated(this, this.outputContentPane);
+        if (noOutput == null || noOutput == "") markPaneUpdated(this.outputContentPane);
         else paneChip(this.outputContentPane)?.classList.remove("ssf-pane-updated");
         return r;
       };
@@ -2105,7 +2118,7 @@ Add a prefix to the path for different option:
       const o_createDataTab = DMSEditor.prototype.createDataTab;
       DMSEditor.prototype.createDataTab = function () {
         const r = o_createDataTab.apply(this, arguments);
-        markPaneUpdated(this, this.dataContentPane);
+        markPaneUpdated(this.dataContentPane);
         return r;
       };
 
@@ -2136,19 +2149,28 @@ Add a prefix to the path for different option:
         return o_submitComplete.apply(this, arguments);
       };
 
-      // Clearing the mark hangs off the dijit container's selectChild, not
-      // DMSEditor.onTabSelect: SAS connects that one with dojo.connect(...,
-      // e.hitch(this, this.onTabSelect)), which resolves the method ONCE at tab
-      // construction, so a prototype wrap installed later never runs for tabs
-      // that already existed - the mark then never cleared for them, whichever
-      // way the pane was selected. selectChild is the one call every path (chip
-      // click, pane-bar arrow keys, our own actions, SAS's own code) goes
-      // through, for every container, always.
+      // Clearing the mark hangs off StackContainer._transition, and it has to:
+      // neither onTabSelect nor selectChild can carry it. DMSEditor's
+      // constructor does dojo.connect(sasSuiteTabContainer, "selectChild", ...)
+      // (DMSEditor.js:248, and again for rightTabs/bottomTabs), and dojo/aspect
+      // implements that by writing an OWN `selectChild` onto the container whose
+      // around-advice holds StackContainer.prototype.selectChild as captured at
+      // that moment. So for every tab constructed before our patch is installed
+      // - the blank editor the app opens at startup, and every tab restored from
+      // the last session - the container calls the pristine prototype function
+      // and a prototype wrap on selectChild is simply never reached. (Wrapping
+      // onTabSelect fails for the same reason, one level down.)
+      // _transition is the one thing on that path SAS never connects to, and the
+      // pristine selectChild reaches it as `this._transition(...)`, i.e. through
+      // the prototype, at call time - so the wrap holds for old and new tabs
+      // alike, and for every entry point (chip click, pane-bar arrow keys, our
+      // own actions, SAS's own code). It only runs when the selection actually
+      // changes, which is the only case a mark can be showing anyway.
       const StackContainer = window.require("dijit/layout/StackContainer");
-      const o_selectChild = StackContainer.prototype.selectChild;
-      StackContainer.prototype.selectChild = function (page) {
-        paneChip(page)?.classList.remove("ssf-pane-updated");
-        return o_selectChild.apply(this, arguments);
+      const o_transition = StackContainer.prototype._transition;
+      StackContainer.prototype._transition = function (newPage) {
+        paneChip(newPage)?.classList.remove("ssf-pane-updated");
+        return o_transition.apply(this, arguments);
       };
     },
 
