@@ -66,6 +66,7 @@ function mergeAceConfig(stored) {
     vimrc: typeof stored.vimrc === "string" ? stored.vimrc : DEFAULT_ACE_CONFIG.vimrc,
     lsp: typeof stored.lsp === "boolean" ? stored.lsp : DEFAULT_ACE_CONFIG.lsp,
     lspMaxLines: typeof stored.lspMaxLines === "number" ? stored.lspMaxLines : DEFAULT_ACE_CONFIG.lspMaxLines,
+    luaLsp: typeof stored.luaLsp === "boolean" ? stored.luaLsp : DEFAULT_ACE_CONFIG.luaLsp,
   };
 }
 

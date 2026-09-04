@@ -42,6 +42,8 @@
     {
       "resources": [
         "lib/*.js",
+        "lib/*.wasm",
+        "src/emmylua-worker.js",
         "src/ace/*.js",
         "src/dark.css"
       ],

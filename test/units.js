@@ -415,3 +415,147 @@ assert.deepEqual(mapped, [["gn", "action", "aceCommand", { name: "gotoNextDiff" 
 
 console.log("PASS  vimrc alias shadowing (space as leader)");
 console.log("PASS  vimrc <Cmd> maps a key to an ace command");
+
+// ---------------------------------------------------------------------------
+// src/editor-swap.js - which rows of a SAS program are Lua. The document sent
+// to the Lua language server is the file with every other line blanked, so
+// getting these rows right is what keeps LSP positions equal to ace's.
+const { luaRanges, inLuaRange } = global.window.__ssExt._lua;
+
+const prog = [
+  "data work.a;", //                0
+  "  set sashelp.class;", //        1
+  "run;", //                        2
+  "", //                            3
+  "proc lua;", //                   4
+  "submit;", //                     5
+  "  local s = 'hi'", //            6
+  "  print(s)", //                  7
+  "endsubmit;", //                  8
+  "run;", //                        9
+  "", //                            10
+  "proc lua restart; submit;", //   11  (both fences on one line)
+  "  print('again')", //            12
+  "endsubmit; run;", //             13
+];
+assert.deepEqual(luaRanges(prog), [
+  [6, 7],
+  [12, 12],
+]);
+assert.equal(inLuaRange(luaRanges(prog), 7), true);
+assert.equal(inLuaRange(luaRanges(prog), 5), false); // the submit; fence is SAS
+assert.equal(inLuaRange(luaRanges(prog), 8), false); // so is endsubmit;
+assert.equal(inLuaRange(luaRanges(prog), 1), false);
+
+// PROC LUA that ends without submitting, and a plain submit; outside PROC LUA
+// (PROC PYTHON uses the same fence) must not open a Lua region.
+assert.deepEqual(luaRanges(["proc lua;", "run;", "proc python;", "submit;", "x = 1", "endsubmit;"]), []);
+// An unterminated block runs to the end of the file rather than being dropped.
+assert.deepEqual(luaRanges(["proc lua;", "submit;", "print(1)"]), [[2, 2]]);
+
+console.log("PASS  proc lua block ranges");
+
+// ---------------------------------------------------------------------------
+// src/emmylua-worker.js - message ordering into the Lua language server. A
+// client may send a document's text as a didChange BEFORE its own didOpen (that
+// is what ace-linters does when an editor's content lands between registering
+// the session and the connection coming up), and the didOpen then carries the
+// empty snapshot it took at registration. Left alone, the server ends up with
+// an empty file and reports nothing until the next edit. The worker folds the
+// held change's text into the didOpen instead.
+//
+// The wasm module is replaced by a stub that just records what it is handed, so
+// this stays a pure-logic check.
+const vm = require("vm");
+const fs = require("fs");
+
+function runWorker() {
+  const sent = [];
+  const heap = new ArrayBuffer(1 << 16);
+  let next = 8;
+  const exports = {
+    memory: { buffer: heap },
+    ela_alloc: (len) => {
+      const ptr = next;
+      next += len + 8;
+      return ptr;
+    },
+    ela_push: (ptr, len) =>
+      sent.push(JSON.parse(Buffer.from(new Uint8Array(heap, ptr, len)).toString("utf8"))),
+    ela_start: () => {},
+    ela_pump: () => {},
+    ela_take: () => 0,
+  };
+  const sandbox = {
+    console: { log() {}, warn() {}, error() {} },
+    crypto: { getRandomValues: (a) => a },
+    TextEncoder,
+    TextDecoder,
+    URL,
+    setInterval: () => 0,
+    setTimeout,
+    fetch: async () => ({ arrayBuffer: async () => new ArrayBuffer(0) }),
+    WebAssembly: {
+      compileStreaming: () => Promise.reject(new Error("no streaming")),
+      compile: async () => ({}),
+      instantiate: async () => ({ exports }),
+    },
+  };
+  sandbox.self = sandbox;
+  sandbox.self.__ssExtEmmyLuaWasm = "file:///stub.wasm";
+  sandbox.self.postMessage = () => {};
+  vm.createContext(sandbox);
+  vm.runInContext(
+    fs.readFileSync(path.join(__dirname, "..", "src", "emmylua-worker.js"), "utf8"),
+    sandbox,
+    { filename: "emmylua-worker.js" },
+  );
+  return { sandbox, sent };
+}
+
+(async () => {
+  const { sandbox, sent } = runWorker();
+  const post = (m) => sandbox.self.onmessage({ data: m });
+  const uri = "file:///session1.lua";
+  await new Promise((r) => setTimeout(r, 20)); // let the stub "wasm" resolve
+
+  post({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  // The text arrives as a change before the document was ever opened...
+  post({
+    jsonrpc: "2.0",
+    method: "textDocument/didChange",
+    params: { textDocument: { uri, version: 1 }, contentChanges: [{ text: "print(1)\n" }] },
+  });
+  // ...and the open that follows carries the stale (empty) snapshot.
+  post({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri, languageId: "lua", version: 1, text: "" } },
+  });
+  assert.deepEqual(
+    sent.map((m) => m.method),
+    ["initialize", "textDocument/didOpen"],
+    "the early change must not reach the server on its own",
+  );
+  assert.equal(sent[1].params.textDocument.text, "print(1)\n", "didOpen carries the newer text");
+
+  // Once open, changes pass straight through, untouched.
+  post({
+    jsonrpc: "2.0",
+    method: "textDocument/didChange",
+    params: { textDocument: { uri, version: 2 }, contentChanges: [{ text: "print(2)\n" }] },
+  });
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].params.contentChanges[0].text, "print(2)\n");
+
+  // A reopened document starts over (its held state was dropped on close).
+  post({ jsonrpc: "2.0", method: "textDocument/didClose", params: { textDocument: { uri } } });
+  post({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri, languageId: "lua", version: 3, text: "print(3)\n" } },
+  });
+  assert.equal(sent[4].params.textDocument.text, "print(3)\n");
+
+  console.log("PASS  lua worker message ordering");
+})();

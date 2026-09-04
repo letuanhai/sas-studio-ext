@@ -13,6 +13,8 @@
 #                    sassoftware/vscode-sas-extension with the embedded
 #                    Pyright (Python LSP, ~6 MB) stripped via
 #                    tools/remove-pyright.patch
+#   lib/emmylua-lsp/ Lua language server for PROC LUA blocks: emmylua-analyzer-
+#                    rust built for wasm32-wasip1 via tools/emmylua-wasm.patch
 #
 # The ace-linters copy is byte-identical to its tarball bar one blanked-out
 # unpkg URL, and the ace build bar two dropped snippet files - both are MV3
@@ -21,7 +23,10 @@
 # while lib/<name>/.version already records the version being asked for: ace
 # takes a couple of minutes, the LSP (npm ci + two webpack builds) many.
 #
-# Requires: npm, git, node >= 18, network.
+# Requires: npm, git, node >= 18, network - plus, for lib/emmylua-lsp only, a
+# rust toolchain with the wasm32-wasip1 target (rustup target add wasm32-wasip1).
+# Without cargo that one step is skipped with a warning; everything else, and
+# the extension itself, works without it (the Lua completions just don't).
 # Usage: ./tools/build_lib.sh     (tools/package.sh runs it automatically if lib/ is incomplete)
 #   BUILD_DIR=<dir> ./tools/build_lib.sh   # override the LSP clone/build location
 set -e
@@ -33,6 +38,8 @@ ACE_NAMESPACE=__ssAce
 ACE_LINTERS_VERSION=2.2.0
 SAS_LSP_VERSION=v1.20.0 # release tag of sassoftware/vscode-sas-extension
 SAS_LSP_REPO=https://github.com/sassoftware/vscode-sas-extension
+EMMYLUA_VERSION=0.25.1 # release tag of EmmyLuaLs/emmylua-analyzer-rust
+EMMYLUA_REPO=https://github.com/EmmyLuaLs/emmylua-analyzer-rust
 
 ROOT=$PWD
 TMP=$(mktemp -d)
@@ -163,4 +170,45 @@ else
   echo "$SAS_LSP_VERSION" > lib/sas-lsp/.version
 fi
 
-echo "== Done: ace@$ACE_VERSION ace-linters@$ACE_LINTERS_VERSION sas-lsp@$SAS_LSP_VERSION"
+# -- lib/emmylua-lsp ----------------------------------------------------------
+#
+# The Lua language server for PROC LUA submit;...endsubmit; blocks, compiled to
+# WebAssembly. Upstream targets a normal OS process (stdio, threads, a real
+# filesystem); tools/emmylua-wasm.patch is ~95 lines that take that away:
+# tokio's feature set narrowed to what wasm supports, mimalloc and the
+# spawn-an-external-formatter path made non-wasm, the receiver pumped
+# cooperatively instead of on a blocking thread, and a five-call C ABI
+# (ela_start/alloc/push/pump/take, in the added crates/emmylua_ls/src/wasm.rs)
+# in place of the stdio server loop. The analyzer itself is untouched, and its
+# Lua stdlib metadata is already compiled in (include_dir!), so the module needs
+# no files at runtime - which is why src/emmylua-worker.js can get away with a
+# stub WASI shim. wasip1 rather than wasm32-unknown-unknown: that one
+# additionally needs a forked emmy_lsp_types (url::Url::from_file_path is gated
+# off on it), and the imports a browser has to fill are the same handful either way.
+if [ -f lib/emmylua-lsp/emmylua_ls.wasm ] && [ "$(cat lib/emmylua-lsp/.version 2>/dev/null)" = "$EMMYLUA_VERSION" ]; then
+  echo "== lib/emmylua-lsp already at $EMMYLUA_VERSION - skipping Lua LSP build"
+elif ! command -v cargo >/dev/null 2>&1; then
+  echo "== WARNING: cargo not found - skipping lib/emmylua-lsp (Lua completions in"
+  echo "   PROC LUA blocks will be unavailable; everything else is unaffected)"
+else
+  BUILD_DIR=${BUILD_DIR:-$ROOT/.lsp-build}
+  SRC="$BUILD_DIR/emmylua-analyzer-rust"
+
+  echo "== Building Lua language server $EMMYLUA_VERSION for wasm32-wasip1"
+  rustup target add wasm32-wasip1 2>/dev/null || true
+  mkdir -p "$BUILD_DIR"
+  [ -d "$SRC/.git" ] || git clone "$EMMYLUA_REPO" "$SRC"
+  git -C "$SRC" fetch -q origin tag "$EMMYLUA_VERSION" 2>/dev/null || git -C "$SRC" fetch -q origin
+  git -C "$SRC" checkout -qf "$EMMYLUA_VERSION"
+  git -C "$SRC" reset -q --hard "$EMMYLUA_VERSION" # drops the previous patch
+  git -C "$SRC" clean -qfd crates # ... and the file it adds
+  git -C "$SRC" apply "$ROOT/tools/emmylua-wasm.patch"
+  (cd "$SRC" && cargo build --release --target wasm32-wasip1 -p emmylua_ls --lib)
+
+  mkdir -p lib/emmylua-lsp
+  cp "$SRC/target/wasm32-wasip1/release/emmylua_ls.wasm" lib/emmylua-lsp/emmylua_ls.wasm
+  cp "$SRC/LICENSE" lib/emmylua-lsp/LICENSE-emmylua
+  echo "$EMMYLUA_VERSION" > lib/emmylua-lsp/.version
+fi
+
+echo "== Done: ace@$ACE_VERSION ace-linters@$ACE_LINTERS_VERSION sas-lsp@$SAS_LSP_VERSION emmylua@$EMMYLUA_VERSION"

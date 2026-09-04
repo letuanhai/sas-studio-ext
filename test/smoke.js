@@ -1228,6 +1228,179 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     popupWidth,
   );
 
+  // -- Lua language server inside PROC LUA submit blocks ---------------------------
+  // The emmylua server (wasm, its own worker - see src/emmylua-worker.js) is fed the
+  // SAS file with every non-Lua line blanked out, so an LSP position is an ace
+  // position unchanged. Checks both halves of that: real Lua completions inside the
+  // block, and silence outside it (where SAS, not Lua, is the language).
+  const luaState = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_lua";
+    div.style.cssText = "position:fixed;left:-9999px;top:0;width:600px;height:300px";
+    document.body.appendChild(div);
+    const program = [
+      "data work.a;",
+      "  set sashelp.class;",
+      "run;",
+      "",
+      "proc lua;",
+      "submit;",
+      '  local s = "abc"',
+      "  print(s:up",
+      "endsubmit;",
+      "run;",
+    ].join("\n");
+    const adapter = new window.__ssExt.AceEditorAdapter(div.id, program, "sas");
+    const editor = adapter.aceEditor;
+    const completer = (editor.completers || []).find((c) => c.id === "ssextLua");
+    const complete = (row, column, prefix) =>
+      new Promise((res) =>
+        completer.getCompletions(editor, editor.session, { row, column }, prefix, (e, r) =>
+          res(r || []),
+        ),
+      );
+
+    // First call starts the worker (a ~12 MB wasm fetch + server init), so retry
+    // until it answers rather than racing it.
+    let inside = [];
+    for (let i = 0; i < 40; i++) {
+      inside = await complete(7, 12, "up");
+      if (inside.length) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const outside = await complete(1, 20, "");
+    const started = !!window.__ssExt._luaLspClient;
+    adapter.dispose();
+    div.remove();
+    return {
+      started,
+      captions: inside.map((i) => i.caption),
+      metas: inside.map((i) => i.meta),
+      scores: inside.map((i) => i.score),
+      outside: outside.length,
+    };
+  });
+  check(
+    luaState.started
+      ? "Lua LSP: string methods are offered inside a PROC LUA submit block"
+      : "Lua LSP: string methods offered inside PROC LUA (skipped: lib/emmylua-lsp not built)",
+    !luaState.started ||
+      (luaState.captions.includes("upper") &&
+        luaState.metas.every((m) => m === "function") &&
+        luaState.scores.every((s) => s === 2000)),
+    luaState,
+  );
+  check(
+    "Lua LSP: nothing is offered outside the submit block",
+    luaState.outside === 0,
+    luaState,
+  );
+
+  // A .lua file opened as text is one language end to end, so it goes through
+  // ace-linters against the same server (ensureLuaLinters) instead of the
+  // blanked-document client - which is what buys diagnostics/hover/format there
+  // for free. Checks the mode mapping, the registration hygiene, LSP-ranked
+  // completions, and that the server's pushed diagnostics reach the session.
+  const luaFileState = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_lua_file";
+    div.style.cssText = "position:fixed;left:0;top:0;width:800px;height:300px;z-index:99999";
+    document.body.appendChild(div);
+    const modeForName = window.__ssAce.require("ace/ext/modelist").getModeForPath("mvar.lua").mode;
+    const adapter = new window.__ssExt.AceEditorAdapter(div.id, "", modeForName);
+    const ed = adapter.aceEditor;
+    for (let i = 0; i < 60; i++) {
+      if (adapter._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    ed.setValue('local s = "abc"\nprint(s:up\nlocal y = undefined_global_here\n', -1);
+    ed.focus();
+    ed.moveCursorTo(1, 10);
+    await new Promise((r) => setTimeout(r, 1500));
+    ed.execCommand("startAutocomplete");
+    let top = [];
+    let captions = [];
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const c = ed.completer && ed.completer.completions;
+      if (c && c.filtered && c.filtered.length) {
+        top = c.filtered.slice(0, 5).map((x) => x.completerId);
+        captions = c.filtered.slice(0, 20).map((x) => x.caption || x.value);
+        break;
+      }
+    }
+    // Diagnostics are pushed by the server and applied by ace-linters as ace
+    // annotations - nothing of ours is involved.
+    let annotations = [];
+    for (let i = 0; i < 40; i++) {
+      annotations = ed.session.getAnnotations() || [];
+      if (annotations.length) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const hasFormatCommand = !!ed.commands.commands.formatDocument;
+    // Formatting for real: messy input in, the server's edits applied back.
+    ed.setValue("local   x=1\nif x    then\nprint(  x )\nend\n", -1);
+    await new Promise((r) => setTimeout(r, 1200));
+    const beforeFormat = ed.getValue();
+    ed.execCommand("formatDocument");
+    let afterFormat = beforeFormat;
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      afterFormat = ed.getValue();
+      if (afterFormat !== beforeFormat) break;
+    }
+    const leaked = (window.__ssExt._luaLintersProvider && ed.completers.filter((c) => c.id === "lspCompleters").length) || 0;
+    adapter.dispose();
+    div.remove();
+    return {
+      modeForName,
+      registered: adapter._lspRegistered,
+      started: !!window.__ssExt._luaLintersProvider,
+      top,
+      captions,
+      annotations: annotations.map((a) => a.text),
+      hasFormatCommand,
+      beforeFormat,
+      afterFormat,
+      leaked,
+    };
+  });
+  check(
+    luaFileState.started
+      ? "Lua LSP: a .lua file registers with ace-linters and completes through it"
+      : "Lua LSP: .lua via ace-linters (skipped: lib/emmylua-lsp not built)",
+    !luaFileState.started ||
+      (luaFileState.modeForName === "ace/mode/lua" &&
+        luaFileState.registered === true &&
+        luaFileState.captions.includes("upper") &&
+        // The server answers a short list here, so only the head of the popup is
+        // LSP - what matters is that it outranks ace's own completers, and that
+        // this editor carries exactly one (its own) ace-linters completer.
+        luaFileState.top[0] === "lspCompleters" &&
+        luaFileState.leaked === 1),
+    luaFileState,
+  );
+  check(
+    luaFileState.started
+      ? "Lua LSP: the server's diagnostics land as ace annotations in a .lua file"
+      : "Lua LSP: .lua diagnostics (skipped: lib/emmylua-lsp not built)",
+    !luaFileState.started ||
+      luaFileState.annotations.some((t) => /undefined_global_here|Undefined field/i.test(t)),
+    luaFileState,
+  );
+  check(
+    luaFileState.started
+      ? "Lua LSP: formatDocument reformats the file through the server"
+      : "Lua LSP: formatDocument (skipped: lib/emmylua-lsp not built)",
+    luaFileState.hasFormatCommand === true &&
+      (!luaFileState.started || luaFileState.afterFormat === "local x = 1\nif x then\n    print(x)\nend\n"),
+    {
+      hasFormatCommand: luaFileState.hasFormatCommand,
+      beforeFormat: luaFileState.beforeFormat,
+      afterFormat: luaFileState.afterFormat,
+    },
+  );
+
   // -- Completion from the other open editors --------------------------------------
   // Words defined in one editor must be offered in another, and must follow edits.
   // A registers as a text viewer (what allAdapters() walks) so this needs no second

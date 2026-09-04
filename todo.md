@@ -21,3 +21,15 @@
           vimrc): a second editor in a line widget at the cursor, on a clone of the session (same
           document and undo, own scroll/caret). Resizable, unlike the demo's fixed 10 rows; not F3,
           which is SAS Studio's Run Program
+
+- lua lsp with sas module docs
+  - [x] proc lua submit;...endsubmit; blocks: completion, via our own client over the
+        emmylua wasm worker (the document sent is the sas file with non-lua lines blanked)
+  - [x] .lua files opened as text: routed through ace-linters, so completion, diagnostics,
+        hover, signature help, document highlights, code actions, semantic tokens
+  - [x] formatting: Ctrl-Shift-F / command palette (ace-linters' own format() is off by one
+        and formats nothing, so the range is built here)
+  - [ ] sas module docs: meta definitions for the sas.* API, which the server can't know about
+  - [ ] diagnostics/hover INSIDE proc lua blocks - needs sharing session.setAnnotations with
+        the sas language server, which replaces the whole set
+  - [ ] a .lua text tab restored at page load gets no ace overlay at all, so no lsp either

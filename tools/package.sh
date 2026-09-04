@@ -6,6 +6,9 @@ set -e
 cd "$(dirname "$0")/.." # repo root = extension root
 
 # lib/ is gitignored, generated output - (re)build it if anything is missing.
+# (lib/emmylua-lsp/emmylua_ls.wasm is deliberately not on this list: it needs a
+# rust toolchain, build_lib.sh skips it with a warning when cargo is missing,
+# and a missing one would re-run the whole build on every package.)
 for f in lib/ace/src-noconflict/ace.js lib/ace-linters/ace-language-client.js lib/sas-lsp/sas-server.js; do
   if [ ! -f "$f" ]; then
     echo "$f missing - running ./tools/build_lib.sh"

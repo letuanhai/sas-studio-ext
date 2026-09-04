@@ -340,7 +340,7 @@
 
   function mergeAceConfig(stored) {
     stored = stored || {};
-    const defaults = window.DEFAULT_ACE_CONFIG || { darkTheme: "ace/theme/gruvbox", lightTheme: "ace/theme/iplastic", options: {}, vimrc: "", lsp: true, lspMaxLines: 500 };
+    const defaults = window.DEFAULT_ACE_CONFIG || { darkTheme: "ace/theme/gruvbox", lightTheme: "ace/theme/iplastic", options: {}, vimrc: "", lsp: true, lspMaxLines: 500, luaLsp: true };
     return {
       darkTheme: stored.darkTheme || defaults.darkTheme,
       lightTheme: stored.lightTheme || defaults.lightTheme,
@@ -349,6 +349,7 @@
       vimrc: typeof stored.vimrc === "string" ? stored.vimrc : defaults.vimrc,
       lsp: typeof stored.lsp === "boolean" ? stored.lsp : defaults.lsp,
       lspMaxLines: typeof stored.lspMaxLines === "number" ? stored.lspMaxLines : defaults.lspMaxLines,
+      luaLsp: typeof stored.luaLsp === "boolean" ? stored.luaLsp : defaults.luaLsp,
     };
   }
 
@@ -418,6 +419,7 @@
     const lightSelect = document.getElementById("ace-light-theme");
     const lspCheckbox = document.getElementById("ace-lsp");
     const lspMaxLinesInput = document.getElementById("ace-lsp-max-lines");
+    const luaLspCheckbox = document.getElementById("ace-lua-lsp");
     const vimrcEditor = document.getElementById("vimrc-editor");
 
     themes.forEach((t) => {
@@ -459,6 +461,7 @@
       lightSelect.value = current.lightTheme;
       lspCheckbox.checked = current.lsp !== false;
       lspMaxLinesInput.value = current.lspMaxLines;
+      luaLspCheckbox.checked = current.luaLsp !== false;
       vimrcEditor.value = current.vimrc || "";
     }
 
@@ -487,6 +490,10 @@
     });
     lspCheckbox.addEventListener("change", () => {
       current.lsp = lspCheckbox.checked;
+      persist();
+    });
+    luaLspCheckbox.addEventListener("change", () => {
+      current.luaLsp = luaLspCheckbox.checked;
       persist();
     });
     lspMaxLinesInput.addEventListener("change", () => {

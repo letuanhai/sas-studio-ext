@@ -1,0 +1,397 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index efe16b26..1c2e91d3 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -16,7 +16,7 @@ schema_to_emmylua = { path = "crates/schema_to_emmylua", version = "0.2.0" }
+ 
+ # external
+ lsp-server = "0.10.0"
+-tokio = { version = "1.53", features = ["full"] }
++tokio = { version = "1.53", features = ["sync","macros","io-util","rt","time"] }
+ serde = { version = "1.0.229", features = ["derive"] }
+ serde_json = "1.0.151"
+ rowan = { version = "0.17.0" }
+diff --git a/crates/emmylua_code_analysis/src/resources/best_resource_path.rs b/crates/emmylua_code_analysis/src/resources/best_resource_path.rs
+index 109a5088..b0c0fac9 100644
+--- a/crates/emmylua_code_analysis/src/resources/best_resource_path.rs
++++ b/crates/emmylua_code_analysis/src/resources/best_resource_path.rs
+@@ -1,6 +1,10 @@
+ use std::path::PathBuf;
+ 
+ pub fn get_best_resources_dir() -> PathBuf {
++    #[cfg(target_family = "wasm")]
++    return PathBuf::from("/resources");
++    #[cfg(not(target_family = "wasm"))]
++    {
+     if cfg!(debug_assertions) {
+         return exe_dir().join("resources");
+     }
+@@ -37,6 +41,9 @@ pub fn get_best_resources_dir() -> PathBuf {
+     }
+ }
+ 
++}
++
++#[cfg(not(target_family = "wasm"))]
+ fn exe_dir() -> PathBuf {
+     let mut exe = std::env::current_exe().expect("executable available");
+     exe.pop();
+diff --git a/crates/emmylua_formatter/Cargo.toml b/crates/emmylua_formatter/Cargo.toml
+index 54e93684..4d34c320 100644
+--- a/crates/emmylua_formatter/Cargo.toml
++++ b/crates/emmylua_formatter/Cargo.toml
+@@ -30,7 +30,7 @@ hashbrown.workspace = true
+ workspace = true
+ optional = true
+ 
+-[dependencies.mimalloc]
++[target.'cfg(not(target_family = "wasm"))'.dependencies.mimalloc]
+ workspace = true
+ optional = true
+ 
+diff --git a/crates/emmylua_ls/Cargo.toml b/crates/emmylua_ls/Cargo.toml
+index 92b0a280..a7726da8 100644
+--- a/crates/emmylua_ls/Cargo.toml
++++ b/crates/emmylua_ls/Cargo.toml
+@@ -47,7 +47,7 @@ include_dir.workspace = true
+ workspace = true
+ optional = true
+ 
+-[dependencies.mimalloc]
++[target.'cfg(not(target_family = "wasm"))'.dependencies.mimalloc]
+ workspace = true
+ optional = true
+ 
+@@ -55,6 +55,12 @@ optional = true
+ googletest.workspace = true
+ 
+ 
++[lib]
++crate-type = ["lib", "cdylib"]
++
++[target.'cfg(target_family = "wasm")'.dependencies]
++crossbeam-channel = "0.5"
++
+ [[bin]]
+ name = "emmylua_ls"
+ required-features = ["cli"]
+diff --git a/crates/emmylua_ls/src/handlers/document_formatting/external_format.rs b/crates/emmylua_ls/src/handlers/document_formatting/external_format.rs
+index 23d7ca8d..cefb7d99 100644
+--- a/crates/emmylua_ls/src/handlers/document_formatting/external_format.rs
++++ b/crates/emmylua_ls/src/handlers/document_formatting/external_format.rs
+@@ -1,9 +1,14 @@
+ use emmylua_code_analysis::EmmyrcExternalTool;
+ use rowan::TextSize;
++#[cfg(not(target_family = "wasm"))]
+ use std::process::Stdio;
++#[cfg(not(target_family = "wasm"))]
+ use std::time::Duration;
++#[cfg(not(target_family = "wasm"))]
+ use tokio::io::AsyncWriteExt;
++#[cfg(not(target_family = "wasm"))]
+ use tokio::process::Command;
++#[cfg(not(target_family = "wasm"))]
+ use tokio::time::timeout;
+ 
+ use crate::handlers::document_formatting::FormattingOptions;
+@@ -15,6 +20,19 @@ pub struct FormattingRange {
+     pub end_line: u32,
+ }
+ 
++#[cfg(target_family = "wasm")]
++pub async fn external_tool_format(
++    _emmyrc_external_tool: &EmmyrcExternalTool,
++    _text: &str,
++    _file_path: &str,
++    _range: Option<FormattingRange>,
++    _options: FormattingOptions,
++) -> Option<String> {
++    None
++}
++
++#[allow(unused)]
++#[cfg(not(target_family = "wasm"))]
+ pub async fn external_tool_format(
+     emmyrc_external_tool: &EmmyrcExternalTool,
+     text: &str,
+@@ -93,6 +111,7 @@ pub async fn external_tool_format(
+     }
+ }
+ 
++#[allow(unused)]
+ fn parse_macro_arg(
+     arg: &str,
+     file_path: &str,
+diff --git a/crates/emmylua_ls/src/lib.rs b/crates/emmylua_ls/src/lib.rs
+index 61496aba..0c5424a9 100644
+--- a/crates/emmylua_ls/src/lib.rs
++++ b/crates/emmylua_ls/src/lib.rs
+@@ -6,6 +6,9 @@ mod meta_text;
+ mod server;
+ mod util;
+ 
++#[cfg(target_family = "wasm")]
++pub mod wasm;
++
+ pub use clap::Parser;
+ pub use cmd_args::*;
+ pub use server::{AsyncConnection, ExitError, run_ls};
+diff --git a/crates/emmylua_ls/src/server/connection.rs b/crates/emmylua_ls/src/server/connection.rs
+index 1d74aac2..0a2475b5 100644
+--- a/crates/emmylua_ls/src/server/connection.rs
++++ b/crates/emmylua_ls/src/server/connection.rs
+@@ -8,12 +8,33 @@ use super::error::ExitError;
+ /// Async wrapper for LSP Connection with tokio support
+ pub struct AsyncConnection {
+     pub(crate) connection: Arc<Connection>,
++    // Unused on wasm (the struct is shared, but `recv` polls the sync
++    // receiver below instead of a task pumping this one).
++    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+     receiver: mpsc::UnboundedReceiver<Message>,
++    #[cfg(not(target_family = "wasm"))]
+     _receiver_task: tokio::task::JoinHandle<()>,
++    /// wasm has no threads, so the sync receiver is polled from `recv` instead
++    /// of being pumped into the mpsc by a blocking task.
++    #[cfg(target_family = "wasm")]
++    sync_receiver: Option<crossbeam_channel::Receiver<Message>>,
+ }
+ 
+ impl AsyncConnection {
++    /// Create async version from sync Connection, polling it cooperatively (no threads).
++    #[cfg(target_family = "wasm")]
++    pub fn from_sync(connection: Connection) -> Self {
++        let (_tx, rx) = mpsc::unbounded_channel();
++        let sync_receiver = Some(connection.receiver.clone());
++        Self {
++            connection: Arc::new(connection),
++            receiver: rx,
++            sync_receiver,
++        }
++    }
++
+     /// Create async version from sync Connection
++    #[cfg(not(target_family = "wasm"))]
+     pub fn from_sync(connection: Connection) -> Self {
+         let (tx, rx) = mpsc::unbounded_channel();
+         let connection = Arc::new(connection);
+@@ -36,10 +57,23 @@ impl AsyncConnection {
+     }
+ 
+     /// Receive message asynchronously
++    #[cfg(not(target_family = "wasm"))]
+     pub async fn recv(&mut self) -> Option<Message> {
+         self.receiver.recv().await
+     }
+ 
++    #[cfg(target_family = "wasm")]
++    pub async fn recv(&mut self) -> Option<Message> {
++        let rx = self.sync_receiver.as_ref()?;
++        loop {
++            match rx.try_recv() {
++                Ok(msg) => return Some(msg),
++                Err(crossbeam_channel::TryRecvError::Empty) => tokio::task::yield_now().await,
++                Err(crossbeam_channel::TryRecvError::Disconnected) => return None,
++            }
++        }
++    }
++
+     /// Send message to client
+     pub fn send(&self, msg: Message) -> Result<(), Box<dyn Error + Send + Sync>> {
+         self.connection
+@@ -58,7 +92,7 @@ impl AsyncConnection {
+         }
+         let resp = Response::new_ok(req.id.clone(), ());
+         let _ = self.connection.sender.send(resp.into());
+-        match tokio::time::timeout(std::time::Duration::from_secs(30), self.receiver.recv()).await {
++        match tokio::time::timeout(std::time::Duration::from_secs(30), self.recv()).await {
+             Ok(Some(Message::Notification(n))) if n.method == "exit" => (),
+             Ok(Some(msg)) => {
+                 return Err(Box::new(ExitError(format!(
+diff --git a/crates/emmylua_ls/src/server/main_loop.rs b/crates/emmylua_ls/src/server/main_loop.rs
+index 21f324a0..df2cec50 100644
+--- a/crates/emmylua_ls/src/server/main_loop.rs
++++ b/crates/emmylua_ls/src/server/main_loop.rs
+@@ -8,7 +8,7 @@ use crate::handlers::initialized_handler;
+ use super::connection::AsyncConnection;
+ use super::lsp_server::LspServer;
+ 
+-pub(super) async fn main_loop(
++pub(crate) async fn main_loop(
+     connection: AsyncConnection,
+     params: InitializeParams,
+     cmd_args: CmdArgs,
+diff --git a/crates/emmylua_ls/src/server/mod.rs b/crates/emmylua_ls/src/server/mod.rs
+index b2d5dacf..00172945 100644
+--- a/crates/emmylua_ls/src/server/mod.rs
++++ b/crates/emmylua_ls/src/server/mod.rs
+@@ -1,7 +1,7 @@
+ mod connection;
+ mod error;
+ mod lsp_server;
+-mod main_loop;
++pub(crate) mod main_loop;
+ mod message_processor;
+ 
+ pub use connection::AsyncConnection;
+diff --git a/crates/emmylua_ls/src/wasm.rs b/crates/emmylua_ls/src/wasm.rs
+new file mode 100644
+index 00000000..72d26aec
+--- /dev/null
++++ b/crates/emmylua_ls/src/wasm.rs
+@@ -0,0 +1,156 @@
++//! Minimal C-ABI entry point for driving the language server from JS in a
++//! browser/worker. No threads, no stdio: JS pushes JSON-RPC messages in and
++//! pulls them out, and `ela_pump` drives the (current-thread) tokio runtime a
++//! bounded number of steps per call.
++use std::cell::RefCell;
++use std::future::Future;
++use std::pin::Pin;
++
++use lsp_server::{Connection, Message};
++use lsp_types::InitializeParams;
++
++use crate::cmd_args::{CmdArgs, CmdBool, Communication, LogLevel, NoneableString};
++use crate::handlers::server_capabilities;
++use crate::server::AsyncConnection;
++use crate::server::main_loop::main_loop;
++
++struct State {
++    rt: tokio::runtime::Runtime,
++    client: Connection,
++    fut: Option<Pin<Box<dyn Future<Output = ()>>>>,
++}
++
++thread_local! {
++    static STATE: RefCell<Option<State>> = RefCell::new(None);
++}
++
++fn cmd_args() -> CmdArgs {
++    CmdArgs {
++        communication: Communication::Stdio,
++        ip: "127.0.0.1".into(),
++        port: 0,
++        log_level: LogLevel::Info,
++        log_path: NoneableString(None),
++        resources_path: NoneableString(None),
++        load_stdlib: CmdBool(true),
++        editor: None,
++    }
++}
++
++/// Boot: answer `initialize` off the channel ourselves (the stock path uses a
++/// blocking stdio read), then hand over to the stock main loop.
++async fn boot(server: Connection) {
++    let mut conn = AsyncConnection::from_sync(server);
++    let (id, params) = loop {
++        match conn.recv().await {
++            Some(Message::Request(req)) if req.method == "initialize" => break (req.id, req.params),
++            Some(_) => continue,
++            None => return,
++        }
++    };
++    let params: InitializeParams = serde_json::from_value(params).unwrap();
++    let caps = server_capabilities(&params.capabilities);
++    let result = serde_json::json!({
++        "capabilities": caps,
++        "serverInfo": { "name": "emmylua_ls", "version": env!("CARGO_PKG_VERSION") }
++    });
++    let _ = conn.send(lsp_server::Response::new_ok(id, result).into());
++    let _ = main_loop(conn, params, cmd_args()).await;
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn ela_alloc(len: usize) -> *mut u8 {
++    let mut v = vec![0u8; len];
++    let p = v.as_mut_ptr();
++    std::mem::forget(v);
++    p
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn ela_start() {
++    let rt = tokio::runtime::Builder::new_current_thread()
++        .enable_time()
++        .build()
++        .unwrap();
++    let (server, client) = Connection::memory();
++    let fut: Pin<Box<dyn Future<Output = ()>>> = Box::pin(boot(server));
++    STATE.with(|s| {
++        *s.borrow_mut() = Some(State {
++            rt,
++            client,
++            fut: Some(fut),
++        })
++    });
++}
++
++/// Push one JSON-RPC message (JSON text) into the server.
++#[unsafe(no_mangle)]
++pub extern "C" fn ela_push(ptr: *mut u8, len: usize) {
++    let bytes = unsafe { Vec::from_raw_parts(ptr, len, len) };
++    let Ok(msg) = serde_json::from_slice::<Message>(&bytes) else {
++        return;
++    };
++    STATE.with(|s| {
++        if let Some(st) = s.borrow().as_ref() {
++            let _ = st.client.sender.send(msg);
++        }
++    });
++}
++
++/// Drive the runtime for up to `steps` cooperative yields.
++#[unsafe(no_mangle)]
++pub extern "C" fn ela_pump(steps: u32) {
++    STATE.with(|s| {
++        let mut b = s.borrow_mut();
++        let Some(st) = b.as_mut() else { return };
++        let Some(mut fut) = st.fut.take() else { return };
++        let done = st.rt.block_on(async {
++            for _ in 0..steps {
++                if poll_once(fut.as_mut()).is_some() {
++                    return true;
++                }
++                tokio::task::yield_now().await;
++            }
++            false
++        });
++        if !done {
++            st.fut = Some(fut);
++        }
++    });
++}
++
++fn poll_once<F: Future + ?Sized>(mut fut: Pin<&mut F>) -> Option<F::Output> {
++    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
++    // ponytail: no-op waker; `ela_pump` polls on a fixed schedule anyway.
++    const VTABLE: RawWakerVTable = RawWakerVTable::new(
++        |_| RawWaker::new(std::ptr::null(), &VTABLE),
++        |_| {},
++        |_| {},
++        |_| {},
++    );
++    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
++    match fut.as_mut().poll(&mut Context::from_waker(&waker)) {
++        Poll::Ready(v) => Some(v),
++        Poll::Pending => None,
++    }
++}
++
++/// Take the next outgoing message, as a length-prefixed (u32 LE) buffer, or null.
++#[unsafe(no_mangle)]
++pub extern "C" fn ela_take() -> *mut u8 {
++    STATE.with(|s| {
++        let b = s.borrow();
++        let Some(st) = b.as_ref() else {
++            return std::ptr::null_mut();
++        };
++        let Ok(msg) = st.client.receiver.try_recv() else {
++            return std::ptr::null_mut();
++        };
++        let json = serde_json::to_vec(&msg).unwrap_or_default();
++        let mut out = (json.len() as u32).to_le_bytes().to_vec();
++        out.extend_from_slice(&json);
++        let p = out.as_mut_ptr();
++        std::mem::forget(out);
++        p
++    })
++}

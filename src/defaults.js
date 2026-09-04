@@ -106,6 +106,11 @@ var DEFAULT_ACE_CONFIG = {
   // Keeps the worker from choking on huge programs; see editor-swap.js's
   // _maybeRegisterLsp.
   lspMaxLines: 1000,
+  // Lua language server for PROC LUA submit;...endsubmit; blocks (emmylua
+  // compiled to wasm, see editor-swap.js's ensureLuaLsp). Same deal as `lsp`:
+  // additive, and a no-op if lib/emmylua-lsp/ hasn't been built. Nothing is
+  // fetched until a file with a PROC LUA block asks for a completion.
+  luaLsp: true,
 };
 
 /**

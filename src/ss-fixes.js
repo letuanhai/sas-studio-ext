@@ -2356,13 +2356,15 @@ Add a prefix to the path for different option:
   }
 
   // runFocus: "app" | "log" | "none", live-assignable (see runFocusMode above).
+  // `notify` is showNotification's one external caller (editor-swap's format and
+  // diff commands) - the same toast every action here uses, rather than a second one.
   window.__ssf = {
     init,
     run,
     saveFocusedFileAtPath,
     copyText,
     copyTextWithNotice,
-    showNotification, // editor-swap.js has no notifier of its own
+    notify: (message, isError) => showNotification({ message, isError }),
     runFocus: "log",
   };
 })();
