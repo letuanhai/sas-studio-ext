@@ -32,8 +32,13 @@
  * dispatchEvent-based tests can't see.
  */
 const { chromium } = require("playwright");
+const { closeBrowser, armExitGuards } = require("../tools/browser-guard");
 
 const EXT = require("path").resolve(__dirname, "..");
+// A full run is a few minutes (it makes real SAS submissions). Past this, the
+// run is stuck, not slow - and a stuck run is exactly how a headless Chromium
+// gets left behind for hours.
+const WATCHDOG_MS = 20 * 60 * 1000;
 const URL = process.env.SS_URL || "http://sas-ue.lan/SASStudio/38/";
 
 let failures = 0;
@@ -57,14 +62,15 @@ const releaseSession = async (page) => {
 };
 
 let ctx, page;
-// Runs on every exit path, including a harness error - a leaked headless Chromium
-// pings its session every 10s, so it never even goes idle for the server's timeout.
-const shutdown = async () => {
-  if (page) await releaseSession(page);
-  if (ctx) await ctx.close().catch(() => {});
-};
+// Runs on every exit path, including a harness error, a signal and the watchdog -
+// a leaked headless Chromium pings its session every 10s, so it never even goes
+// idle for the server's timeout. Every step is bounded: releasing the session
+// needs a live page, and the page being wedged is precisely the case that used
+// to leave the browser running for good.
+const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
 
 (async () => {
+  armExitGuards(shutdown, WATCHDOG_MS);
   ctx = await chromium.launchPersistentContext("", {
     ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: "chromium" }),
     headless: true,

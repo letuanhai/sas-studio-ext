@@ -35,10 +35,13 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { closeBrowser, armExitGuards } = require("./browser-guard");
 
 const DARKREADER_VERSION = "4.9.128";
 const ROOT = path.resolve(__dirname, "..");
 const URL = process.env.SS_URL || "http://sas-ue.lan/SASStudio/38/";
+// A generation run is ~1 minute of page load plus Dark Reader's own waits.
+const WATCHDOG_MS = 10 * 60 * 1000;
 
 // Palette knobs. Dark Reader's own defaults with a touch of warmth - this is
 // the one place to re-tune the look.
@@ -181,142 +184,149 @@ function postProcess(css) {
     headless: true,
   });
   const page = ctx.pages()[0] || (await ctx.newPage());
-  await page.goto(URL, { waitUntil: "load", timeout: 60000 });
-  await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 60000 });
-  await page.waitForTimeout(4000);
+  armExitGuards(() => closeBrowser(ctx), WATCHDOG_MS);
+  // The browser is only needed down to the export; everything after it is
+  // string work. A throw or a hang in between used to leave it running.
+  let iconSelectors, generated;
+  try {
+    await page.goto(URL, { waitUntil: "load", timeout: 60000 });
+    await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 60000 });
+    await page.waitForTimeout(4000);
 
-  // Which selectors need their artwork inverted, straight from the app's own
-  // stylesheets - so this tracks whatever icons SAS ships rather than a
-  // hand-maintained class list.
-  //
-  // It has to be decided per icon, not blanket: SAS ships BOTH dark artwork
-  // (sasIcons/sasdark/*, meant for a light background - the toolbar and tree)
-  // and light artwork (sasIcons/saslight/*, already meant for the dark blue
-  // banner). Inverting the whole lot turned the banner's white glyphs into
-  // black blobs. So measure each image's actual luminance and invert only the
-  // dark ones. Same-origin, so the canvas stays readable.
-  //
-  // This MUST run before DarkReader.enable(): afterwards the sheets it walks
-  // are Dark Reader's rewrites, whose url()s no longer resolve, every image
-  // fails to load, and everything silently measures as "not dark".
-  const iconSelectors = await page.evaluate(async () => {
-    const byUrl = new Map(); // absolute url -> selectors painting it
-    const walk = (sheet) => {
-      let rules;
-      try {
-        rules = sheet.cssRules;
-      } catch (e) {
-        return;
-      }
-      for (const rule of rules) {
-        if (rule.styleSheet) walk(rule.styleSheet);
-        else if (rule.style) {
-          // rule.style gives the url exactly as authored - relative, e.g.
-          // "16_png/Folder.png" or "../images/.../Folder.png". Only
-          // getComputedStyle resolves; here we have to do it ourselves, against
-          // the sheet that declared it (the icon sheets live inside
-          // sasIcons/<variant>/, so this matters).
-          const m = /url\(["']?([^"')]+)["']?\)/.exec(rule.style.backgroundImage || "");
-          if (!m || m[1].startsWith("data:")) continue;
-          let url;
-          try {
-            url = new URL(m[1], sheet.href || document.baseURI).href;
-          } catch (e) {
-            continue;
-          }
-          if (!byUrl.has(url)) byUrl.set(url, []);
-          byUrl.get(url).push(rule.selectorText);
+    // Which selectors need their artwork inverted, straight from the app's own
+    // stylesheets - so this tracks whatever icons SAS ships rather than a
+    // hand-maintained class list.
+    //
+    // It has to be decided per icon, not blanket: SAS ships BOTH dark artwork
+    // (sasIcons/sasdark/*, meant for a light background - the toolbar and tree)
+    // and light artwork (sasIcons/saslight/*, already meant for the dark blue
+    // banner). Inverting the whole lot turned the banner's white glyphs into
+    // black blobs. So measure each image's actual luminance and invert only the
+    // dark ones. Same-origin, so the canvas stays readable.
+    //
+    // This MUST run before DarkReader.enable(): afterwards the sheets it walks
+    // are Dark Reader's rewrites, whose url()s no longer resolve, every image
+    // fails to load, and everything silently measures as "not dark".
+    iconSelectors = await page.evaluate(async () => {
+      const byUrl = new Map(); // absolute url -> selectors painting it
+      const walk = (sheet) => {
+        let rules;
+        try {
+          rules = sheet.cssRules;
+        } catch (e) {
+          return;
         }
+        for (const rule of rules) {
+          if (rule.styleSheet) walk(rule.styleSheet);
+          else if (rule.style) {
+            // rule.style gives the url exactly as authored - relative, e.g.
+            // "16_png/Folder.png" or "../images/.../Folder.png". Only
+            // getComputedStyle resolves; here we have to do it ourselves, against
+            // the sheet that declared it (the icon sheets live inside
+            // sasIcons/<variant>/, so this matters).
+            const m = /url\(["']?([^"')]+)["']?\)/.exec(rule.style.backgroundImage || "");
+            if (!m || m[1].startsWith("data:")) continue;
+            let url;
+            try {
+              url = new URL(m[1], sheet.href || document.baseURI).href;
+            } catch (e) {
+              continue;
+            }
+            if (!byUrl.has(url)) byUrl.set(url, []);
+            byUrl.get(url).push(rule.selectorText);
+          }
+        }
+      };
+      for (const s of document.styleSheets) walk(s);
+
+      // Mean luminance over the non-transparent pixels.
+      const classify = async (url) => {
+        const img = await new Promise((res) => {
+          const i = new Image();
+          i.onload = () => res(i);
+          i.onerror = () => res(null);
+          i.src = url;
+        });
+        if (!img || !img.width) return "failed";
+        const c = document.createElement("canvas");
+        c.width = img.width;
+        c.height = img.height;
+        const ctx = c.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        const { data } = ctx.getImageData(0, 0, c.width, c.height);
+        let sum = 0;
+        let n = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] < 40) continue; // ignore near-transparent padding
+          sum += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+          n++;
+        }
+        if (n === 0) return "failed";
+        return sum / n < 128 ? "dark" : "light";
+      };
+
+      const out = { invert: [], keep: [], failed: [] };
+      for (const [url, selectors] of byUrl) {
+        const verdict = await classify(url);
+        if (verdict === "dark") out.invert.push(...selectors);
+        else if (verdict === "light") out.keep.push(...selectors);
+        else out.failed.push(url);
       }
-    };
-    for (const s of document.styleSheets) walk(s);
-
-    // Mean luminance over the non-transparent pixels.
-    const classify = async (url) => {
-      const img = await new Promise((res) => {
-        const i = new Image();
-        i.onload = () => res(i);
-        i.onerror = () => res(null);
-        i.src = url;
-      });
-      if (!img || !img.width) return "failed";
-      const c = document.createElement("canvas");
-      c.width = img.width;
-      c.height = img.height;
-      const ctx = c.getContext("2d");
-      ctx.drawImage(img, 0, 0);
-      const { data } = ctx.getImageData(0, 0, c.width, c.height);
-      let sum = 0;
-      let n = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        if (data[i + 3] < 40) continue; // ignore near-transparent padding
-        sum += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-        n++;
-      }
-      if (n === 0) return "failed";
-      return sum / n < 128 ? "dark" : "light";
-    };
-
-    const out = { invert: [], keep: [], failed: [] };
-    for (const [url, selectors] of byUrl) {
-      const verdict = await classify(url);
-      if (verdict === "dark") out.invert.push(...selectors);
-      else if (verdict === "light") out.keep.push(...selectors);
-      else out.failed.push(url);
-    }
-    // `filter: invert()` inverts everything the element paints - its own
-    // background-color and its children included - which is harmless on an
-    // icon-sized box but wrong when the same artwork is also painted as the
-    // background of a big container. `.emptyWorkspaceSplash` is #tabsBC itself
-    // (the whole workspace area, shown when no tab is open), so inverting it
-    // turned the dark empty workspace light.
-    // ponytail: literal list - a size check would need the element to be in the
-    // DOM and laid out at generation time, which for this one depends on
-    // whether the session happens to have a tab open.
-    const NOT_AN_ICON = [".emptyWorkspaceSplash"];
-    return {
-      invert: [...new Set(out.invert)].filter((sel) => !NOT_AN_ICON.some((c) => sel.includes(c))),
-      keep: [...new Set(out.keep)],
-      failed: out.failed,
-      urls: byUrl.size,
-    };
-  });
-  console.log(
-    `icons: ${iconSelectors.urls} images -> ${iconSelectors.invert.length} selectors inverted, ` +
-      `${iconSelectors.keep.length} left alone, ${iconSelectors.failed.length} unreadable`,
-  );
-  if (iconSelectors.invert.length === 0) {
-    throw new Error("no dark icons found - SAS ships dark 'sasdark' artwork, so this is a bug in the walk");
-  }
-
-  // Dark Reader's UMD wrapper would register into Dojo's AMD registry instead of
-  // setting window.DarkReader (same trap ensureLsp() dodges for ace-linters).
-  await page.evaluate(() => {
-    window.__savedDefine = window.define;
-    delete window.define;
-  });
-  await page.addScriptTag({ content: darkReaderSource() });
-  await page.evaluate(() => {
-    window.define = window.__savedDefine;
-    delete window.__savedDefine;
-  });
-
-  const generated = await page.evaluate(async (theme) => {
-    window.DarkReader.enable(theme, {
-      // Image analysis is per-rendered-element and asynchronous: Dark Reader
-      // only bakes an inverted data URI for icons that happened to be on
-      // screen. That made the export non-deterministic and left most icons
-      // (tree, menus, dialogs) as plain `background-color: transparent` on a
-      // dark background. Turning it off entirely makes the export reproducible
-      // and lets one uniform rule (below) own every icon instead.
-      ignoreImageAnalysis: ["*"],
+      // `filter: invert()` inverts everything the element paints - its own
+      // background-color and its children included - which is harmless on an
+      // icon-sized box but wrong when the same artwork is also painted as the
+      // background of a big container. `.emptyWorkspaceSplash` is #tabsBC itself
+      // (the whole workspace area, shown when no tab is open), so inverting it
+      // turned the dark empty workspace light.
+      // ponytail: literal list - a size check would need the element to be in the
+      // DOM and laid out at generation time, which for this one depends on
+      // whether the session happens to have a tab open.
+      const NOT_AN_ICON = [".emptyWorkspaceSplash"];
+      return {
+        invert: [...new Set(out.invert)].filter((sel) => !NOT_AN_ICON.some((c) => sel.includes(c))),
+        keep: [...new Set(out.keep)],
+        failed: out.failed,
+        urls: byUrl.size,
+      };
     });
-    await new Promise((r) => setTimeout(r, 6000));
-    return window.DarkReader.exportGeneratedCSS();
-  }, THEME);
+    console.log(
+      `icons: ${iconSelectors.urls} images -> ${iconSelectors.invert.length} selectors inverted, ` +
+        `${iconSelectors.keep.length} left alone, ${iconSelectors.failed.length} unreadable`,
+    );
+    if (iconSelectors.invert.length === 0) {
+      throw new Error("no dark icons found - SAS ships dark 'sasdark' artwork, so this is a bug in the walk");
+    }
+
+    // Dark Reader's UMD wrapper would register into Dojo's AMD registry instead of
+    // setting window.DarkReader (same trap ensureLsp() dodges for ace-linters).
+    await page.evaluate(() => {
+      window.__savedDefine = window.define;
+      delete window.define;
+    });
+    await page.addScriptTag({ content: darkReaderSource() });
+    await page.evaluate(() => {
+      window.define = window.__savedDefine;
+      delete window.__savedDefine;
+    });
+
+    generated = await page.evaluate(async (theme) => {
+      window.DarkReader.enable(theme, {
+        // Image analysis is per-rendered-element and asynchronous: Dark Reader
+        // only bakes an inverted data URI for icons that happened to be on
+        // screen. That made the export non-deterministic and left most icons
+        // (tree, menus, dialogs) as plain `background-color: transparent` on a
+        // dark background. Turning it off entirely makes the export reproducible
+        // and lets one uniform rule (below) own every icon instead.
+        ignoreImageAnalysis: ["*"],
+      });
+      await new Promise((r) => setTimeout(r, 6000));
+      return window.DarkReader.exportGeneratedCSS();
+    }, THEME);
 
 
-  await ctx.close();
+  } finally {
+    await closeBrowser(ctx);
+  }
 
   const { css, dropped, marked, unparsed } = postProcess(generated);
 
