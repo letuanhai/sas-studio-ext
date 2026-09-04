@@ -130,6 +130,13 @@
       this.eventHandlers = { textChanged: [], selectionChanged: [], caretMoved: [] };
       this.setupAceEventBindings();
 
+      // Unsaved-change gutter baseline. Content at construction is the saved
+      // state for a file view / the toggle-off editor's text; a code tab is
+      // built empty and its file arrives in setText(), which re-baselines.
+      // ponytail: a toggle mid-edit baselines the DIRTY text, so the marks
+      // (like the undo history) don't survive one.
+      this.markSaved();
+
       // Ace status bar (ace/ext/statusbar, format from the author's ace fork -
       // see src/ace-patches.js) as a non-intrusive overlay pinned to the editor's
       // bottom-right; pointer-events:none so it never blocks clicks. ext-statusbar
@@ -254,6 +261,7 @@
 
     setupAceEventBindings() {
       this.aceEditor.session.on("change", (delta) => {
+        this._scheduleDirtyGutter();
         this.triggerEvent("textChanged", { delta });
       });
       this.aceEditor.session.selection.on("changeSelection", () => {
@@ -304,7 +312,40 @@
       } else if (!this._lspRegistered) {
         this._maybeRegisterLsp();
       }
+      // Every caller of setText is a load/revert path (AppDMS.js:3857/3896,
+      // DMSEditor.js:10252, ...), i.e. the content is the file's again.
+      this.markSaved();
     }
+
+    // -- Unsaved-change gutter -------------------------------------------------
+    // Re-baseline: the current content IS the saved content. Called on load
+    // (constructor/setText) and from every save path - DMSEditor.successfulSave
+    // for code tabs, saveTextViewer for text views.
+    markSaved() {
+      this._savedLines = this.aceEditor.session.doc.getAllLines();
+      this._refreshDirtyGutter();
+    }
+
+    _scheduleDirtyGutter() {
+      clearTimeout(this._dirtyTimer);
+      this._dirtyTimer = setTimeout(() => this._refreshDirtyGutter(), DIRTY_DEBOUNCE_MS);
+    }
+
+    // Idempotent, like refreshVimMarkGutter: re-applies the whole decoration set
+    // and bails out when nothing changed, since a decoration add/remove signals
+    // the gutter to re-render.
+    _refreshDirtyGutter() {
+      const session = this.aceEditor && this.aceEditor.session;
+      if (!session || !this._savedLines) return;
+      const lines = session.doc.getAllLines();
+      const rows = sameLines(this._savedLines, lines) ? [] : dirtyRows(this._savedLines, lines);
+      const previous = this._dirtyRows || [];
+      if (JSON.stringify(previous) === JSON.stringify(rows)) return;
+      previous.forEach((d) => session.removeGutterDecoration(d.row, d.cls));
+      rows.forEach((d) => session.addGutterDecoration(d.row, d.cls));
+      this._dirtyRows = rows;
+    }
+
     insert(text) {
       this.aceEditor.insert(text);
     }
@@ -353,6 +394,7 @@
     }
     dispose() {
       this._disposed = true;
+      clearTimeout(this._dirtyTimer);
       if (this._lspRegistered && ssExt._lspProvider) {
         // ace-linters' unregisterEditor(editor, cleanupSession) closes the
         // document server-side - must run before aceEditor.destroy() below.
@@ -518,6 +560,7 @@
     AceEditorAdapter, // exposed mainly for test/debug (smoke.js probes config seeding directly)
     _foldNav: { nextFoldStart, prevFoldEnd, enclosingFold }, // pure, covered by test/units.js
     _vimMarks: { vimMarksOf, refreshVimMarkGutter }, // ditto
+    _dirtyGutter: { dirtyRowsFromChunks, sameLines }, // ditto
   };
   window.__ssExt = ssExt;
 
@@ -786,6 +829,10 @@
     window._browseSsStore.ready("SsCmdPaletteHistory");
     await loadScript(`${libPath}/ext-prompt.js`);
     await loadScript(`${libPath}/ext-statusbar.js`);
+    // Only for its line differ (ace/ext/diff/providers/default's computeDiff),
+    // which the unsaved-change gutter runs against each editor's saved baseline -
+    // none of the diff VIEWS are used.
+    await loadScript(`${libPath}/ext-diff.js`);
 
     // Re-apply the fork's source changes now that everything they patch
     // (ace/autocomplete + ace/snippets from ext-language_tools, ace/ext/modelist
@@ -857,6 +904,8 @@
         "{width:100%!important;resize:vertical}",
       "ssExtCompletionPopup",
     );
+
+    ace.require("ace/lib/dom").importCssString(DIRTY_CSS, "ssExtDirtyGutter");
 
     ace.require("ace/lib/dom").importCssString(RESIZABLE_CSS, "ssExtResizablePopups");
     installResizablePopups(ace);
@@ -1735,6 +1784,28 @@
       this.setFinalized(true);
     };
 
+    // Re-baseline the unsaved-change gutter on save. successfulSave (DMSEditor.js
+    // :6978) is the one funnel every save path ends in, and it is always called as
+    // this.successfulSave(...), so a prototype wrap holds for tabs that already
+    // existed - unlike saveFile, which the toolbar button hitches at construction.
+    // Its own "not an autosave" branch is what clears editorContentChanged, so
+    // reading the flag afterwards keeps autosaves (which don't write the real file)
+    // out without repeating the condition.
+    // ponytail: baselines the text as of the RESPONSE, so anything typed during the
+    // POST is counted as saved. One round trip wide; a second save fixes it.
+    const originalSuccessfulSave = DMSEditor.prototype.successfulSave;
+    DMSEditor.prototype.successfulSave = function () {
+      const result = originalSuccessfulSave.apply(this, arguments);
+      try {
+        if (!this.editorContentChanged && this.editor && this.editor.markSaved) {
+          this.editor.markSaved();
+        }
+      } catch (e) {
+        console.warn("[SS Ext] could not reset the unsaved-change gutter:", e);
+      }
+      return result;
+    };
+
     DMSEditor.prototype._aceReplacementPatched = true;
     ssExt.patchesInstalled = true;
   }
@@ -1920,6 +1991,9 @@
   // the code editor's "*name" convention (DMSEditor.applyChangedIndicationToTab).
   function setViewerDirty(entry, dirty) {
     entry.dirty = dirty;
+    // Going clean means a save landed (or fresh content was mirrored in): the
+    // unsaved-change gutter's baseline is the current text again.
+    if (!dirty && entry.adapter && entry.adapter.markSaved) entry.adapter.markSaved();
     if (entry.buttons.save) entry.buttons.save.set("disabled", !dirty);
     const btn = viewerTabControlButton(entry);
     if (btn && btn.containerNode) {
@@ -2166,6 +2240,70 @@
       const fold = enclosingFold(s, r);
       return fold && fold.end.row;
     });
+  }
+
+  // -- Unsaved-change gutter ---------------------------------------------------------
+  // A bar in the gutter on every line that differs from the last saved content,
+  // diffed with ace's own ext/diff line differ (the Myers implementation its stock
+  // diff view uses). Rows are marked through session.addGutterDecoration, the way
+  // the vim mark gutter does, NOT with that extension's own MinimalGutterDiffDecorator:
+  // that one renders into recycled gutter cells and its class removal is a no-op
+  // (classList.remove(Object.values(...)) passes an ARRAY, so it removes the token
+  // "mini-diff-added,mini-diff-deleted" and never the real classes), which smears
+  // stale marks over every row as you scroll.
+  //
+  // ponytail: gutter only, no scrollbar overview - that means replacing
+  // renderer.$scrollDecorator with ScrollDiffDecorator, and ace-patches.js already
+  // has its own stake in the decorator layer. Add it if the gutter isn't enough.
+  const DIRTY_CLASS = "ssExtDirty";
+  const DIRTY_DEL_CLASS = "ssExtDirtyDel";
+  const DIRTY_DEBOUNCE_MS = 250;
+
+  // Both fixed colours, readable on light and dark editor themes alike. The gutter
+  // cell is position:absolute (see vimMarkStyles), so these ride in its left edge;
+  // ::before, since the vim mark letters own ::after.
+  const DIRTY_CSS =
+    `.${DIRTY_CLASS}::before,.${DIRTY_DEL_CLASS}::before` +
+    `{content:"";position:absolute;left:0;width:2px;background:#4a9eff}` +
+    `.${DIRTY_CLASS}::before{top:0;bottom:0}` +
+    // A deleted block has no line left to mark, so it gets half a bar (at the top
+    // of the row that closed the gap) in a different colour instead.
+    `.${DIRTY_DEL_CLASS}::before{top:0;height:45%;background:#e05252}`;
+
+  function sameLines(a, b) {
+    return a.length === b.length && a.every((line, i) => line === b[i]);
+  }
+
+  // computeDiff's chunks are {origStart, origEnd, editStart, editEnd} with EXCLUSIVE
+  // end rows, edit* being the new (current) side. editEnd == editStart is a pure
+  // deletion: nothing of it is left to mark, so the row that closed the gap gets the
+  // deleted bar - clamped, since a deletion at the end of the file leaves editStart
+  // past the last row.
+  function dirtyRowsFromChunks(chunks, lineCount) {
+    const rows = [];
+    (chunks || []).forEach((c) => {
+      if (c.editEnd > c.editStart) {
+        for (let row = c.editStart; row < c.editEnd; row++) rows.push({ row, cls: DIRTY_CLASS });
+      } else {
+        rows.push({ row: Math.min(c.editStart, Math.max(0, lineCount - 1)), cls: DIRTY_DEL_CLASS });
+      }
+    });
+    return rows;
+  }
+
+  function dirtyRows(savedLines, lines) {
+    try {
+      const computeDiff = ace.require("ace/ext/diff/providers/default").computeDiff;
+      // maxComputationTimeMs: the differ gives up and reports one whole-file chunk
+      // rather than blocking the keystroke it runs behind.
+      return dirtyRowsFromChunks(
+        computeDiff(savedLines, lines, { maxComputationTimeMs: 100 }),
+        lines.length,
+      );
+    } catch (e) {
+      console.warn("[SS Ext] unsaved-change gutter unavailable:", e);
+      return [];
+    }
   }
 
   // -- Vim marks -------------------------------------------------------------------

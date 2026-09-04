@@ -11,7 +11,7 @@
  *    tools-meta.js + ss-fixes.js into the MAIN world and call
  *    window.__ssf.init(settings) with the persisted patch/hotkey settings.
  *    The same handler pre-injects editor-swap.js and seeds
- *    libPath/userSnippets/aceConfig/browsePaths/browseKeys so the global command-palette hotkey works
+ *    libPath/userSnippets/aceConfig/browsePaths/browseKeys/browseFileActions so the global command-palette hotkey works
  *    without a prior toggle.
  *
  * 2. Live snippet apply: when chrome.storage.local's `snippets` changes, push
@@ -23,9 +23,11 @@
  *    window.__ssExt.applyAceConfig.
  *
  * 4. Live browse-prompt apply: when chrome.storage.local's `browseKeys` (options
- *    page, per-action key overrides) or `browsePaths` changes
+ *    page, per-action key overrides), `browseFileActions` (options page, what
+ *    Enter does per file extension) or `browsePaths` changes
  *    (the popup's per-host root paths), assign each open SASStudio tab its own
- *    host's entry on window.__ssExt.browsePaths / the keys on __ssExt.browseKeys.
+ *    host's entry on window.__ssExt.browsePaths / the keys and file actions on
+ *    __ssExt.browseKeys / __ssExt.browseFileActions.
  *
  * 5. Dark mode: register (or unregister) src/dark.css - the static dark theme
  *    for SAS Studio's own UI - as a CSS-only content script, following
@@ -158,13 +160,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // keyLayout: the navigator.keyboard.getLayoutMap() result captured by the
     // options page - that API is secure-context only, so the (http) SAS Studio
     // page can't resolve it itself. Absent -> ss-fixes falls back to US layout.
-    const { fixes, hotkeys, keyLayout, browsePaths, browseKeys, darkMode, runFocus } =
+    const { fixes, hotkeys, keyLayout, browsePaths, browseKeys, browseFileActions, darkMode, runFocus } =
       await chrome.storage.local.get([
         "fixes",
         "hotkeys",
         "keyLayout",
         "browsePaths",
         "browseKeys",
+        "browseFileActions",
         "darkMode",
         "runFocus",
       ]);
@@ -195,7 +198,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     });
     await chrome.scripting.executeScript({
       target: { tabId },
-      func: (path, snippets, config, paths, keys, dark) => {
+      func: (path, snippets, config, paths, keys, fileActions, dark) => {
         // Unconditional: libPath is always this same constant, and userSnippets/
         // aceConfig just mirror current storage - re-setting any of them to the
         // same value on repeat onUpdated firings is harmless (ace/toggle() aren't
@@ -209,6 +212,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         // Per-action browse-prompt key overrides (options page); ext-browse_ss.js
         // merges them over SSF_BROWSE_KEYS' defaults when a prompt opens.
         window.__ssExt.browseKeys = keys;
+        // Per-extension "what does Enter do" overrides (options page), read by
+        // ext-browse_ss.js's accept(). Not host-scoped: a file extension isn't a
+        // property of the server.
+        window.__ssExt.browseFileActions = fileActions;
         // Read by prefersDarkTheme(): with dark mode forced on, Ace has to use
         // its dark theme too, whatever the OS says.
         window.__ssExt.darkMode = dark;
@@ -221,6 +228,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         aceConfig,
         (browsePaths || {})[new URL(tab.url).host] || {},
         browseKeys || {},
+        // Stored map replaces the default outright, so an entry can be removed.
+        browseFileActions || DEFAULT_BROWSE_FILE_ACTIONS,
         darkMode || DEFAULT_DARK_MODE,
       ],
       world: "MAIN",
@@ -356,8 +365,13 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     }
   }
 
-  if (changes.browseKeys) {
-    const keys = changes.browseKeys.newValue || {};
+  // Both are plain assignments: ext-browse_ss.js reads them when a prompt opens,
+  // so the next Alt+P has them with no page reload and nothing to re-bind.
+  for (const key of ["browseKeys", "browseFileActions"]) {
+    if (!changes[key]) continue;
+    const value =
+      changes[key].newValue ||
+      (key === "browseFileActions" ? DEFAULT_BROWSE_FILE_ACTIONS : {});
     try {
       const tabs = await chrome.tabs.query({ url: "*://*/SASStudio/*" });
       await Promise.all(
@@ -365,17 +379,17 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
           chrome.scripting
             .executeScript({
               target: { tabId: tab.id },
-              func: (k) => {
-                if (window.__ssExt) window.__ssExt.browseKeys = k;
+              func: (k, v) => {
+                if (window.__ssExt) window.__ssExt[k] = v;
               },
-              args: [keys],
+              args: [key, value],
               world: "MAIN",
             })
             .catch(() => {}), // no-op if editor-swap.js isn't loaded in that tab
         ),
       );
     } catch (error) {
-      console.error("[SS Ext] Error live-applying browse keys:", error);
+      console.error(`[SS Ext] Error live-applying ${key}:`, error);
     }
   }
 

@@ -332,6 +332,63 @@ function check(name, ok, detail) {
     scrollPin,
   );
 
+  // -- Unsaved-change gutter -------------------------------------------------------
+  // Runs on a detached adapter: the marks are per-editor and need no SAS tab. Also
+  // the guard that ext-diff.js (the line differ) actually loaded - dirtyRows()
+  // swallows a missing module and returns no marks at all.
+  const dirtyGutter = await page.evaluate(() => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_dirty";
+    div.style.cssText = "position:absolute;left:-9999px;top:0;width:400px;height:300px";
+    document.body.appendChild(div);
+    const adapter = new window.__ssExt.AceEditorAdapter(div.id, "one\ntwo\nthree\nfour", "sas");
+    const rows = () => (adapter._dirtyRows || []).map((d) => `${d.row}:${d.cls}`);
+    const doc = adapter.aceEditor.session.doc;
+
+    const clean = rows();
+    doc.insert({ row: 1, column: 3 }, " changed");
+    adapter._refreshDirtyGutter();
+    const edited = rows();
+
+    doc.removeFullLines(3, 3);
+    adapter._refreshDirtyGutter();
+    const deleted = rows();
+
+    adapter.aceEditor.renderer.updateFull(true);
+    const markedCells = [...div.querySelectorAll(".ace_gutter-cell")].filter((c) =>
+      /ssExtDirty/.test(c.className),
+    ).length;
+
+    adapter.markSaved();
+    const saved = rows();
+    adapter.aceEditor.renderer.updateFull(true);
+    const cellsAfterSave = [...div.querySelectorAll(".ace_gutter-cell")].filter((c) =>
+      /ssExtDirty/.test(c.className),
+    ).length;
+
+    adapter.dispose();
+    div.remove();
+    return { clean, edited, deleted, markedCells, saved, cellsAfterSave };
+  });
+  check("unsaved-change gutter: unedited content has no marks", dirtyGutter.clean.length === 0, dirtyGutter);
+  check(
+    "unsaved-change gutter: an edited line is marked, and only it",
+    JSON.stringify(dirtyGutter.edited) === JSON.stringify(["1:ssExtDirty"]),
+    dirtyGutter,
+  );
+  check(
+    "unsaved-change gutter: a deleted line leaves a deletion mark",
+    dirtyGutter.deleted.some((r) => r.endsWith(":ssExtDirtyDel")) &&
+      dirtyGutter.deleted.includes("1:ssExtDirty"),
+    dirtyGutter,
+  );
+  check("unsaved-change gutter: marks reach the gutter cells", dirtyGutter.markedCells >= 2, dirtyGutter);
+  check(
+    "unsaved-change gutter: saving clears the marks",
+    dirtyGutter.saved.length === 0 && dirtyGutter.cellsAfterSave === 0,
+    dirtyGutter,
+  );
+
   // -- SAS language server (LSP) ---------------------------------------------------
   // Activation above already swapped any open SAS tabs to Ace (ace/mode/sas
   // triggers ensureLsp() from the adapter constructor) - poll for the worker/
@@ -1283,6 +1340,98 @@ function check(name, ok, detail) {
   check("browse_ss opens at the new root, not the remembered path", rootedOpen === TEST_ROOT, { rootedOpen });
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await sw.evaluate(() => chrome.storage.local.remove("browsePaths"));
+  await page.waitForTimeout(300);
+
+  // Per-extension Enter action + the download key. Both are checked at the
+  // dispatch point (appDMS.handleWebOneEvent, stubbed) rather than by really
+  // opening/downloading anything, and against a synthetic popup row, so no file
+  // of a given extension has to exist on the server.
+  await sw.evaluate(() =>
+    chrome.storage.local.set({ browseFileActions: { lua: "text", sas: "open" } })
+  );
+  await page.waitForTimeout(400);
+  const seededActions = await page.evaluate(() => window.__ssExt && window.__ssExt.browseFileActions);
+  check(
+    "per-extension browse actions live-apply to an open tab",
+    seededActions?.lua === "text" && seededActions?.sas === "open" && !seededActions?.csv,
+    seededActions
+  );
+
+  // One prompt per row: accept() closes it either way. handleWebOneEvent is
+  // stubbed only for the keypress and put straight back - later blocks (the
+  // run-in-progress open guard) wrap the real one.
+  const openWithRow = async (name, key) => {
+    // _browseSsLastPrompt survives the prompt that set it, so clear it first -
+    // otherwise this races the new prompt and drives the closed one.
+    await page.evaluate(() => {
+      window._browseSsLastPrompt = null;
+      window.__ssf.run("browseFiles");
+    });
+    await page.waitForFunction(() => window._browseSsLastPrompt?.popup, null, { timeout: 10000 });
+    await page.waitForTimeout(600);
+    await page.evaluate((itemName) => {
+      window.__opened = [];
+      window.__origWebOneEvent = window.appDMS.handleWebOneEvent;
+      window.appDMS.handleWebOneEvent = (action, item) =>
+        window.__opened.push({ action, name: item && item.name });
+      const { popup } = window._browseSsLastPrompt;
+      popup.setData([{ value: itemName, uri: "/ssext-smoke/" + itemName, meta: "1 KB┊now" }], "");
+      popup.setRow(0);
+    }, name);
+    await page.keyboard.press(key);
+    // The reveal path walks the real project tree; it only has to not open.
+    await page.waitForTimeout(700);
+    return page.evaluate(() => {
+      window.appDMS.handleWebOneEvent = window.__origWebOneEvent;
+      return {
+        opened: window.__opened,
+        closed: !document.querySelector(".ace_browse_ss_container"),
+      };
+    });
+  };
+
+  const luaEnter = await openWithRow("smoke.lua", "Enter");
+  check(
+    'Enter on a ".lua" row opens it as text, per the configured action',
+    luaEnter.opened.length === 1 && luaEnter.opened[0].action === "FileOpenWithTextViewer",
+    luaEnter
+  );
+  const sasEnter = await openWithRow("smoke.sas", "Enter");
+  check(
+    'Enter on an "open"-configured extension lets SAS Studio decide',
+    sasEnter.opened.length === 1 && sasEnter.opened[0].action === "FileOpen",
+    sasEnter
+  );
+  // Unlisted: revealed, even though SAS Studio can type ".csv" and would have
+  // opened its import tool - the fallback is a blanket reveal, not a
+  // would-this-download test.
+  const csvEnter = await openWithRow("smoke.csv", "Enter");
+  check(
+    "Enter on an unlisted extension reveals it in the tree",
+    csvEnter.opened.length === 0 && csvEnter.closed,
+    csvEnter
+  );
+  const ctrlShiftEnter = await openWithRow("smoke.csv", "Control+Shift+Enter");
+  check(
+    "Ctrl+Shift+Enter lets SAS Studio decide for an unlisted file",
+    ctrlShiftEnter.opened.length === 1 && ctrlShiftEnter.opened[0].action === "FileOpen",
+    ctrlShiftEnter
+  );
+  // The case the fallback exists for: SAS Studio can't type ".zip" at all, so
+  // its own handling would be the hidden-iframe download.
+  const zipEnter = await openWithRow("smoke.zip", "Enter");
+  check(
+    'Enter on an untypeable extension (".zip") reveals it rather than downloading it',
+    zipEnter.opened.length === 0 && zipEnter.closed,
+    zipEnter
+  );
+  const altEnter = await openWithRow("smoke.sas", "Alt+Enter");
+  check(
+    "Alt+Enter downloads the file whatever its extension",
+    altEnter.opened.length === 1 && altEnter.opened[0].action === "FileOpenWithExternalProgram",
+    altEnter
+  );
+  await sw.evaluate(() => chrome.storage.local.remove("browseFileActions"));
   await page.waitForTimeout(300);
 
   // The other half of that guard: with no prompt open, the global Alt+C hotkey

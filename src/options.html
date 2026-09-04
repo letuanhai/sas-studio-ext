@@ -158,6 +158,25 @@
       <tbody id="browse-keys-list"></tbody>
     </table>
 
+    <h3 id="browse-file-actions">File browser config</h3>
+    <p class="note">
+      Configure the behavior of File browser "Open item" action (default hotkey is "Enter").
+      File extensions are separated by commas (and optionally spaces), e.g. "lua, sh, log".
+      The default fallback behavior is to reveal the file in file tree.
+      Saved on change; applies to the next prompt you open.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Action</th>
+          <th>File extensions</th>
+        </tr>
+      </thead>
+      <tbody id="browse-file-actions-list"></tbody>
+    </table>
+    <button id="reset-browse-file-actions">Restore defaults</button>
+    <span id="browse-file-actions-status"></span>
+
     <h2 id="editor">Editor</h2>
     <p class="note">
       Defaults for every Ace editor in SAS Studio (code editor, text viewer) and for the snippet editor below.

@@ -107,3 +107,29 @@ var DEFAULT_ACE_CONFIG = {
   // _maybeRegisterLsp.
   lspMaxLines: 500,
 };
+
+/**
+ * What Enter does in the browse prompt (ext-browse_ss.js) for a given file
+ * EXTENSION, when it should differ from SAS Studio's own idea of the file type
+ * (chrome.storage.local's `browseFileActions`, seeded onto __ssExt by sw.js).
+ * Extension (lower case, no dot) -> one of SSF_BROWSE_FILE_ACTIONS' names:
+ * "open" (SAS Studio's own handling), "text" (the text viewer), "reveal"
+ * (select it in the file tree) or "download".
+ *
+ * Anything NOT listed is revealed in the tree: SAS Studio's own handling is a
+ * download for every type it can't recognise, and no keystroke should do that
+ * by accident. So this map is the list of extensions worth OPENING, and it is
+ * meant to be edited - these are just the ones the extension itself is about.
+ * ("Let SAS Studio decide" / Ctrl+Shift+Enter does it for one file, whatever the map says.)
+ *
+ * Stored value REPLACES this map rather than merging with it, so an entry can
+ * be removed from the options page (same reason `snippets`/`vimrc` work that
+ * way).
+ */
+var DEFAULT_BROWSE_FILE_ACTIONS = {
+  sas: "open",
+  log: "text",
+  lst: "text",
+  txt: "text",
+  lua: "text",
+};

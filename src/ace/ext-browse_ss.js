@@ -118,6 +118,7 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
      * @property {String=} historyKey                 Key to store history items in chrome.storage (relayed), disable history if blank or null
      * @property {(() => Partial<DataItem>|null)=} currentItem  Item for the currently focused tab, listed first in the empty prompt
      * @property {(item: DataItem, ...options: any[]) => void} openItem  Function to open the selected item
+     * @property {Boolean=} fileActions               Whether a plain Enter honours the per-extension action map (files browser only)
      * @property {(itemPath: String) => Promise<Partial<DataItem>>} queryItemPath Function to query item path for DataItem
      * @property {Function} scrollTreeToItem          Function to scroll the tree to the selected item
      */
@@ -321,15 +322,13 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             // arg, which would make accept()'s `asText` always truthy (open as text).
             "accept": function () { accept(); },
             // Open file as text
-            "acceptAsText": function () { accept(true) },
+            "acceptAsText": function () { accept('text') },
+            // Download the file (SAS Studio's own "open with external program")
+            "acceptDownload": function () { accept('download') },
+            // Whatever SAS Studio itself would do with this file type
+            "acceptDefault": function () { accept('open') },
             // Scroll tree to selected item
-            "revealInTree": function () {
-                const curData = popup.getData(popup.getRow());
-                if (!curData || curData.error || curData.uri == null) return;
-                const cleanedPath = Utils.normalizeItemPath(curData.uri);
-                done();
-                options.scrollTreeToItem(cleanedPath);
-            },
+            "revealInTree": function () { reveal(popup.getData(popup.getRow())); },
             // Clear prompt
             "clearPrompt": function () { cmdLine.setValue(''); },
             // Clear filter -> Close prompt
@@ -606,8 +605,12 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             })
         }
 
-        /** @param {boolean=} asText */
-        function accept(asText) {
+        /**
+         * @param {('open'|'text'|'reveal'|'download')=} mode How to open the
+         *  item; omitted (plain Enter) means "whatever this file extension is
+         *  configured for in the options page, else reveal it in the tree".
+         */
+        function accept(mode) {
             if (dataLoading) return;
             /** @type DataItem */
             const curData = popup.getData(popup.getRow());
@@ -620,13 +623,37 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 curCollectionPromise = getDataItem(directoryPath);
                 if (!curData.keepPrompt) cmdLine.setValue(directoryPath, 1);
                 updateCompletions();
-            } else {
-                try {
-                    options.openItem(curData, asText);
-                } finally {
-                    done();
-                }
+                return;
             }
+            // Per-extension action, for a plain accept only - every other key
+            // passed its mode explicitly and always means what it says. FILE
+            // browser only: a library item has no extension, and a tab named
+            // "x.lua" is a tab, not a file to reveal in the tree.
+            // Anything not in the map is REVEALED: SAS Studio's own handling is
+            // a download for every type it can't recognise, and no keystroke
+            // should do that by accident. The map's "open" entries (and the
+            // acceptDefault key) are what ask for that handling back.
+            if (!mode && options.fileActions) {
+                mode = window.ssfBrowseFileAction(cleanedPath, window.__ssExt?.browseFileActions)
+                    || 'reveal';
+            }
+            if (mode === 'reveal') { reveal(curData); return; }
+            // "open" = let SAS Studio decide, which is what openItem does with
+            // no mode at all.
+            if (mode === 'open') mode = undefined;
+            try {
+                options.openItem(curData, mode);
+            } finally {
+                done();
+            }
+        }
+
+        /** @param {DataItem} curData */
+        function reveal(curData) {
+            if (!curData || curData.error || curData.uri == null) return;
+            const cleanedPath = Utils.normalizeItemPath(curData.uri);
+            done();
+            options.scrollTreeToItem(cleanedPath);
         }
 
         /**
@@ -732,6 +759,8 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             placeholder: SsFiles.placeholder,
             maxHistory: SsFiles.maxHistory,
             openItem: SsFiles.openFile,
+            // Enter honours the per-extension action map here only - see accept()
+            fileActions: true,
             queryItemPath: SsFiles.getFileDataItem,
             scrollTreeToItem: Utils.focusItemOnTree,
         });
@@ -900,7 +929,11 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             function scrollTreeToSelectedNode(tree) {
                 selectTreePane(tree.id.split('.')[0]);
                 const targetNode = tree.get('selectedNode')?.labelNode;
-                if (targetNode?.scrollIntoViewIfNeeded) {
+                // Nothing matched (a path that no longer exists - a stale
+                // bookmark/history entry, or a reveal of a file just deleted):
+                // leave the tree alone rather than throwing on the null node.
+                if (!targetNode) return;
+                if (targetNode.scrollIntoViewIfNeeded) {
                     targetNode.scrollIntoViewIfNeeded();
                 } else {
                     targetNode.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -1072,9 +1105,12 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         /**
          * Open the file in SAS Studio
          * @param {DataItem} fileDataItem DataItem pointing to the file
-         * @param {boolean=} asText Whether to open the file as text 
+         * @param {('text'|'download')=} mode Open as text / download it
+         *  (SAS Studio's own "open with external program": AppDMS types 'EXT'
+         *  as "" and ends up in openOtherFileAction, its hidden-iframe
+         *  download). Omitted: let SAS Studio pick from the file's extension.
          */
-        static openFile(fileDataItem, asText) {
+        static openFile(fileDataItem, mode) {
             window._browseSsDebugLog('browse_ss: opening file ', fileDataItem);
             const targetItem = {
                 uri: fileDataItem.uri,
@@ -1082,7 +1118,9 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 type: 'FILE',
             }
             // @ts-ignore
-            if (asText) { targetItem.fileType = 'TXT' }
+            if (mode === 'text') { targetItem.fileType = 'TXT' }
+            // @ts-ignore
+            else if (mode === 'download') { targetItem.fileType = 'EXT' }
             Utils.openItemInSs(targetItem);
         }
 

@@ -195,3 +195,67 @@ assert.deepEqual(decorations, [
 ]);
 
 console.log("PASS  vim mark gutter");
+
+// --- unsaved-change gutter: chunks -> gutter decorations ---------------------------
+const { dirtyRowsFromChunks, sameLines } = global.window.__ssExt._dirtyGutter;
+
+assert.ok(sameLines(["a", "b"], ["a", "b"]));
+assert.ok(!sameLines(["a", "b"], ["a", "b", ""]));
+assert.ok(!sameLines(["a"], ["b"]));
+
+// An edit and an insert: every row of the new side gets the changed bar.
+assert.deepEqual(
+  dirtyRowsFromChunks(
+    [
+      { origStart: 2, origEnd: 3, editStart: 2, editEnd: 3 },
+      { origStart: 7, origEnd: 7, editStart: 7, editEnd: 9 },
+    ],
+    12,
+  ),
+  [
+    { row: 2, cls: "ssExtDirty" },
+    { row: 7, cls: "ssExtDirty" },
+    { row: 8, cls: "ssExtDirty" },
+  ],
+);
+
+// A pure deletion has no row of its own - the row that closed the gap is marked,
+// clamped to the last row when the deletion ran to the end of the file.
+assert.deepEqual(dirtyRowsFromChunks([{ origStart: 4, origEnd: 6, editStart: 4, editEnd: 4 }], 9), [
+  { row: 4, cls: "ssExtDirtyDel" },
+]);
+assert.deepEqual(dirtyRowsFromChunks([{ origStart: 9, origEnd: 12, editStart: 9, editEnd: 9 }], 9), [
+  { row: 8, cls: "ssExtDirtyDel" },
+]);
+
+assert.deepEqual(dirtyRowsFromChunks([], 5), []);
+
+console.log("PASS  unsaved-change gutter");
+
+// --- browse prompt: per-extension Enter action -------------------------------------
+const { ssfBrowseFileAction, SSF_BROWSE_FILE_ACTIONS, SSF_BROWSE_KEYS } = global.window;
+const map = { sas: "open", lua: "text", zip: "reveal" };
+
+assert.equal(ssfBrowseFileAction("/folders/myfolders/x.lua", map), "text");
+assert.equal(ssfBrowseFileAction("X.LUA", map), "text"); // extension match is case-insensitive
+assert.equal(ssfBrowseFileAction("/a/b/c.zip", map), "reveal");
+assert.equal(ssfBrowseFileAction("/a/b/c.sas", map), "open");
+assert.equal(ssfBrowseFileAction("/a/b/c.csv", map), ""); // unlisted -> the caller reveals it
+assert.equal(ssfBrowseFileAction("/a/b/README", map), "");
+assert.equal(ssfBrowseFileAction("/a/.luarc", map), ""); // a dotfile has no extension
+assert.equal(ssfBrowseFileAction("/a/b/c.lua", undefined), ""); // nothing seeded yet
+
+// Every action the options page offers must be a mode accept() understands, and
+// each one has a key of its own in the prompt.
+assert.deepEqual(
+  SSF_BROWSE_FILE_ACTIONS.map((a) => a.name),
+  ["open", "text", "reveal", "download"],
+);
+SSF_BROWSE_FILE_ACTIONS.forEach((a) =>
+  assert.ok(
+    SSF_BROWSE_KEYS.some((t) => t.name === a.tool),
+    `${a.tool} missing from SSF_BROWSE_KEYS`,
+  ),
+);
+
+console.log("PASS  browse prompt file actions");

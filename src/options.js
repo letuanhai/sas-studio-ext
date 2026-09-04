@@ -266,6 +266,64 @@
     flagDuplicates();
   }
 
+  // -- Per-extension Enter action (browse prompt) ------------------------------------
+  // Stored as extension -> action name ("open"/"text"/"reveal"/"download"), the shape
+  // ext-browse_ss.js indexes directly; the UI is the inverse (one extension list
+  // per action), so it groups on render and flattens on save. A stored map
+  // REPLACES DEFAULT_BROWSE_FILE_ACTIONS rather than merging, which is what makes
+  // a default entry removable - hence "Restore defaults" rather than a per-row reset.
+  async function renderBrowseFileActions() {
+    const { browseFileActions } = await chrome.storage.local.get("browseFileActions");
+    const stored = browseFileActions || DEFAULT_BROWSE_FILE_ACTIONS;
+    const tbody = document.getElementById("browse-file-actions-list");
+    const status = document.getElementById("browse-file-actions-status");
+    const inputs = {};
+    tbody.textContent = "";
+
+    window.SSF_BROWSE_FILE_ACTIONS.forEach((action) => {
+      const row = document.createElement("tr");
+      const nameCell = document.createElement("td");
+      nameCell.textContent = action.label;
+      row.appendChild(nameCell);
+
+      const valueCell = document.createElement("td");
+      const input = document.createElement("input");
+      input.type = "text";
+      input.spellcheck = false;
+      input.style.width = "100%";
+      input.value = Object.keys(stored)
+        .filter((ext) => stored[ext] === action.name)
+        .join(", ");
+      inputs[action.name] = input;
+      valueCell.appendChild(input);
+      row.appendChild(valueCell);
+      tbody.appendChild(row);
+
+      input.addEventListener("change", save);
+    });
+
+    async function save() {
+      const map = {};
+      window.SSF_BROWSE_FILE_ACTIONS.forEach((action) => {
+        inputs[action.name].value
+          .toLowerCase()
+          .split(",")
+          // A leading dot is the natural way to type these, so accept it.
+          .map((ext) => ext.trim().replace(/^\.+/, ""))
+          .filter(Boolean)
+          .forEach((ext) => (map[ext] = action.name));
+      });
+      await chrome.storage.local.set({ browseFileActions: map });
+      status.textContent = "Saved";
+      setTimeout(() => (status.textContent = ""), 1500);
+    }
+
+    document.getElementById("reset-browse-file-actions").onclick = async () => {
+      await chrome.storage.local.remove("browseFileActions");
+      renderBrowseFileActions();
+    };
+  }
+
   // -- Editor config (theme pair + keyboard handler + snippet editor) ---------------
   // Config flows both ways: this page writes chrome.storage.local.aceConfig (which
   // sw.js live-pushes into SAS Studio tabs via window.__ssExt.applyAceConfig), and
@@ -493,5 +551,6 @@
   // Browse keys are recorded from event.keyCode via ace's own key tables, so
   // they need no layout map - but they do need ace, which options.html loads.
   renderBrowseKeys();
+  renderBrowseFileActions();
   initEditorConfig().then(initSnippets);
 })();

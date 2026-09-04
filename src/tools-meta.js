@@ -358,6 +358,8 @@ Add a prefix to the path for different option:
     { name: "accept", label: "Open item", keys: "Enter", legend: "open" },
     { name: "acceptAsText", label: "Open item as text", keys: "Ctrl-Enter", legend: "as text" },
     { name: "revealInTree", label: "Reveal item in tree", keys: "Shift-Enter", legend: "reveal" },
+    { name: "acceptDownload", label: "Download item", keys: "Alt-Enter", legend: "download" },
+    { name: "acceptDefault", label: "Let SAS Studio decide", keys: "Ctrl-Shift-Enter", legend: "SAS default" },
     { name: "fillPath", label: "Fill prompt with selected path", keys: "Tab", legend: "fill" },
     { name: "parentFolder", label: "Go to parent", keys: "Shift-Space", legend: "parent" },
     { name: "toggleBookmark", label: "Toggle bookmark", keys: "Ctrl-B", legend: "bookmark", history: true },
@@ -373,6 +375,28 @@ Add a prefix to the path for different option:
     { name: "pageUp", label: "Page up", keys: "PageUp" },
     { name: "pageDown", label: "Page down", keys: "PageDown" },
   ];
+
+  // What Enter does per file extension (chrome.storage.local's
+  // `browseFileActions`, defaults in defaults.js): the four things the prompt
+  // has keys for. Each name is what ext-browse_ss.js's accept(mode) takes, and
+  // the options page renders one extension list per entry. Anything NOT listed
+  // is revealed in the tree - "open" is the entry that asks for SAS Studio's own
+  // handling back, since that means a download for every type it can't recognise.
+  window.SSF_BROWSE_FILE_ACTIONS = [
+    { name: "open", label: "Let SAS Studio decide", tool: "acceptDefault" },
+    { name: "text", label: "Open as text", tool: "acceptAsText" },
+    { name: "reveal", label: "Reveal in tree", tool: "revealInTree" },
+    { name: "download", label: "Download", tool: "acceptDownload" },
+  ];
+
+  // Extension of a file NAME or path -> its configured action, "" if none.
+  // Lower-cased and dot-less, matching the stored map's keys.
+  window.ssfBrowseFileAction = function (path, actions) {
+    const name = String(path || "").split("/").pop();
+    const dot = name.lastIndexOf(".");
+    if (dot <= 0) return ""; // no extension, or a dotfile - not an extension
+    return (actions || {})[name.slice(dot + 1).toLowerCase()] || "";
+  };
 
   // Stored binding wins, including "" (deliberately unbound); absent -> default.
   window.ssfBrowseKeys = function (tool, browseKeys) {
