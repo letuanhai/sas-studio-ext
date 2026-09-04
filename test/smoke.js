@@ -42,13 +42,35 @@ function check(name, ok, detail) {
   if (!ok) failures++;
 }
 
+// Every page load creates a workspace session on the server (2 sas_x processes,
+// ~28 MB) and SAS Studio's own cleanup - a sync xhrDelete in its unload handler -
+// has been dead since Chrome 80 blocked sync XHR on page dismissal. So the run
+// has to release its own sessions, from a live page, before abandoning it: a
+// reload abandons one, and so does closing the browser. Only ever delete ids
+// this run created - the endpoint accepts any id, including a colleague's.
+const releaseSession = async (page) => {
+  const id = await page.evaluate(() => window.appDMS?.sessionId).catch(() => null);
+  if (!id) return;
+  await page
+    .evaluate((id) => fetch(`./sasexec/sessions/${id}`, { method: "DELETE", credentials: "same-origin" }), id)
+    .catch(() => {});
+};
+
+let ctx, page;
+// Runs on every exit path, including a harness error - a leaked headless Chromium
+// pings its session every 10s, so it never even goes idle for the server's timeout.
+const shutdown = async () => {
+  if (page) await releaseSession(page);
+  if (ctx) await ctx.close().catch(() => {});
+};
+
 (async () => {
-  const ctx = await chromium.launchPersistentContext("", {
+  ctx = await chromium.launchPersistentContext("", {
     ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: "chromium" }),
     headless: true,
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
   });
-  const page = ctx.pages()[0] || (await ctx.newPage());
+  page = ctx.pages()[0] || (await ctx.newPage());
   page.on("console", (m) => {
     const t = m.text();
     if (t.includes("[SS Ext]") && m.type() === "error") console.log("PAGE ERROR:", t);
@@ -2030,6 +2052,7 @@ function check(name, ok, detail) {
 
   // Now the real thing: a fresh page load with the CSS registered at
   // document_start.
+  await releaseSession(page);
   await page.reload({ waitUntil: "load", timeout: 30000 });
   await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 45000 });
   await page.waitForTimeout(3000);
@@ -2189,6 +2212,7 @@ function check(name, ok, detail) {
   );
   await setDarkMode("off");
 
+  await releaseSession(page);
   await page.reload({ waitUntil: "load", timeout: 30000 });
   await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 45000 });
   await page.waitForTimeout(3000);
@@ -2709,10 +2733,11 @@ function check(name, ok, detail) {
   // Close the extra tab this block opened.
   await page.evaluate(() => window.__ssf.run("closeCurrentTab"));
 
-  await ctx.close();
+  await shutdown();
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed");
   process.exit(failures ? 1 : 0);
-})().catch((e) => {
+})().catch(async (e) => {
   console.error("HARNESS ERROR:", e.message);
+  await shutdown();
   process.exit(1);
 });
