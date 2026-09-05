@@ -81,9 +81,24 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     const t = m.text();
     if (t.includes("[SS Ext]") && m.type() === "error") console.log("PAGE ERROR:", t);
   });
+  // ss-fixes is injected by sw.js and applies its patches once ".dijitTreeNode"
+  // exists; the wrapped closeChild is the last-applied one, so waiting for it
+  // beats a fixed sleep in both directions (faster here, and no flake on a slow
+  // load). The settle after it is for SAS Studio's own tab restore.
+  const waitForPatches = async () => {
+    await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 45000 });
+    await page
+      .waitForFunction(
+        () => /__ssfClosedTabs/.test(String(window.dijit?.layout?.StackContainer?.prototype?.closeChild)),
+        null,
+        { timeout: 30000 },
+      )
+      .catch(() => {});
+    await page.waitForTimeout(1000);
+  };
+
   await page.goto(URL, { waitUntil: "load", timeout: 30000 });
-  await page.waitForSelector(".dijitTreeNode", { timeout: 45000 });
-  await page.waitForTimeout(3000);
+  await waitForPatches();
 
   // Dismiss the autosave-recovery dialog if present ("The autosave file ... is
   // newer ..."). Smoke runs themselves cause it: they type into the code editor
@@ -2060,8 +2075,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // document_start.
   await releaseSession(page);
   await page.reload({ waitUntil: "load", timeout: 30000 });
-  await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 45000 });
-  await page.waitForTimeout(3000);
+  await waitForPatches();
 
   const afterReload = await readDark();
   check("dark mode survives a page reload", afterReload.bodyIsDark, afterReload);
@@ -2220,8 +2234,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
 
   await releaseSession(page);
   await page.reload({ waitUntil: "load", timeout: 30000 });
-  await page.waitForSelector(".dijitTreeNode", { state: "attached", timeout: 45000 });
-  await page.waitForTimeout(3000);
+  await waitForPatches();
   const offAfterReload = await page.evaluate(() => ({
     bodyBg: getComputedStyle(document.body).backgroundColor,
     linkGone: !document.getElementById("ssext-dark-css"),
