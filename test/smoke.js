@@ -2298,6 +2298,10 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   const paneSplit = await page.evaluate(async () => {
     const ed = () => window.appDMS.tabs.getFocusedTab().editor;
     const wait = () => new Promise((r) => setTimeout(r, 600));
+    // SAS Studio persists the pane layout, so a new tab can come up already
+    // split from a previous run - start from one group either way.
+    window.__ssf.run("resetLayoutCurrentTab");
+    await wait();
     window.__ssf.run("switchPaneGroup");
     const noSplitWarn = document.body.innerText.includes("Panes aren't split");
     window.__ssf.run("movePaneToOtherGroup"); // the Code pane, out to the right
@@ -2556,13 +2560,23 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // which you never call on a pane you can already see. Nothing is marked here.
   const splitPane = await page.evaluate(async () => {
     const ed = window.appDMS.tabs.getFocusedTab().editor;
-    // Results is the selected pane after the click above - move it out to its own strip.
+    // Select Results through the container's OWN selectChild: the block above
+    // drives the pristine prototype on purpose, which bypasses SAS's own
+    // onTabSelect connection and leaves ed.selectedTab (what
+    // movePaneToOtherGroup acts on) pointing at the previous pane.
+    ed.sasSuiteTabContainer.selectChild(ed.outputContentPane);
+    await new Promise((r) => setTimeout(r, 600));
     window.__ssf.run("movePaneToOtherGroup");
     await new Promise((r) => setTimeout(r, 1200));
     window.__ssf.run("focusCodeEditor");
     await new Promise((r) => setTimeout(r, 400));
     return {
-      resultsInOwnStrip: ed.outputContentPane.getParent().selectedChildWidget === ed.outputContentPane,
+      // A real strip of its own - "is it its own container's selected child" is
+      // true in the UNSPLIT case too, so it proves nothing on its own.
+      resultsInOwnStrip:
+        !!ed.rightTabs &&
+        ed.outputContentPane.getParent() === ed.rightTabs &&
+        ed.rightTabs.selectedChildWidget === ed.outputContentPane,
       selected: ed.selectedTab && ed.selectedTab.type,
     };
   });
