@@ -10,7 +10,9 @@ the highest `v*` git tag (`v0.9` -> `0.10`).
 
 ## Steps
 
-1. **Prepare** — `scripts/release.sh prepare [version]` from the repo root. It
+1. **Prepare** — `scripts/release.sh prepare [version]`, run from the repo root
+   (the path is relative to THIS skill directory — there is no `scripts/` in the
+   repo). It
    validates the version (`<major>.<minor>`), refuses an existing tag or a dirty
    working tree, and prints `version=` / `last_tag=`. On a non-zero exit, report
    the message and stop — don't work around it.
@@ -27,10 +29,13 @@ the highest `v*` git tag (`v0.9` -> `0.10`).
    is deliberately omitted. Report what you left out.
 4. **Finish** — `scripts/release.sh finish <version>`: bumps `manifest.json`,
    commits `chore: release <version>` (manifest + changelog only) and tags
-   `v<version>`. Does not package, does not push.
+   `v<version>`. Does not package, does not push. `manifest.json` is the only
+   file holding a version — `package.json` deliberately has no `version` field,
+   so don't add one "to keep them in sync".
 
 ## Notes
 
 - Versions are two-part (`0.9`), tags are `v`-prefixed. Keep both.
-- Building the zip is not part of this skill; run `./tools/package.sh` separately.
+- Building the zip is not part of this skill; run `npm run dist` separately
+  (clean `dist/`, build `lib/` if needed, then `tools/package.sh`).
 - Pushing is never part of this skill; the user pushes when they want to.
