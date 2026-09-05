@@ -2603,6 +2603,14 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   }, runTabTitle);
   await page.waitForTimeout(500);
 
+  // The session restores whatever tabs the user left open, so every count below
+  // is relative to what is actually there plus the one tab this block adds -
+  // hard-coded counts only ever passed against an otherwise-empty session.
+  const baseTitles = await page.evaluate(() =>
+    window.appDMS.tabs.getAllTabObjects().map((t) => t.title),
+  );
+  const tabCount = baseTitles.length + 1;
+
   const noSplitWarned = await page.evaluate(() => {
     window.__ssf.run("switchTabGroup");
     return document.body.innerText.includes("No tab group split");
@@ -2610,8 +2618,11 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   check("switchTabGroup warns instead of throwing with no split", noSplitWarned, { noSplitWarned });
 
   // A lone tab can't be split off - the group it would leave behind would be empty.
+  // The action only runs when the check applies: with other tabs open it would
+  // really split, and every check below starts from an unsplit tab area.
   const lonelyRefused = await page.evaluate(() => {
     const before = window.appDMS.tabs.getAllTabObjects().length;
+    if (before !== 1) return { before };
     window.__ssf.run("moveTabToOtherGroup");
     return { before, warned: document.body.innerText.includes("nothing to split it from"), split: !!window.appDMS.tabs.secondaryTabContainer };
   });
@@ -2633,7 +2644,11 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     return { main: tabs.mainTabs.map((t) => t.title), secondary: (tabs.secondaryTabs || []).map((t) => t.title) };
   });
   await page.waitForTimeout(1200);
-  check("moveTabToOtherGroup splits the tab area when there is no split yet", split.secondary.length === 1, split);
+  check(
+    "moveTabToOtherGroup splits the tab area when there is no split yet",
+    split.secondary.length === 1 && split.main.length === tabCount - 1,
+    { split, tabCount },
+  );
   const groupToggle = await page.evaluate(async () => {
     const focused = () => window.appDMS.tabs.getFocusedTab()?.title;
     const start = focused();
@@ -2656,8 +2671,15 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // Moving the last tab back out un-splits - which also leaves the session as we
   // found it, so this is both the check and the cleanup.
   // The main group can never be emptied - SAS Studio has no such state.
-  const emptyMainRefused = await page.evaluate(() => {
+  const emptyMainRefused = await page.evaluate(async () => {
     const tabs = window.appDMS.tabs;
+    // Drain the main group down to its last tab first - the refusal only applies
+    // there, and the session may have brought more than one tab with it.
+    for (let i = 0; i < 20 && tabs.mainTabs.length > 1; i++) {
+      tabs.selectTab(tabs.mainTabs[0]);
+      window.__ssf.run("moveTabToOtherGroup");
+      await new Promise((r) => setTimeout(r, 600));
+    }
     tabs.selectTab(tabs.mainTabs[0]);
     window.__ssf.run("moveTabToOtherGroup");
     return {
@@ -2668,31 +2690,47 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   });
   check(
     "moveTabToOtherGroup refuses to empty the main group",
-    emptyMainRefused.warned && emptyMainRefused.main.length === 1 && emptyMainRefused.secondary.length === 1,
-    emptyMainRefused,
+    emptyMainRefused.warned &&
+      emptyMainRefused.main.length === 1 &&
+      emptyMainRefused.secondary.length === tabCount - 1,
+    { emptyMainRefused, tabCount },
   );
 
   // Splitting, un-splitting and splitting AGAIN used to throw from inside
   // _addSecondaryTabContainer: tabsContextMenuCopyUri shared one MenuItem widget
   // between the two tab menus, and destroying the secondary menu destroyed it.
-  const roundTrips = await page.evaluate(async () => {
+  const roundTrips = await page.evaluate(async (tabCount) => {
     const tabs = window.appDMS.tabs;
     const wait = () => new Promise((r) => setTimeout(r, 600));
     const states = [];
+    // Back to one tab on the far side, which is where "move the last one out"
+    // un-splits (the check above drained the main group instead).
+    for (let i = 0; i < 20 && (tabs.secondaryTabs || []).length > 1; i++) {
+      tabs.selectTab(tabs.secondaryTabs[0]);
+      window.__ssf.run("moveTabToOtherGroup");
+      await wait();
+    }
     for (let i = 0; i < 3; i++) {
       // last tab out of the secondary group -> un-split
       tabs.selectTab(tabs.secondaryTabs[0]);
       window.__ssf.run("moveTabToOtherGroup");
       await wait();
-      states.push({ i, step: "unsplit", ok: !tabs.secondaryTabContainer && tabs.mainTabs.length === 2 });
+      states.push({
+        i,
+        step: "unsplit",
+        ok: !tabs.secondaryTabContainer && tabs.mainTabs.length === tabCount,
+      });
       // and back out -> a brand new secondary container
-      tabs.selectTab(tabs.mainTabs[1]);
+      tabs.selectTab(tabs.mainTabs[tabs.mainTabs.length - 1]);
       window.__ssf.run("moveTabToOtherGroup");
       await wait();
       states.push({
         i,
         step: "resplit",
-        ok: !!tabs.secondaryTabContainer && tabs.mainTabs.length === 1 && tabs.secondaryTabs.length === 1,
+        ok:
+          !!tabs.secondaryTabContainer &&
+          tabs.mainTabs.length === tabCount - 1 &&
+          tabs.secondaryTabs.length === 1,
       });
       // switchTabGroup must still work BOTH ways afterwards
       tabs.selectTab(tabs.mainTabs[0]);
@@ -2704,7 +2742,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       states.push({ i, step: "switch", ok: toSecondary && tabs.mainTabs.includes(tabs.getFocusedTab()) });
     }
     return states;
-  });
+  }, tabCount);
   check(
     "split / un-split / re-split survives repeated round trips, switchTabGroup with it",
     roundTrips.length === 9 && roundTrips.every((s) => s.ok),
@@ -2728,7 +2766,11 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     await new Promise((r) => setTimeout(r, 600));
     return { stillSplit: !!tabs.secondaryTabContainer, main: tabs.mainTabs.map((t) => t.title) };
   });
-  check("moving the last tab back out un-splits the tab area", !unsplit.stillSplit && unsplit.main.length === 2, unsplit);
+  check(
+    "moving the last tab back out un-splits the tab area",
+    !unsplit.stillSplit && unsplit.main.length === tabCount,
+    { unsplit, tabCount },
+  );
 
   // unsplitTabGroups with SEVERAL tabs on the far side - the one case moving tabs
   // one at a time doesn't reach (the main group can never be emptied down to it).
@@ -2743,13 +2785,14 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   const bulkUnsplit = await page.evaluate(async () => {
     const tabs = window.appDMS.tabs;
     const wait = () => new Promise((r) => setTimeout(r, 600));
-    // Two tabs out to the right, leaving one behind in the main group.
+    // Everything but the first tab out to the right - at least two, which is the
+    // case moving tabs one at a time can't reach.
     for (const t of tabs.mainTabs.slice(1)) {
       tabs.selectTab(t);
       window.__ssf.run("moveTabToOtherGroup");
       await wait();
     }
-    const split = { main: tabs.mainTabs.length, secondary: (tabs.secondaryTabs || []).length };
+    const split = { main: tabs.mainTabs.length, secondary: (tabs.secondaryTabs || []).length, total: tabs.getAllTabObjects().length };
     const focusedBefore = tabs.getFocusedTab()?.title;
     window.__ssf.run("unsplitTabGroups");
     await wait();
@@ -2757,7 +2800,10 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   });
   check(
     "unsplitTabGroups moves every tab back and collapses the split",
-    bulkUnsplit.split.secondary === 2 && !bulkUnsplit.stillSplit && bulkUnsplit.main === 3,
+    bulkUnsplit.split.secondary === bulkUnsplit.split.total - 1 &&
+      bulkUnsplit.split.secondary >= 2 &&
+      !bulkUnsplit.stillSplit &&
+      bulkUnsplit.main === bulkUnsplit.split.total,
     bulkUnsplit,
   );
   check(
@@ -2765,8 +2811,16 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     bulkUnsplit.focusedAfter === bulkUnsplit.focusedBefore,
     bulkUnsplit,
   );
-  // Close the extra tab this block opened.
-  await page.evaluate(() => window.__ssf.run("closeCurrentTab"));
+  // Close the tabs this block opened - both of them, by identity rather than by
+  // "the focused one", so a session that arrived with tabs keeps exactly those.
+  await page.evaluate(async (baseTitles) => {
+    const tabs = window.appDMS.tabs;
+    for (const t of tabs.getAllTabObjects().filter((t) => !baseTitles.includes(t.title))) {
+      if (t.editor) t.editor.editorContentChanged = false;
+      tabs.closeTab(t);
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }, baseTitles);
 
   await shutdown();
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed");
