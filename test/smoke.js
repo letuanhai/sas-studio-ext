@@ -2,20 +2,19 @@
  * End-to-end smoke test: loads the unpacked extension in Chromium against a live
  * SAS Studio instance and exercises the page-side features.
  *
- * Run:  node test/smoke.js
- * Env:  SS_URL      SAS Studio URL      (default http://sas-ue.lan/SASStudio/38/)
- *       CHROME_BIN  Chromium executable (default: playwright's bundled chromium)
- * Needs the `playwright` module resolvable (npx playwright / NODE_PATH / local install)
- * and at least one closable FILE tab open in the SAS Studio session.
+ * Run:   npm run test:smoke   (or `npm run test` for units + smoke)
+ * Setup: npm i && npx playwright install chromium
+ * Env:   SS_URL      SAS Studio URL      (default http://sas-ue.lan/SASStudio/38/)
+ *        CHROME_BIN  Chromium executable (default: playwright's bundled chromium)
+ * Needs at least one closable FILE tab open in the SAS Studio session.
  *
- * If `playwright` isn't installed and `npx playwright ...` can't reach the network
- * either, check under `~/.npm/_npx/` (one subdir per past npx invocation) for a
- * `node_modules/playwright` left by a previous run and point NODE_PATH at that
- * node_modules dir. Then set CHROME_BIN to a matching Chromium build found under
- * `~/.cache/ms-playwright/` (look for a `chromium-<build>/chrome-linux64/chrome`)
- * (playwright's own launcher hardcodes a build number - a version mismatch between
- * the npx-cached `playwright` and whatever's in that cache dir makes the default
- * `chromium.launch()`/`executablePath()` point at a build that isn't actually there).
+ * Install `chromium` specifically: a bare `npx playwright install` also fetches
+ * Firefox and WebKit, which nothing here launches and whose missing system
+ * libraries produce a host-validation warning that reads like a real failure.
+ * CHROME_BIN is only for pointing at some other build - playwright's own launcher
+ * hardcodes a build number, so a `playwright` and a `~/.cache/ms-playwright/`
+ * that disagree make the default `executablePath()` point at a build that isn't
+ * there (`npx playwright install` after an `npm i` keeps them in step).
  * Don't use a real Chrome (e.g. `google-chrome-stable`) as CHROME_BIN: unlike
  * playwright's bundled Chromium, it silently fails to load `--load-extension` in
  * headless mode (chrome://extensions comes up empty, no error) even with

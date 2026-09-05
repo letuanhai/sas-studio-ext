@@ -378,7 +378,8 @@ covers readability.
 No build step for the extension's own code (only `./tools/build_lib.sh` for the
 gitignored `lib/`, and no Tampermonkey). To test changes manually: reload the unpacked
 extension in `chrome://extensions/`, refresh the SAS Studio page, and toggle
-from the popup. `node test/smoke.js` runs the end-to-end smoke test — headless
+from the popup. After `npm i && npx playwright install chromium`, `npm run test`
+runs the unit checks and then the end-to-end smoke test — headless
 Chromium with the unpacked extension against a live SAS Studio instance,
 exercising injection, tab management, the editor toggle, the text viewer, the
 command palette, editor config, and LSP startup (see the file header for

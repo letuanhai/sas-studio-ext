@@ -1,7 +1,7 @@
 /**
  * Pure-logic checks for the shared helpers in src/tools-meta.js and the
  * saslog fold mode - no browser, no live SAS Studio instance:
- * `node test/units.js`.
+ * `npm run test:units`.
  */
 const assert = require("assert");
 const path = require("path");

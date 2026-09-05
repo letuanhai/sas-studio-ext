@@ -8,7 +8,7 @@
  * because the step before it (asking the page for its workspace session id)
  * hung forever on a page whose JS thread SAS Studio had blocked.
  *
- * Needs playwright + a chromium (same NODE_PATH/CHROME_BIN recipe as smoke.js),
+ * Needs playwright + a chromium (`npm i && npx playwright install chromium`),
  * but no server: it wedges a data: URL with an infinite loop.
  *
  * Run:  node test/browser-guard-check.js

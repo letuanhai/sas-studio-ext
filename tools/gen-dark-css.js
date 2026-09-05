@@ -25,8 +25,8 @@
  * Run:  node tools/gen-dark-css.js
  * Env:  SS_URL      SAS Studio URL      (default http://sas-ue.lan/SASStudio/38/)
  *       CHROME_BIN  Chromium executable (default: playwright's bundled chromium)
- * Needs `playwright` resolvable (see test/smoke.js's header for the NODE_PATH /
- * CHROME_BIN recipe when it is only present as an npx cache) and network access
+ * Needs `playwright` installed (`npm i && npx playwright install chromium`; see
+ * test/smoke.js's header for the CHROME_BIN override) and network access
  * to npm for the pinned Dark Reader build. Dark Reader is a dev-time tool only -
  * it is never vendored into lib/ and never ships in the extension.
  */
