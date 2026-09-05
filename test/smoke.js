@@ -1808,8 +1808,10 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     // Run start: dialog hidden, status bar tinted amber (#ffe9a8 =
     // rgb(255, 233, 168)) with a Cancel link, running tab marked.
     const dialogHidden = dialog.domNode.style.display === "none";
+    // The tint is a class (ssf-run-bar) + a stylesheet inside @layer ssext-dark,
+    // never an inline style - so read what is actually painted.
     const statusBarTinted =
-      !!statusBar && /255,\s*233,\s*168|#ffe9a8/i.test(statusBar.style.getPropertyValue("background"));
+      !!statusBar && /255,\s*233,\s*168/.test(getComputedStyle(statusBar).backgroundColor);
     const cancelLinkShown = !!document.getElementById("ssf-run-cancel");
     const runTabMarked = runTab
       ? runTab.tab.controlButton.domNode.classList.contains("ssf-running")
@@ -1891,7 +1893,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     // Run end (reenable) also un-tints the status bar, drops the Cancel link,
     // and clears the running-tab marker.
     const statusBarRestoredAfterDestroy =
-      !statusBar || !/255,\s*233,\s*168|#ffe9a8/i.test(statusBar.style.getPropertyValue("background"));
+      !statusBar || !/255,\s*233,\s*168/.test(getComputedStyle(statusBar).backgroundColor);
     const cancelLinkRemovedAfterDestroy = !document.getElementById("ssf-run-cancel");
     const runTabUnmarkedAfterDestroy = runTab
       ? !runTab.tab.controlButton.domNode.classList.contains("ssf-running")
