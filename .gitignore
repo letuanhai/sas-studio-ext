@@ -3,3 +3,5 @@ SASStudio-*/
 lib/
 .lsp-build/
 .ace-build/
+node_modules/
+package-lock.json

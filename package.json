@@ -1,0 +1,19 @@
+{
+  "name": "sas-studio-ext",
+  "private": true,
+  "description": "Dev-time manifest: test/build script aliases and the one dev dependency (playwright). No version field on purpose - manifest.json's is the extension's only version.",
+  "scripts": {
+    "test": "node test/units.js && node test/smoke.js",
+    "test:units": "node test/units.js",
+    "test:smoke": "node test/smoke.js",
+    "build": "npm run build:lib && npm run build:dark-css",
+    "build:lib": "./tools/build_lib.sh",
+    "build:dark-css": "[ -f src/dark.css ] || node tools/gen-dark-css.js",
+    "build:force": "rm -rf lib && npm run build",
+    "package": "npm run build && ./tools/package.sh",
+    "dist": "rm -rf dist/* && npm run package"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  }
+}
