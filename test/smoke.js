@@ -2329,6 +2329,69 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     offAfterReload,
   );
 
+  // -- Save As under a new extension -----------------------------------------------
+  // Save As ends in successfulOnFileSave, NOT successfulSave, so nothing used to
+  // re-derive the mode (a program saved as .lua kept SAS highlighting) or clear
+  // the unsaved-change gutter. Late in the run, since it renames a code tab: the
+  // blocks above open theirs as .sas and expect the SAS mode.
+  const saveAs = await page.evaluate(async (lp) => {
+    const a = window.appDMS;
+    // Self-contained: the dark-mode block above reloads the page, which leaves
+    // Ace inactive and every restored code tab on the stock editor.
+    const wasActive = !!window.__ssExt.active;
+    if (!wasActive) {
+      await window.__ssExt.toggle(lp);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    const restore = async () => {
+      if (!wasActive) await window.__ssExt.toggle(lp);
+    };
+    const t = a.tabs.getAllTabObjects().find((x) => x.editor && x.editor.editor && x.editor.editor.aceEditor);
+    if (!t) {
+      await restore();
+      return { skipped: true, wasActive };
+    }
+    a.tabs.selectTab(t);
+    const adapter = t.editor.editor;
+    adapter.aceEditor.focus();
+    adapter.aceEditor.insert("\n* ssext save-as probe;\n");
+    await new Promise((r) => setTimeout(r, 600));
+    const before = { mode: adapter.aceEditor.session.$modeId, dirty: (adapter._dirtyRows || []).length };
+    // Unique name: a second run would otherwise hit the overwrite prompt and the
+    // save would silently not happen. Deleted again below.
+    const path = "/folders/myfolders/ssext_saveas_" + Date.now() + ".lua";
+    await window.__ssf.saveFocusedFileAtPath(path);
+    await new Promise((r) => setTimeout(r, 6000));
+    const url = a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(path);
+    const deleted = await new Promise((res) =>
+      dojo.xhrDelete({ url, preventCache: true, load: () => res(true), error: () => res(false) }),
+    );
+    const out = {
+      before,
+      name: t.editor.name,
+      mode: adapter.aceEditor.session.$modeId,
+      dirty: (adapter._dirtyRows || []).length,
+      deleted,
+      wasActive,
+    };
+    await restore();
+    return out;
+  }, libPath);
+  if (saveAs.skipped) {
+    check("save-as test setup - a code tab is open", false, saveAs);
+  } else {
+    check(
+      "Save As to .lua switches the editor off the SAS mode",
+      saveAs.before.mode === "ace/mode/sas" && saveAs.mode === "ace/mode/lua",
+      saveAs,
+    );
+    check(
+      "Save As re-baselines the unsaved-change gutter",
+      saveAs.before.dirty > 0 && saveAs.dirty === 0,
+      saveAs,
+    );
+  }
+
   // -- Keyboard entry points into SAS Studio's own widgets --------------------------
   // These are pure widget lookups, so what they guard against is SAS Studio's own
   // internals drifting - only a live check sees that. Runs last: the tab-group part

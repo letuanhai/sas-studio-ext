@@ -326,6 +326,14 @@
       this._refreshDirtyGutter();
     }
 
+    // Used after a Save As, which can change the file's extension out from under
+    // the mode the editor was created with.
+    setMode(modeId) {
+      const session = this.aceEditor && this.aceEditor.session;
+      if (!session || !modeId || session.$modeId === modeId) return;
+      session.setMode(modeId);
+    }
+
     _scheduleDirtyGutter() {
       clearTimeout(this._dirtyTimer);
       this._dirtyTimer = setTimeout(() => this._refreshDirtyGutter(), DIRTY_DEBOUNCE_MS);
@@ -1815,6 +1823,30 @@
         }
       } catch (e) {
         console.warn("[SS Ext] could not reset the unsaved-change gutter:", e);
+      }
+      return result;
+    };
+
+    // Save As does NOT end in successfulSave - it ends here (onFileSave calls
+    // this on both the 200 and the 499 branch, mirroring saveFile/successfulSave).
+    // successfulOnFileSave(err, uri, fileName) is what sets this.name/this.uri,
+    // retitles the tab and clears editorContentChanged, so it is the one place
+    // that knows the file has a new NAME:
+    //   - the mode is resolved once, from the name the editor was created with
+    //     (createCodeEditor's aceModeFor(this.name)), so a program saved as .lua
+    //     kept SAS highlighting for the rest of the page's life;
+    //   - the unsaved-change gutter was never re-baselined by a Save As either,
+    //     so the marks stayed on lines that are now saved.
+    const originalSuccessfulOnFileSave = DMSEditor.prototype.successfulOnFileSave;
+    DMSEditor.prototype.successfulOnFileSave = function (err, uri, fileName) {
+      const result = originalSuccessfulOnFileSave.apply(this, arguments);
+      try {
+        if (err === false && this.editor) {
+          if (this.editor.setMode) this.editor.setMode(aceModeFor(fileName || this.name));
+          if (!this.editorContentChanged && this.editor.markSaved) this.editor.markSaved();
+        }
+      } catch (e) {
+        console.warn("[SS Ext] could not update the editor after a save-as:", e);
       }
       return result;
     };
