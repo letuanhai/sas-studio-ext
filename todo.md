@@ -16,3 +16,6 @@
   /path/to/new.lua, or open existing file.sas -> edit then save as /path/to/file.lua~~
   → `saveFocusedFileAtPath` (the `saveFileAtPath` action and vim `:w <path>`) now selects the typed
     extension in the Save As dialog's type combo, so SAS Studio stops appending `.sas` to it
+- ~~plain text editors restored at app start is not swapped to ace editor~~
+  → `activate()` also converts text viewers that already exist (restored tabs, and any opened while
+    the toggle was off), not just the ones `createFileView` builds while active

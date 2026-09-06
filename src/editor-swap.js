@@ -2477,8 +2477,6 @@
   }
 
   function restoreTextViewers() {
-    // ponytail: viewers opened while INACTIVE were never converted, so they stay
-    // original editors - activation only affects viewers opened afterwards.
     const entries = ssExt._textViewers.splice(0, ssExt._textViewers.length);
     entries.forEach((entry) => {
       const { pane, adapter, textarea, origSet, origResize, buttons } = entry;
@@ -2558,6 +2556,30 @@
     return swapped;
   }
 
+  // Text viewers that already exist when the toggle goes on: the createFileView
+  // wrapper only converts viewers created while active, and tabs restored from the
+  // last session (SASStudioTabs.loadPersistedTabs, run during app startup) are
+  // built long before injection - so a restored .log/.txt tab kept its plain
+  // SimpleTextarea for the rest of the page's life. Only createFileView ever sets
+  // `tabHolder` on a tab (AppDMS.js:4291), so that is the whole "is this a text
+  // viewer" test.
+  function swapTextViewersToAce() {
+    let swapped = 0;
+    const tabs = appDMS.getCurrentPerspectiveSASStudioTabs();
+    (tabs?.getAllTabObjects?.() || []).forEach((item) => {
+      const tabHolder = item.tab && item.tab.tabHolder;
+      if (!tabHolder || !tabHolder.textContainer) return;
+      if (ssExt._textViewers.some((e) => e.tabHolder === tabHolder)) return;
+      try {
+        convertTextViewerToAce(item, tabHolder);
+        swapped++;
+      } catch (e) {
+        console.error("[SS Ext] Failed to convert existing text viewer to Ace:", e);
+      }
+    });
+    return swapped;
+  }
+
   function restoreTabsToOriginal() {
     let restored = 0;
     const tabs = appDMS.getCurrentPerspectiveSASStudioTabs();
@@ -2612,7 +2634,8 @@
     installPatches();
 
     const swapped = swapTabsToAce();
-    console.log(`[SS Ext] activated Ace editor, ${swapped} tab(s) swapped`);
+    const viewers = swapTextViewersToAce();
+    console.log(`[SS Ext] activated Ace editor, ${swapped} tab(s) swapped, ${viewers} text viewer(s) swapped`);
     return { active: true };
   }
 
