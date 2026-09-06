@@ -1039,6 +1039,22 @@ Add a prefix to the path for different option:
     });
   }
 
+  // Save As always forces the file-type combo's extension onto the typed name
+  // (DMSEditor.onSaveAsOK: `if (!endsWith(name, "." + type.toLowerCase())) name +=
+  // ...`), so asking for /path/to/new.lua with the combo on SAS would write
+  // new.lua.sas. The combo is a plain dijit/form/Select, so adding the target
+  // extension as an option and selecting it makes SAS's own code append nothing -
+  // no reimplementation of the save. priorityChange=false suppresses the onChange
+  // handler, which would otherwise rebuild the destination tree (filtered to the
+  // new type) underneath the folder we just navigated to, and rewrite the name.
+  function useFileTypeOfName(saveAsDialog, fileName) {
+    const ext = fileName.includes(".") ? fileName.split(".").pop().toUpperCase() : "";
+    const combo = saveAsDialog.typeCombo;
+    if (!ext || combo.get("value") === ext) return;
+    if (!combo.getOptions(ext)) combo.addOption({ value: ext, label: ext });
+    combo.set("value", ext, false);
+  }
+
   // Trigger SAS Studio's own Save As flow for the currently focused editor, fill in
   // the destination tree + filename from a typed absolute path instead of navigating
   // the tree by hand, then complete the save exactly as clicking the dialog's Save
@@ -1058,6 +1074,7 @@ Add a prefix to the path for different option:
     return waitForSaveAsDialog()
       .then((saveAsDialog) =>
         scrollTreeToPath(dirPath, "destination").then(() => {
+          useFileTypeOfName(saveAsDialog, fileName);
           saveAsDialog._onDestTreeClick(saveAsDialog.tree);
           saveAsDialog.fileNameTextBox.set("value", fileName);
           saveAsDialog.okButton.onClick();

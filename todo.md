@@ -12,3 +12,7 @@
   multiple paths~~
   → `librariesContextMenuCopyPath` patch: "Copy Path" in the libraries tree menu, copying every
     `data.concats[].physicalName` (one per line) - the same source the stock Properties dialog reads
+- ~~save new or existing editor with custom extension. e.g. alt+n create new tab -> save as
+  /path/to/new.lua, or open existing file.sas -> edit then save as /path/to/file.lua~~
+  → `saveFocusedFileAtPath` (the `saveFileAtPath` action and vim `:w <path>`) now selects the typed
+    extension in the Save As dialog's type combo, so SAS Studio stops appending `.sas` to it
