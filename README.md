@@ -43,7 +43,12 @@ independent UX fixes for the rest of SAS Studio.
   mirrors the underlying (hidden) SimpleTextarea so SAS Studio's own load/refresh
   code keeps working. Editing marks the tab dirty (`*` in the title, like the code
   editor); save with the Save button next to Refresh, `Ctrl/Cmd+S`, or vim `:w` —
-  Save POSTs to the workspace endpoint. Vim `:q`/`:wq`/`:x` close (and save) the tab
+  Save POSTs to the workspace endpoint. Vim `:q`/`:wq`/`:x` close (and save) the tab.
+  Text tabs restored from the last session are converted too, not just the ones
+  opened while the toggle is on
+- Save a file under any extension: "Save file at path" (and vim `:w <path>`) accept
+  e.g. `/path/to/new.lua`, where SAS Studio would otherwise write `new.lua.sas`. The
+  editor's syntax highlighting follows the new extension
 - Persistent editor configuration: Ace's own stock settings menu (`Ctrl-,`/
   `Cmd-,`, or "Show settings menu" in the command palette when an editor is
   focused — no custom preferences panel) is the settings UI. Any option changed
@@ -204,7 +209,10 @@ browse prompts work even while the built-in editor is still in use.
 
 `ss-fixes.js` (injected automatically on every SAS Studio page load) provides
 various independent fixes on top of the editor toggle: tab management, tree
-navigation, keyboard shortcuts, clipboard, context menus. Quick actions
+navigation, keyboard shortcuts, clipboard, context menus — including "Copy Path"
+on a library in the libraries tree, which copies every physical location it maps
+to (one per line, so a concatenated SAS data set library gives all of them, and a
+DBMS library gives its connection string). Quick actions
 (reload file, close tab, focus tree, ...) live in the command palette
 (Alt+Shift+P), each with its default hotkey shown alongside. Passive patches (confirm-on-drop,
 middle-click-close, keep-alive, ...) and hotkey bindings are configured from
