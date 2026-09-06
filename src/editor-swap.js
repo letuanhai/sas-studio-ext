@@ -1699,6 +1699,19 @@
         }
       }
     }
+    // No code tab to take the class off - a session restored with only text
+    // viewers (or none at all) has none, and then this bailed and never patched
+    // createCodeEditor, so every tab opened afterwards got the STOCK editor for
+    // the rest of the page's life. dojo's sync AMD form has the class either
+    // way: AppDMS depends on the module, so it is loaded by the time we run.
+    // (Same lookup ss-fixes.js's runFocus patch uses, for the same reason.)
+    if (!DMSEditor) {
+      try {
+        DMSEditor = window.require("webdms/DMSEditor");
+      } catch (e) {
+        console.warn("[SS Ext] require('webdms/DMSEditor') failed:", e);
+      }
+    }
 
     if (!DMSEditor || !DMSEditor.prototype.createCodeEditor) {
       console.warn("[SS Ext] Could not find DMSEditor class to patch");

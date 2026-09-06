@@ -356,6 +356,67 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   const activated = await page.evaluate((lp) => window.__ssExt.toggle(lp), libPath);
   check("Ace editor replacement activates", activated && activated.active === true, activated);
 
+  // The createCodeEditor dispatcher must be installed even when the session
+  // restored with no code tab to take the DMSEditor class off - otherwise every
+  // tab opened afterwards silently gets SAS Studio's own editor. Deliberately
+  // not gated on a code tab existing: that gate is what hid this.
+  const dispatcher = await page.evaluate(() => {
+    let cls = null;
+    try {
+      cls = window.require("webdms/DMSEditor");
+    } catch {}
+    return {
+      patched: !!(cls && cls.prototype._aceReplacementPatched),
+      saved: !!window.__ssExt.originalCreateCodeEditor,
+      codeTabs: window.appDMS.tabs.getAllTabObjects().filter((t) => t.editor).length,
+    };
+  });
+  check("createCodeEditor dispatcher installed (even with no code tab)", dispatcher.patched && dispatcher.saved, dispatcher);
+
+  // Everything below that needs a focused Ace code editor used to skip itself
+  // whenever the session restored without one - six checks, quietly. Open one
+  // instead. It has to be a real saved .sas file, not appDMS.onNewProgram(): a
+  // new program is empty (so "non-virgin" checks still skip) and has no uri (so
+  // the Alt+C copy-tab-uri check has nothing to copy). Opening it also checks
+  // end to end that the dispatcher above really is in place.
+  if (!dispatcher.codeTabs) {
+    const opened = await page.evaluate(async () => {
+      const a = window.appDMS;
+      const root = "/folders/myfolders";
+      const url =
+        a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(root) + "?includeChildren=true";
+      const children = await new Promise((res) => {
+        dojo.xhrGet({
+          url,
+          handleAs: "json",
+          preventCache: true,
+          load: (d) => res((d && d[0] && d[0].children) || []),
+          error: () => res([]),
+        });
+      });
+      const f = children.find((c) => c.size && Number(c.size) > 0 && /\.sas$/i.test(c.name));
+      if (!f) return { found: false };
+      const uri = `${root}/${f.name}`;
+      // id backfill: handleWebOneEvent only derives it for some actions, and an
+      // id-less item opens as tab id "undefined" (see ext-browse_ss's openItemInSs).
+      a.handleWebOneEvent("FileOpen", { uri, name: f.name, id: uri.replaceAll("/", "~ps~"), type: "FILE" });
+      await new Promise((r) => setTimeout(r, 6000));
+      const t = a.tabs.getAllTabObjects().find((t) => t.uri === uri);
+      const ed = t && t.editor && t.editor.editor;
+      return {
+        found: true,
+        name: f.name,
+        isAdapter: !!(ed && ed._isAceEditorAdapter),
+        lines: ed && ed.aceEditor ? ed.aceEditor.session.getLength() : 0,
+      };
+    });
+    check(
+      "a .sas file opens as an Ace code tab when the session restored without one",
+      opened.found && opened.isAdapter && opened.lines > 1,
+      opened,
+    );
+  }
+
   // -- stray scrolling (SurfingKeys) -----------------------------------------------
   // The gutter/scroller must not be scroll containers: anything that scrolls by
   // feel (SurfingKeys picks the gutter, and even writes scrollTop to probe it)
