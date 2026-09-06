@@ -86,7 +86,7 @@ var DEFAULT_RUN_FOCUS = "log";
  */
 var DEFAULT_ACE_CONFIG = {
   darkTheme: "ace/theme/gruvbox",
-  lightTheme: "ace/theme/iplastic",
+  lightTheme: "ace/theme/chrome",
   options: {
     fontSize: 15,
     keyboardHandler: "ace/keyboard/vim",
@@ -105,7 +105,7 @@ var DEFAULT_ACE_CONFIG = {
   // Skip LSP registration for files longer than this many lines (0 = no limit).
   // Keeps the worker from choking on huge programs; see editor-swap.js's
   // _maybeRegisterLsp.
-  lspMaxLines: 500,
+  lspMaxLines: 1000,
 };
 
 /**
@@ -132,4 +132,6 @@ var DEFAULT_BROWSE_FILE_ACTIONS = {
   lst: "text",
   txt: "text",
   lua: "text",
+  sh: "text",
+  py: "text",
 };
