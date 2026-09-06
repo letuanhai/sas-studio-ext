@@ -910,6 +910,10 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   if (!beforeOpen) {
     check("found a non-open file to open as text (needed for text-viewer test)", false, beforeOpen);
   } else {
+    // Baseline, not zero: activate() converts text viewers that already exist -
+    // a .txt/.log tab restored at app start is a legitimate registry entry that
+    // this test neither created nor closes.
+    const viewersBefore = await page.evaluate(() => window.__ssExt._textViewers.length);
     await page.evaluate(
       (f) =>
         window.appDMS.handleWebOneEvent("FileOpenWithTextViewer", {
@@ -1093,8 +1097,26 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       const afterConfirmClose = await page.evaluate((tabId) => !dijit.byId(tabId), viewer.newTabId);
       check("Don't Save closes the tab", afterConfirmClose, { afterConfirmClose });
 
-      const afterClose = await page.evaluate(() => window.__ssExt._textViewers.length);
-      check("registry entry cleaned up on tab close", afterClose === 0, { afterClose });
+      // Identify what is left over: an entry whose tabHolder no longer belongs to
+      // any open tab is a real leak, one that still has a tab is a viewer this
+      // test didn't open (see viewersBefore above).
+      const afterClose = await page.evaluate(() => {
+        const tabs = window.appDMS.tabs.getAllTabObjects();
+        return {
+          count: window.__ssExt._textViewers.length,
+          entries: window.__ssExt._textViewers.map((e) => {
+            const tab = tabs.find((t) => t.tab && t.tab.tabHolder === e.tabHolder);
+            return {
+              tabId: (tab && tab.tab.id) || null, // null => stale, the tab is gone
+              name: (e.item && e.item.name) || (tab && tab.name) || null,
+            };
+          }),
+        };
+      });
+      check("registry entry cleaned up on tab close", afterClose.count === viewersBefore, {
+        ...afterClose,
+        viewersBefore,
+      });
     }
   }
 
