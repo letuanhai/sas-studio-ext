@@ -23,13 +23,23 @@
           which is SAS Studio's Run Program
 
 - lua lsp with sas module docs
-  - [x] proc lua submit;...endsubmit; blocks: completion, via our own client over the
-        emmylua wasm worker (the document sent is the sas file with non-lua lines blanked)
   - [x] .lua files opened as text: routed through ace-linters, so completion, diagnostics,
         hover, signature help, document highlights, code actions, semantic tokens
   - [x] formatting: Ctrl-Shift-F / command palette (ace-linters' own format() is off by one
         and formats nothing, so the range is built here)
-  - [ ] sas module docs: meta definitions for the sas.* API, which the server can't know about
-  - [ ] diagnostics/hover INSIDE proc lua blocks - needs sharing session.setAnnotations with
-        the sas language server, which replaces the whole set
-  - [ ] a .lua text tab restored at page load gets no ace overlay at all, so no lsp either
+  - [x] ~~sas module docs: meta definitions for the sas.* API, which the server can't know about~~
+        (src/lua/sas.lua for the package API, SAS LSP at runtime for the DATA step functions)
+  - [x] ~~require() of another open .lua tab~~ (real filePath URIs on the documents +
+        workspace roots the worker derives from them; needed two more cfg(wasm) guards in
+        tools/emmylua-wasm.patch, since the stock build scans the filesystem for a root)
+  - [ ] a .lua text tab restored at page load now gets the ace overlay from activate(), but
+        only once the toggle is switched on - and its module only exists from that point, so
+        a require() of it can't resolve before then
+  - [ ] require() only finds modules that are OPEN as tabs. The alternative was fetching
+        them from the server (GET .../workspace/<path>, an empty body means missing), but
+        that blocks while SAS is executing and needs LUAPATH; revisit only if opening the
+        module every time proves too annoying
+  - [ ] PROC LUA submit;...endsubmit; blocks: completion, diagnostics and hover. Built and
+        working once (commit b588131 on lua-lsp: own JSON-RPC client over a second emmylua
+        worker, the sas file with non-lua lines blanked, setAnnotations/doHover shared with
+        the sas provider), then removed to finish the .lua path and the sas module first

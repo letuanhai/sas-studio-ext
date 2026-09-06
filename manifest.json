@@ -45,6 +45,7 @@
         "lib/*.wasm",
         "src/emmylua-worker.js",
         "src/ace/*.js",
+        "src/lua/*.lua",
         "src/dark.css"
       ],
       "matches": [

@@ -617,6 +617,21 @@ steadily slower, measured 601 ms of marker work in the first typing round vs 277
 ~8000 live markers);
 (3) `getSemanticTokens` gets a 60 ms trailing debounce, since ace-linters requests a fresh token set from every
 `changeScrollTop`, i.e. once per scroll frame (a 10-tick wheel scroll went from 10 requests to 1).
+The same function installs a fourth patch that is about colour rather than cost: `toAceTokenClassName` is replaced so
+the token type goes through `themedSemanticScope()` first. ace-linters maps an LSP semantic token type to a TextMate-ish
+scope (`method` → `entity.name.function.member`) and that scope straight into the marker's class list, but ace THEMES
+only style a handful of scopes — gruvbox has `keyword`/`comment`/`variable`/`constant`/`string`/`support`/`storage` and
+nothing else — so most semantic markers carry a class no rule matches and the text keeps whatever the mode's own
+tokenizer gave it.
+That was the whole of "`sas.symput()` isn't coloured like `os.date()`" in a `.lua` file: both get the identical
+(invisible) `class`/`function.member` markers, and `os`/`date` only looked highlighted because ace's stock lua mode
+hardcodes them as `constant.library`/`support.function`.
+`SEMANTIC_SCOPE_ALIASES` rewrites the leading segments onto scopes themes do paint (`entity.name.function.member` →
+`support.function.member`, `entity.name.type.class` → `support.class`, …), longest prefix first, with the modifiers
+(`.static`, `.readonly`) riding along;
+unknown and already-styled scopes pass through.
+It applies to both servers, since the two providers share one `SessionLanguageProvider` prototype.
+`themedSemanticScope` is on `ssExt._semanticScope` and unit-tested.
 `test/smoke.js` guards (1) and (2), the `sas/getLibList` answer shape / id round-trip / refresh invalidation, that LSP
 entries actually rank above the text completers with no leaked duplicate completers, that another editor's words are
 offered (and follow its edits) while the requesting editor's own are not, the SAS context completer (step parsing incl.
@@ -656,34 +671,27 @@ Options.js applies the same parser to the snippet editor's vim handler on init a
 no such tracking (nothing tests it there).
 Removing a line from the vimrc doesn't undo that mapping until the page reloads — `Vim.unmap` isn't run automatically
 for a diff, only for whatever the current text still asks to unmap.
-Lua language server (PROC LUA): a SECOND server, for the Lua inside `proc lua; submit; ... endsubmit;` blocks, and
-deliberately not routed through ace-linters — a session is one language to ace-linters and this session is
-`ace/mode/sas`.
-`ensureLuaLsp()` (memoized on `ssExt._luaLspStarting`, gated on `getAceConfig().luaLsp !== false`, the options page's
-"Lua language server" checkbox) HEAD-probes `lib/emmylua-lsp/emmylua_ls.wasm` and starts `src/emmylua-worker.js` in a
-blob+`importScripts` worker (same reason as the SAS one: a worker created straight from a `chrome-extension:` URL is at
-the mercy of the page's `worker-src`), then does the `initialize` handshake and returns a ~30-line JSON-RPC client
-(`request`/`notify`/`docs`).
-No `initialized` notification is sent: this server has no handler for it (it logs "Unhandled notification method") and
-runs its own init off the initialize request. The embedded language is handled the cheapest way that keeps positions
-honest: the document sent to the server is the SAS file with every non-Lua LINE blanked out, so an LSP line/character IS
-an ace row/column, in both directions, with no translation anywhere.
-`luaRanges(lines)` is the line-granular state machine that finds those rows (`proc lua` → `submit;` opens, `endsubmit;`
-closes, `run;`/`quit;` before a `submit;` cancels;
-`\bsubmit\b` cannot match inside "endsubmit", there being no word
-boundary there;
-an unterminated block runs to EOF) — exposed on `ssExt._lua` and unit-tested in `test/units.js`.
-A `.lua` file opened as text does NOT go through this client at all: that session is one language end to end
-(`aceModeFor` resolves the name through ext/modelist, so the text viewer's adapter is built with `ace/mode/lua`), which
-is exactly ace-linters' case, so `ensureLuaLinters()` builds a SECOND ace-linters provider (`modes: "lua"`, same options
-as the SAS one) over its own emmylua worker and `_maybeRegisterLsp` registers the editor with it — `_lspEligible()` now
-admits both modes, so the constructor/`setText`/`dispose` paths and the `lspMaxLines` limit apply unchanged, and the
-adapter remembers WHICH provider took it (`this._lspProvider`) since there are two.
-That buys ace-linters' whole client-side feature set for `.lua` files with no UI code here: diagnostics (the server
-pushes `textDocument/publishDiagnostics`;
-a `.lua` session has no SAS provider competing for `session.setAnnotations`),
-hover, signature help, document highlights, code actions, semantic tokens, completion + resolve, and
-`provider.format()`.
+Lua language server (`.lua` files): a SECOND server, for `.lua` files opened as text, driven entirely by ace-linters —
+that session is one language end to end (`aceModeFor` resolves the name through ext/modelist, so the text viewer's
+adapter is built with `ace/mode/lua`), which is exactly ace-linters' case.
+`ensureLuaLinters()` (memoized on `ssExt._luaLintersStarting`, gated on `getAceConfig().luaLsp !== false`, the options
+page's "Lua language server" checkbox) HEAD-probes `lib/emmylua-lsp/emmylua_ls.wasm`, starts `src/emmylua-worker.js` in
+a blob+`importScripts` worker (same reason as the SAS one: a worker created straight from a `chrome-extension:` URL is
+at the mercy of the page's `worker-src`) via `startEmmyLuaWorker()`, and builds a second ace-linters provider
+(`modes: "lua"`, same options as the SAS one).
+`_maybeRegisterLsp` registers the editor with it — `_lspEligible()` admits both modes, so the
+constructor/`setText`/`dispose` paths and the `lspMaxLines` limit apply unchanged, and the adapter remembers WHICH
+provider took it (`this._lspProvider`) since there are two.
+For the Lua provider it also passes `registerEditor`'s second argument, `{ filePath }` (the adapter's optional 4th
+constructor argument, `item.uri` from the `createFileView` wrapper): that becomes the LSP document's URI in place of
+ace-linters' `file:///<ace session id>.lua`, and a real path is what lets the server derive a module name — the whole of
+why `require()` of another open `.lua` tab resolves.
+Deliberately not done for the SAS provider, which has no module concept and whose documents the rest of this file's LSP
+code keys on by session id.
+That buys ace-linters' whole client-side feature set with no UI code here: diagnostics (the server pushes
+`textDocument/publishDiagnostics`;
+a `.lua` session has no SAS provider competing for `session.setAnnotations`), hover,
+signature help, document highlights, code actions, semantic tokens, completion + resolve, and `provider.format()`.
 Not covered, because ace-linters implements none of them: definition/references/rename/symbols/folding/inlay hints/code
 lens/colour/links/call hierarchy.
 `installLspMetaLabels` stays SAS-only (it exists to fix that server's Folder/Keyword kinds; emmylua kinds its items
@@ -701,22 +709,67 @@ work, checked against the server directly).
 `formatWithLsp(provider, editor)` makes the same call — `$sendDeltaQueue`, then one `$messageController.format` per
 range with `$format`/`applyEdits` — with the range it meant, and formats a non-empty selection instead of the file, as
 its version does.
-The two Lua consumers get a worker EACH rather than sharing one: two LSP clients on one connection means two id spaces
-on one server, and a wasm instance is 2.6 MB of linear memory (measured, with the Lua stdlib loaded) against a module
-the browser has already fetched and compiled.
-`startEmmyLuaWorker()` is the shared half.
-One extra completer (`ssextLua`, registered in `loadNewAce()` next to the other two) is the whole feature surface:
-outside a block, and in any other mode, it returns nothing and never touches the worker, so a SAS file with no PROC LUA
-never pays the ~12 MB wasm fetch.
-Inside one it syncs the document (`didOpen`, then `didChange` — the server's sync kind is FULL) and awaits one
-`textDocument/completion`;
-syncing at completion time rather than from a change listener is one round trip per popup instead of one per keystroke.
-Items map to ace's `caption`/`value`/`meta` (`LUA_ITEM_KINDS`, the LSP `CompletionItemKind`) with `docText` from
-`labelDetails.detail` (emmylua's signature line, e.g. `(pattern, init, plain) -> integer?`), scored `LUA_SCORE` 2000 —
-above the SAS context completer's 1000, since inside a submit block Lua beats SAS. ponytail: completion only.
-Diagnostics would have to fight ace-linters for `session.setAnnotations` (it replaces the whole set) and hover/signature
-help for the same popups;
-the SAS-side meta definitions for the `sas.*` API the server can't know about are a separate job.
+**PROC LUA `submit;`…`endsubmit;` blocks are deliberately NOT covered.** They were, briefly (commit `b588131` on the
+`lua-lsp` branch): a hand-rolled ~30-line JSON-RPC client over a second emmylua worker, fed a copy of the SAS file with
+every non-Lua line blanked out so LSP positions stayed equal to ace's, plus a `session.setAnnotations` wrapper and a
+`provider.doHover` wrap to share those two surfaces with the SAS provider that owns the session.
+It worked;
+it was removed to finish the `.lua` path and the `sas` table first, and that commit is where to start if it comes back.
+What is left of it is nothing — no `luaRanges`, no second worker, no block detection anywhere.
+
+The `sas` table PROC LUA puts in scope — which a `.lua` script it runs sees exactly as a submit block does — is covered
+from two sources, because it has two halves and only one of them is knowable statically.
+(a) The **package API** (`sas.submit`, `sas.open`, the `dsid` methods, the `string`/`table` functions the package adds)
+lives in `src/lua/sas.lua`, an EmmyLua `---@meta` file transcribed from the LDoc comments embedded in
+`SASFoundation/9.4/sasexe/sasplua` — the ELF shared library that implements the package, which carries its own Lua
+source as plaintext.
+Nothing in the client references it: `src/emmylua-worker.js` `fetch`es it (URL passed in the boot blob as
+`self.__ssExtEmmyLuaDefs`, alongside the wasm URL) and `didOpen`s it as one more document right after forwarding
+`initialize` (`openSasDefs`), and emmylua indexes every open document into one workspace — so its globals are in scope
+for the whole `.lua` file with no code in `ensureLuaLinters()` at all.
+Its class carries an INDEX SIGNATURE (`---@field [string] fun(...): any`) — without it emmylua flags every DATA step
+function as "Undefined field `today`" and hovers it as unknown, since the file can only declare the package API.
+`manifest.json` lists `src/lua/*.lua` in `web_accessible_resources` for that fetch.
+(b) Every **DATA step function** is also callable as `sas.<name>(...)` — thousands of them, with docs that would go
+stale — so those are asked of the SAS language server at RUNTIME instead of transcribed.
+`sasFunctions(prefix)` keeps one scratch SAS document (`file:///ssext/sas-functions.sas`) parked at a data-step
+expression (`data _null_;\n x = <prefix>`), `didChange`s the prefix in and takes the `CompletionItemKind.Function` (3)
+entries of one `textDocument/completion` — ~20 ms against the already-warm worker, so there is no cache;
+the server filters by prefix itself and answers nothing under two characters, so this is prefix-driven and there is no
+"list them all".
+Those entries are the whole of the `ssextSasFns` completer (registered in `loadNewAce()` next to the other two), which
+answers only in an `ace/mode/lua` session and only right after `sas.` — everything else there is ace-linters'.
+Docs are `completionItem/resolve`d for the SELECTED row only, from the completer's `getDocTooltip` (fill `docText`, then
+`editor.completer.updateDocTooltip()` — the same lazy dance ace-linters does), through `mdToText`, since nothing here
+bundles a markdown converter.
+Both go over `ssExt._lspRaw`, a `request`/`notify` side channel onto the SAS worker created in `ensureLsp()` for
+questions ace-linters has no API for: its ids are STRINGS (`ssext:<n>`) so they cannot collide with ace-linters' numeric
+ones, and the existing `message` listener resolves and swallows those responses rather than forwarding them, the same
+rule `sas/getLibList` follows.
+The scratch document draws no `publishDiagnostics` (checked against the server directly), so ace-linters never sees a
+document it doesn't know.
+Three details that each cost a visible symptom before they were there.
+(i) `sas.lua`'s class carries an INDEX SIGNATURE (`---@field [string] fun(...): any`) — without it emmylua flags every
+DATA step function as "Undefined field `today`" and hovers it as unknown, since the file can only declare the package
+API.
+(ii) `sasFnHover(session, pos)` answers hover for `sas.<name>`, wrapped onto the Lua provider (`installLuaFileHover`)
+and tried BEFORE emmylua's own answer, because with the index signature emmylua now always has a generic answer.
+It skips the names `sas.lua` declares itself (`sasLuaDeclared()`, one `fetch` of that file, regexed and memoized): the
+two sets overlap (`open`, `close`, `put`, `symget`, `exist`, `sleep`, ...) and the package's version is the one in scope
+— `sas.put` PRINTS, while the SAS `PUT()` function formats a value.
+The completer dedupes on the same rule, by caption.
+(iii) `nudgeSasFnCompletions(editor)` forces ONE fresh gather when a completion prefix reaches two characters after
+`sas.`: ace gathers completions once when the popup opens and only re-FILTERS afterwards
+(`Autocomplete.updateCompletions`' `keepPopupPosition` branch), so a popup opened at `sas.t` — where the server, which
+answers nothing under two characters, gave us nothing — could never grow the entries that exist at `sas.to`, and only
+Ctrl+Space (a forced gather) showed them.
+It is deferred by a tick: it runs from the session's `change` event, where the caret has not moved yet, and
+`updateCompletions` re-derives the prefix from the caret — a synchronous call re-gathers at the OLD one-character prefix
+and changes nothing.
+`mdToText`/`afterSasDot`/`sasDotWordAt` are on `ssExt._sasFns` and unit-tested;
+`test/smoke.js` checks that `sas.sub` offers `substrn` from the server with a resolved `Syntax:` doc next to the
+`sas.submit` entry from the static defs, that a popup opened at `sas.t` grows `today` at `sas.to`, and that in a `.lua`
+file `sas.today` hovers to the server's doc while `sas.symget` hovers to `sas.lua`'s, with no "Undefined field".
 
 - `ss-fixes.js` — various independent SAS Studio UX fixes/features (tab management, tree navigation, keyboard shortcuts,
   clipboard, context menus), split into `ACTIONS` (one-shot commands, e.g. `reloadCurrentFile`) and `PATCHES` (passive
@@ -1232,16 +1285,38 @@ the SAS-side meta definitions for the `sas.*` API the server can't know about ar
   `LICENSE-sas-lsp` (copied from the clone) and `.version` (the built tag, used to skip rebuilds).
   Like the rest of `lib/` it's gitignored generated output (the `.lsp-build/` clone dir too);
   `ensureLsp()` degrades gracefully (one console warning, editor works as before) if it's missing.
-- `src/emmylua-worker.js` — the worker half of the Lua server (one instance per consumer: ace-linters for `.lua` files,
-  our own client for PROC LUA blocks): instantiates `lib/emmylua-lsp/emmylua_ls.wasm` and speaks plain LSP JSON-RPC over
-  `postMessage`.
+- `src/emmylua-worker.js` — the worker half of the Lua server (one per page, started by `ensureLuaLinters()`):
+  instantiates `lib/emmylua-lsp/emmylua_ls.wasm` and speaks plain LSP JSON-RPC over `postMessage`.
   The wasm module has no threads and no stdio — `tools/emmylua-wasm.patch` gives it a five-call C ABI instead
   (`ela_start`/`alloc`/`push`/`pump`/`take`): `ela_push` hands the server one message, `ela_pump(steps)` drives its
   current-thread tokio runtime for a bounded number of cooperative yields (512 after each incoming message, plus a
   64-step `setInterval` heartbeat at 100 ms so the server's own debounced tasks still get polled), `ela_take` pops one
   outgoing message.
-  It answers server-to-client requests itself (`workspace/configuration` → nulls, everything else → null): an unanswered
-  one stalls the server's init.
+  It answers server-to-client requests itself (everything → `null` except `workspace/configuration`, which gets `EMMYRC`
+  for every requested item): an unanswered one stalls the server's init.
+  That request — section `emmylua`, made once at startup — is the server's ONLY configuration hook here, since there is
+  no `.emmyrc.json` for it to read, so `EMMYRC` is where any `.emmyrc.json` setting goes.
+  It currently carries one: `runtime.version: "Lua5.2"`, because the default is 5.4 while PROC LUA is tkLua 5.2
+  (`print(_VERSION)` in a submit block) — left at the default, 5.3+ syntax the SAS runtime rejects passes unremarked and
+  5.4-only stdlib is offered.
+  Verified against the server: with it, `7 // 2` reports "integer division is not supported";
+  `test/units.js` covers the answer shape.
+  Getting that request to happen AT ALL takes one more thing, and without it none of `EMMYRC` was ever applied: the
+  server reads its configuration only by REQUESTING it — `on_did_change_configuration` throws the notification's own
+  `settings` away and re-requests — and only when the client declared `capabilities.workspace.configuration`, which
+  ace-linters never does (it sends `didChangeConfiguration`/`executeCommand`/`applyEdit` and nothing else).
+  So `withConfigCapability()` rewrites the forwarded `initialize` to claim it.
+  `EMMYRC` also carries `workspace.workspaceRoots`, which is what makes `require()` resolve to another open `.lua` tab:
+  emmylua derives a module name for every file it knows by stripping a root off its path (`add_module_by_path`, in the
+  analysis pipeline, so it covers documents the client opens and not just scanned ones), and with no root nothing is a
+  module.
+  The folder can't be known at startup, so `addRoot()` takes it from each `didOpen`'s own URI (skipping the `/ssext/`
+  defs) and pushes the accumulated set with `workspace/didChangeConfiguration`;
+  the server re-requests its config and re-indexes.
+  That needs the documents to carry REAL paths rather than ace-linters' `file:///<ace session id>.lua` default — see
+  `AceEditorAdapter`'s 4th constructor argument.
+  All verified end to end against the real server through the real worker: `require("helper")` goes from "Cannot resolve
+  module" to hovering `function M.greet(name) -> string`.
   It also repairs one ordering the client gets wrong: a `textDocument/didChange` for a document that was never opened is
   held, and its text folded into that document's `didOpen` when it arrives. ace-linters does exactly that when an
   editor's content lands between `registerEditor` and its connection coming up — it flushes the text as a change, then
@@ -1254,26 +1329,38 @@ the SAS-side meta definitions for the `sas.*` API the server can't know about ar
   `test/units.js` covers the ordering with a stubbed wasm module.
   Its WASI shim is 22 stubs and three real functions (`clock_time_get` — the timers matter, `random_get`, `fd_write` for
   the server's own stderr log, line-buffered and filtered to WARN/ERROR): with the Lua stdlib metadata compiled into the
-  binary (`include_dir!`) and no workspace folders, nothing in it ever touches a file, which is why a real WASI shim
-  (`@bjorn3/browser_wasi_shim` and friends) isn't needed.
+  binary (`include_dir!`) and the workspace scan patched out, nothing in it ever touches a file, which is why a real
+  WASI shim (`@bjorn3/browser_wasi_shim` and friends) isn't needed.
   `fd_prestat_get` returning `EBADF` is what tells libc's preopen scan there are none.
+  That "patched out" is load-bearing for the roots above: setting a workspace root on the STOCK build makes the server
+  walk the filesystem, and against these stubs it either traps (`ENOSYS`) or spins forever (`ENOENT`) inside the
+  synchronous `ela_pump`, which never returns — a dead worker, not a slow one.
+  Both measured;
+  see `tools/emmylua-wasm.patch`.
 - `lib/emmylua-lsp/` — the Lua language server, `emmylua_ls.wasm` (~12 MB raw, ~3.3 MB gzip) plus `LICENSE-emmylua` and
   `.version`.
   `./tools/build_lib.sh` clones EmmyLuaLs/emmylua-analyzer-rust at a pinned release tag, applies
   `tools/emmylua-wasm.patch` and builds `-p emmylua_ls --lib` for `wasm32-wasip1`.
   Gitignored generated output like the rest of `lib/`, and the ONLY part of the build that needs a rust toolchain —
-  without `cargo` the step is skipped with a warning and everything else still builds (`ensureLuaLsp()` then warns once
-  and the editor works as before).
-  `tools/emmylua-wasm.patch` (~95 lines, committed) is what makes upstream — which targets an OS process — build for
+  without `cargo` the step is skipped with a warning and everything else still builds (`ensureLuaLinters()` then warns
+  once and the editor works as before).
+  `tools/emmylua-wasm.patch` (~130 lines, committed) is what makes upstream — which targets an OS process — build for
   wasm: tokio's features narrowed to the wasm-supported set (`sync,macros,io-util,rt,time`), `mimalloc` and the
   spawn-an-external-formatter path moved behind `cfg(not(target_family = "wasm"))`, `get_best_resources_dir()` returning
   a fixed virtual path instead of calling `std::env::current_exe()` (the only runtime panic, and only used to synthesize
   the embedded metadata's paths), `AsyncConnection::recv` polling the crossbeam receiver with `yield_now` instead of a
   `spawn_blocking` thread, and the added `crates/emmylua_ls/src/wasm.rs` with the C ABI and a boot future that answers
   `initialize` off the channel (the stock path blocks on a stdio read).
-  The analyzer, the handlers and the type checker are untouched. wasip1 rather than `wasm32-unknown-unknown`: that one
-  additionally needs a forked `emmy_lsp_types` (`url::Url::from_file_path` is compiled out on it), and a browser has to
-  fill the same handful of imports either way.
+  Two more exist purely so a workspace ROOT can be registered — which is what gives open documents module names, and so
+  makes `require()` work (see `src/emmylua-worker.js`): `load_workspace_files` returns nothing on wasm (its `WalkDir`
+  walk against the WASI stubs traps or hangs the pump, and the roots are registered by `add_main_workspace`
+  independently of it, so nothing is lost but the scan), and `register_files_watch` is a no-op there (`notify`'s backend
+  blocks the single-threaded runtime, and there is no filesystem to watch anyway).
+  The analyzer, the handlers and the type checker are untouched.
+  **The build stamp is the tag PLUS a checksum of this patch** (`lib/emmylua-lsp/.version`, `EMMYLUA_STAMP` in
+  `tools/build_lib.sh`) — the patch changes far more often than the tag, and a tag-only stamp silently keeps the
+  previous wasm. wasip1 rather than `wasm32-unknown-unknown`: that one additionally needs a forked `emmy_lsp_types`
+  (`url::Url::from_file_path` is compiled out on it), and a browser has to fill the same handful of imports either way.
 - The editor toggle is idempotent and repeatable — no page refresh needed to switch back and forth.
 
 ## Key SAS Studio integration points
@@ -1305,8 +1392,10 @@ Dark mode for SAS Studio's own UI is a generated static stylesheet — `node too
 `src/dark.css` (needs a live instance and npm; the output is committed, so this is only for re-tuning the palette or
 tracking a SAS Studio CSS change).
 Pure-logic checks (no browser, no live instance): `npm run test:units` — covers `tools-meta.js`'s
-`ssfEventKey`/`ssfPatchEnabled`, `mode-saslog.js`'s %INCLUDE folding, `editor-swap.js`'s `_lua.luaRanges` (which rows
-of a SAS program are Lua), `emmylua-worker.js`'s didChange/didOpen ordering, and `editor-swap.js`'s `_foldNav` row
+`ssfEventKey`/`ssfPatchEnabled`, `mode-saslog.js`'s %INCLUDE folding, `editor-swap.js`'s `_sasFns` (the `sas.<name>`
+hover word and the SAS server's markdown, flattened), `emmylua-worker.js`'s didChange/didOpen ordering, its
+configuration answer (incl. the injected client capability) and the workspace roots it derives from open documents,
+`editor-swap.js`'s `_semanticScope` (LSP semantic scopes onto themed ace ones), and `editor-swap.js`'s `_foldNav` row
 pickers plus `_vimMarks` (the zj/zk/[z/]z vim motions and the mark gutter decorations) `_dirtyGutter` (diff chunks ->
 unsaved-change gutter rows) and `_popupSizing` (the completion popup's width from its widest row, incl. both clamps) and
 the vimrc `<Cmd>` form (mapping a key to an ace command rather than to keys) and
@@ -1331,11 +1420,11 @@ picked in the browse prompt (the prompt's first row is the tab's own file, so th
 what the server holds),
 the browse prompt's per-extension Enter action, the blanket reveal fallback for unlisted extensions, Ctrl+Shift+Enter
 ("Let SAS Studio decide") and Alt+Enter ("Download item") (against a synthetic popup row with `appDMS.handleWebOneEvent`
-stubbed, so nothing is really opened or downloaded and no file of a given extension has to exist), the Lua server (real
-Lua completions inside a PROC LUA submit block, silence outside it, and a `.lua` text viewer registering with
-ace-linters: LSP-ranked completions with no duplicate completer, the server's pushed diagnostics as ace annotations, and
-the formatDocument command), the aceConfig flow
-(seeding, live apply, settings-menu persistence via relay.js, vimrc), the `createCodeEditor` dispatcher being installed
+stubbed, so nothing is really opened or downloaded and no file of a given extension has to exist), the Lua server (a `.lua` text viewer registering with ace-linters: LSP-ranked completions with
+no duplicate completer, the server's pushed diagnostics as ace annotations, the formatDocument command, both halves of
+the `sas` table — completions and hover — and `require()` resolving to a second open `.lua` document, which needs the
+real-path URI and the derived workspace root together), the aceConfig flow (seeding, live apply, settings-menu
+persistence via relay.js, vimrc), the `createCodeEditor` dispatcher being installed
 with no code tab open (plus opening a real `.sas` file as the fixture the code-tab-dependent blocks need), Save As under
 a new extension (the editor leaving `ace/mode/sas` for `ace/mode/lua`, and the unsaved-change gutter re-baselining — it
 opens and closes its own tab rather than renaming a shared one, and sits BEFORE the dark-mode block, which reloads the

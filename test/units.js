@@ -417,43 +417,60 @@ console.log("PASS  vimrc alias shadowing (space as leader)");
 console.log("PASS  vimrc <Cmd> maps a key to an ace command");
 
 // ---------------------------------------------------------------------------
-// src/editor-swap.js - which rows of a SAS program are Lua. The document sent
-// to the Lua language server is the file with every other line blanked, so
-// getting these rows right is what keeps LSP positions equal to ace's.
-const { luaRanges, inLuaRange } = global.window.__ssExt._lua;
+// src/editor-swap.js - the sas.<name> DATA step function completions, whose
+// names and docs come from the SAS language server at runtime.
+const { mdToText, afterSasDot, sasDotWordAt } = global.window.__ssExt._sasFns;
 
-const prog = [
-  "data work.a;", //                0
-  "  set sashelp.class;", //        1
-  "run;", //                        2
-  "", //                            3
-  "proc lua;", //                   4
-  "submit;", //                     5
-  "  local s = 'hi'", //            6
-  "  print(s)", //                  7
-  "endsubmit;", //                  8
-  "run;", //                        9
-  "", //                            10
-  "proc lua restart; submit;", //   11  (both fences on one line)
-  "  print('again')", //            12
-  "endsubmit; run;", //             13
-];
-assert.deepEqual(luaRanges(prog), [
-  [6, 7],
-  [12, 12],
-]);
-assert.equal(inLuaRange(luaRanges(prog), 7), true);
-assert.equal(inLuaRange(luaRanges(prog), 5), false); // the submit; fence is SAS
-assert.equal(inLuaRange(luaRanges(prog), 8), false); // so is endsubmit;
-assert.equal(inLuaRange(luaRanges(prog), 1), false);
+const line = (text) => ({ getLine: () => text });
+assert.equal(afterSasDot(line("  local n = sas.pu"), { row: 0, column: 18 }, "pu"), true);
+assert.equal(afterSasDot(line("  sas.putn("), { row: 0, column: 10 }, "putn"), true);
+assert.equal(afterSasDot(line("  local sast = pu"), { row: 0, column: 17 }, "pu"), false);
+assert.equal(afterSasDot(line("  s.pu"), { row: 0, column: 6 }, "pu"), false);
 
-// PROC LUA that ends without submitting, and a plain submit; outside PROC LUA
-// (PROC PYTHON uses the same fence) must not open a Lua region.
-assert.deepEqual(luaRanges(["proc lua;", "run;", "proc python;", "submit;", "x = 1", "endsubmit;"]), []);
-// An unterminated block runs to the end of the file rather than being dropped.
-assert.deepEqual(luaRanges(["proc lua;", "submit;", "print(1)"]), [[2, 2]]);
+// The server answers markdown; ace's doc tooltip takes plain text.
+assert.equal(
+  mdToText(
+    "Keyword:  [SUBSTRN](https://example.com/x.htm)\n\n" +
+      "Syntax: SUBSTRN (*string*, *position*&lt;, *length*&gt;)\n\n" +
+      '<span style="white-space:pre-wrap;">Returns a substring.</span>',
+  ),
+  "Keyword:  SUBSTRN\n\nSyntax: SUBSTRN (*string*, *position*<, *length*>)\n\nReturns a substring.",
+);
+assert.equal(mdToText(""), "");
 
-console.log("PASS  proc lua block ranges");
+// Hover reads the whole name the caret sits in, not just what is behind it.
+assert.deepEqual(sasDotWordAt(line("x = sas.today()"), { row: 0, column: 10 }), {
+  name: "today",
+  column: 8,
+});
+assert.deepEqual(sasDotWordAt(line("x = sas.today()"), { row: 0, column: 13 }), {
+  name: "today",
+  column: 8,
+});
+assert.equal(sasDotWordAt(line("x = sas.t"), { row: 0, column: 9 }), null); // too short to ask
+assert.equal(sasDotWordAt(line("x = mysas.today()"), { row: 0, column: 12 }), null);
+
+console.log("PASS  sas.<name> function completions");
+
+// ---------------------------------------------------------------------------
+// src/editor-swap.js - LSP semantic token scopes rewritten onto scopes ace
+// themes actually style (see themedSemanticScope for why).
+const semanticScope = global.window.__ssExt._semanticScope;
+
+// Longest prefix wins, and the modifiers ride along.
+assert.equal(semanticScope("entity.name.function.member"), "support.function.member");
+assert.equal(semanticScope("entity.name.function"), "support.function");
+assert.equal(semanticScope("entity.name.type.class.static"), "support.class.static");
+assert.equal(semanticScope("entity.name.variable.readonly"), "variable.readonly");
+assert.equal(semanticScope("operator"), "keyword.operator");
+// Already-styled scopes and unknown ones are left alone.
+assert.equal(semanticScope("keyword"), "keyword");
+assert.equal(semanticScope("string"), "string");
+assert.equal(semanticScope("variable.parameter"), "variable.parameter");
+assert.equal(semanticScope("highlight_unnecessary"), "highlight_unnecessary");
+assert.equal(semanticScope(undefined), "");
+
+console.log("PASS  semantic token scopes map onto themed ace scopes");
 
 // ---------------------------------------------------------------------------
 // src/emmylua-worker.js - message ordering into the Lua language server. A
@@ -469,10 +486,11 @@ console.log("PASS  proc lua block ranges");
 const vm = require("vm");
 const fs = require("fs");
 
-function runWorker() {
+function runWorker(defs) {
   const sent = [];
   const heap = new ArrayBuffer(1 << 16);
   let next = 8;
+  const outbox = []; // messages the "server" wants to hand back, FIFO
   const exports = {
     memory: { buffer: heap },
     ela_alloc: (len) => {
@@ -484,7 +502,17 @@ function runWorker() {
       sent.push(JSON.parse(Buffer.from(new Uint8Array(heap, ptr, len)).toString("utf8"))),
     ela_start: () => {},
     ela_pump: () => {},
-    ela_take: () => 0,
+    // The worker's drain() loop: a pointer per queued message, 0 to stop.
+    ela_take: () => {
+      const msg = outbox.shift();
+      if (!msg) return 0;
+      const b = Buffer.from(JSON.stringify(msg), "utf8");
+      const ptr = next;
+      next += b.length + 8;
+      new DataView(heap).setUint32(ptr, b.length, true);
+      new Uint8Array(heap, ptr + 4, b.length).set(b);
+      return ptr;
+    },
   };
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
@@ -494,7 +522,10 @@ function runWorker() {
     URL,
     setInterval: () => 0,
     setTimeout,
-    fetch: async () => ({ arrayBuffer: async () => new ArrayBuffer(0) }),
+    fetch: async () => ({
+      arrayBuffer: async () => new ArrayBuffer(0),
+      text: async () => defs,
+    }),
     WebAssembly: {
       compileStreaming: () => Promise.reject(new Error("no streaming")),
       compile: async () => ({}),
@@ -503,6 +534,7 @@ function runWorker() {
   };
   sandbox.self = sandbox;
   sandbox.self.__ssExtEmmyLuaWasm = "file:///stub.wasm";
+  if (defs) sandbox.self.__ssExtEmmyLuaDefs = "file:///stub-sas.lua";
   sandbox.self.postMessage = () => {};
   vm.createContext(sandbox);
   vm.runInContext(
@@ -510,7 +542,7 @@ function runWorker() {
     sandbox,
     { filename: "emmylua-worker.js" },
   );
-  return { sandbox, sent };
+  return { sandbox, sent, outbox };
 }
 
 (async () => {
@@ -558,4 +590,97 @@ function runWorker() {
   assert.equal(sent[4].params.textDocument.text, "print(3)\n");
 
   console.log("PASS  lua worker message ordering");
+
+  // The SAS API definitions go in as one extra document, right behind the
+  // initialize - the client never sees them and both consumers get them.
+  const defsText = "---@meta\nsas = {}\n";
+  const second = runWorker(defsText);
+  await new Promise((r) => setTimeout(r, 20));
+  second.sandbox.self.onmessage({ data: { jsonrpc: "2.0", id: 1, method: "initialize" } });
+  assert.deepEqual(
+    second.sent.map((m) => m.method),
+    ["initialize", "textDocument/didOpen"],
+    "the definitions are opened immediately after the initialize",
+  );
+  assert.equal(second.sent[1].params.textDocument.text, defsText);
+  assert.match(second.sent[1].params.textDocument.uri, /sas\.lua$/);
+
+  console.log("PASS  lua worker opens the sas definitions");
+
+  // workspace/configuration is the server's only way to be configured here -
+  // there is no .emmyrc.json to read - and the Lua version has to be answered,
+  // or it assumes 5.4 while PROC LUA is tkLua 5.2.
+  const third = runWorker();
+  await new Promise((r) => setTimeout(r, 20));
+  third.outbox.push(
+    { jsonrpc: "2.0", id: 7, method: "workspace/configuration", params: { items: [{ section: "emmylua" }, {}] } },
+    { jsonrpc: "2.0", id: 8, method: "client/registerCapability", params: {} },
+    { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: "file:///a.lua" } },
+  );
+  const posted = [];
+  third.sandbox.self.postMessage = (m) => posted.push(m);
+  third.sandbox.self.onmessage({ data: { jsonrpc: "2.0", id: 1, method: "initialize" } });
+
+  // The server only ever READS config through a request, and only if the client
+  // claims it can answer - which ace-linters never does.
+  assert.equal(
+    third.sent[0].params.capabilities.workspace.configuration,
+    true,
+    "the forwarded initialize claims workspace/configuration support",
+  );
+
+  const answers = third.sent.filter((m) => m.id === 7 || m.id === 8);
+  assert.deepEqual(
+    answers[0].result,
+    [
+      { runtime: { version: "Lua5.2" }, workspace: { workspaceRoots: [] } },
+      { runtime: { version: "Lua5.2" }, workspace: { workspaceRoots: [] } },
+    ],
+    "every requested configuration item gets the config back",
+  );
+  assert.equal(answers[1].result, null, "other server-to-client requests are still answered null");
+  assert.deepEqual(
+    posted.map((m) => m.method),
+    ["textDocument/publishDiagnostics"],
+    "only notifications reach the client",
+  );
+
+  console.log("PASS  lua worker answers the server's configuration request");
+
+  // A document's folder becomes a workspace root, pushed with
+  // didChangeConfiguration - that is what gives the server a module name for it,
+  // so a require() of another open .lua tab resolves.
+  const fourth = runWorker();
+  await new Promise((r) => setTimeout(r, 20));
+  const post4 = (m) => fourth.sandbox.self.onmessage({ data: m });
+  const open4 = (uri) =>
+    post4({
+      jsonrpc: "2.0",
+      method: "textDocument/didOpen",
+      params: { textDocument: { uri, languageId: "lua", version: 1, text: "" } },
+    });
+
+  post4({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  open4("file:///folders/myfolders/main.lua");
+  open4("file:///folders/myfolders/helper.lua"); // same folder - no second push
+  open4("file:///folders/other/mod.lua");
+
+  const pushes = fourth.sent.filter((m) => m.method === "workspace/didChangeConfiguration");
+  assert.deepEqual(
+    pushes.map((m) => m.params.settings.workspace.workspaceRoots),
+    [["/folders/myfolders"], ["/folders/myfolders", "/folders/other"]],
+    "one push per new folder, roots accumulating",
+  );
+  assert.equal(pushes[0].params.settings.runtime.version, "Lua5.2", "the rest of the config rides along");
+
+  // Our own definitions document must not become a root.
+  fourth.sent.length = 0;
+  open4("file:///ssext/defs/sas.lua");
+  assert.deepEqual(
+    fourth.sent.filter((m) => m.method === "workspace/didChangeConfiguration"),
+    [],
+    "the bundled definitions are not a workspace",
+  );
+
+  console.log("PASS  lua worker derives workspace roots from open documents");
 })();

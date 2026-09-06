@@ -1,5 +1,5 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index efe16b26..1c2e91d3 100644
+index efe16b2..1c2e91d 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -16,7 +16,7 @@ schema_to_emmylua = { path = "crates/schema_to_emmylua", version = "0.2.0" }
@@ -12,7 +12,7 @@ index efe16b26..1c2e91d3 100644
  serde_json = "1.0.151"
  rowan = { version = "0.17.0" }
 diff --git a/crates/emmylua_code_analysis/src/resources/best_resource_path.rs b/crates/emmylua_code_analysis/src/resources/best_resource_path.rs
-index 109a5088..b0c0fac9 100644
+index 109a508..b0c0fac 100644
 --- a/crates/emmylua_code_analysis/src/resources/best_resource_path.rs
 +++ b/crates/emmylua_code_analysis/src/resources/best_resource_path.rs
 @@ -1,6 +1,10 @@
@@ -36,8 +36,55 @@ index 109a5088..b0c0fac9 100644
  fn exe_dir() -> PathBuf {
      let mut exe = std::env::current_exe().expect("executable available");
      exe.pop();
+diff --git a/crates/emmylua_code_analysis/src/vfs/loader.rs b/crates/emmylua_code_analysis/src/vfs/loader.rs
+index cc96017..cd7a534 100644
+--- a/crates/emmylua_code_analysis/src/vfs/loader.rs
++++ b/crates/emmylua_code_analysis/src/vfs/loader.rs
+@@ -4,9 +4,11 @@ use std::{
+     fs,
+     path::{Path, PathBuf},
+ };
++#[cfg_attr(target_family = "wasm", allow(unused_imports))]
+ use wax::Pattern;
+ 
+ use log::{error, info};
++#[cfg_attr(target_family = "wasm", allow(unused_imports))]
+ use walkdir::WalkDir;
+ 
+ #[derive(Debug)]
+@@ -28,6 +30,22 @@ pub fn load_workspace_files(
+     exclude_dir: &[PathBuf],
+     encoding: Option<&str>,
+ ) -> Result<Vec<LuaFileInfo>, Box<dyn Error>> {
++    // There is no filesystem on wasm: the host answers every WASI path call
++    // with an error, and this walk then either traps (ENOSYS) or spins forever
++    // (ENOENT) inside the synchronous pump, taking the whole server with it.
++    // Returning no files leaves the workspace ROOTS registered - those are
++    // added by add_main_workspace, independently of this - which is all module
++    // resolution needs: add_module_by_path derives a module name from each
++    // file's path relative to a root, so documents the client opens are indexed
++    // as modules exactly as scanned ones would be.
++    #[cfg(target_family = "wasm")]
++    {
++        let _ = (root, include_pattern, exclude_pattern, exclude_dir, encoding);
++        return Ok(Vec::new());
++    }
++
++    #[cfg(not(target_family = "wasm"))]
++    {
+     let encoding = encoding.unwrap_or("utf-8");
+     let mut files = Vec::new();
+     if root.is_file() {
+@@ -90,6 +108,7 @@ pub fn load_workspace_files(
+     }
+ 
+     Ok(files)
++    }
+ }
+ 
+ pub fn read_file_with_encoding(path: &Path, encoding: &str) -> Option<String> {
 diff --git a/crates/emmylua_formatter/Cargo.toml b/crates/emmylua_formatter/Cargo.toml
-index 54e93684..4d34c320 100644
+index 54e9368..4d34c32 100644
 --- a/crates/emmylua_formatter/Cargo.toml
 +++ b/crates/emmylua_formatter/Cargo.toml
 @@ -30,7 +30,7 @@ hashbrown.workspace = true
@@ -50,7 +97,7 @@ index 54e93684..4d34c320 100644
  optional = true
  
 diff --git a/crates/emmylua_ls/Cargo.toml b/crates/emmylua_ls/Cargo.toml
-index 92b0a280..a7726da8 100644
+index 92b0a28..a7726da 100644
 --- a/crates/emmylua_ls/Cargo.toml
 +++ b/crates/emmylua_ls/Cargo.toml
 @@ -47,7 +47,7 @@ include_dir.workspace = true
@@ -76,7 +123,7 @@ index 92b0a280..a7726da8 100644
  name = "emmylua_ls"
  required-features = ["cli"]
 diff --git a/crates/emmylua_ls/src/handlers/document_formatting/external_format.rs b/crates/emmylua_ls/src/handlers/document_formatting/external_format.rs
-index 23d7ca8d..cefb7d99 100644
+index 23d7ca8..cefb7d9 100644
 --- a/crates/emmylua_ls/src/handlers/document_formatting/external_format.rs
 +++ b/crates/emmylua_ls/src/handlers/document_formatting/external_format.rs
 @@ -1,9 +1,14 @@
@@ -122,8 +169,48 @@ index 23d7ca8d..cefb7d99 100644
  fn parse_macro_arg(
      arg: &str,
      file_path: &str,
+diff --git a/crates/emmylua_ls/src/handlers/text_document/register_file_watch.rs b/crates/emmylua_ls/src/handlers/text_document/register_file_watch.rs
+index a2792fc..566bb2e 100644
+--- a/crates/emmylua_ls/src/handlers/text_document/register_file_watch.rs
++++ b/crates/emmylua_ls/src/handlers/text_document/register_file_watch.rs
+@@ -1,3 +1,7 @@
++// On wasm register_files_watch's body is cfg'd out (there is no filesystem to
++// watch), which leaves everything it uses unused.
++#![cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
++
+ use emmylua_code_analysis::file_path_to_uri;
+ use log::{info, warn};
+ use lsp_types::{
+@@ -33,6 +37,19 @@ const WATCHED_CONFIG_FILE_NAMES: [&str; 4] = [
+ ];
+ 
+ pub async fn register_files_watch(context: ServerContextSnapshot) {
++    // Nothing to watch on wasm - there is no filesystem, and notify's backend
++    // blocks the single-threaded runtime the whole server is pumped on, which
++    // hangs it for good. Registering a workspace root is still useful there
++    // (it is what gives open documents their module names), so this cannot
++    // just be skipped by leaving the roots unset.
++    #[cfg(target_family = "wasm")]
++    {
++        let _ = context;
++        return;
++    }
++
++    #[cfg(not(target_family = "wasm"))]
++    {
+     let supports_dynamic_watch = context
+         .lsp_features()
+         .supports_dynamic_watched_files_registration();
+@@ -78,6 +95,7 @@ pub async fn register_files_watch(context: ServerContextSnapshot) {
+             warn!("notify registration failed; no watched-file backend is available");
+         }
+     }
++    }
+ }
+ 
+ #[derive(Debug)]
 diff --git a/crates/emmylua_ls/src/lib.rs b/crates/emmylua_ls/src/lib.rs
-index 61496aba..0c5424a9 100644
+index 61496ab..0c5424a 100644
 --- a/crates/emmylua_ls/src/lib.rs
 +++ b/crates/emmylua_ls/src/lib.rs
 @@ -6,6 +6,9 @@ mod meta_text;
@@ -137,7 +224,7 @@ index 61496aba..0c5424a9 100644
  pub use cmd_args::*;
  pub use server::{AsyncConnection, ExitError, run_ls};
 diff --git a/crates/emmylua_ls/src/server/connection.rs b/crates/emmylua_ls/src/server/connection.rs
-index 1d74aac2..0a2475b5 100644
+index 1d74aac..0a2475b 100644
 --- a/crates/emmylua_ls/src/server/connection.rs
 +++ b/crates/emmylua_ls/src/server/connection.rs
 @@ -8,12 +8,33 @@ use super::error::ExitError;
@@ -208,7 +295,7 @@ index 1d74aac2..0a2475b5 100644
              Ok(Some(msg)) => {
                  return Err(Box::new(ExitError(format!(
 diff --git a/crates/emmylua_ls/src/server/main_loop.rs b/crates/emmylua_ls/src/server/main_loop.rs
-index 21f324a0..df2cec50 100644
+index 21f324a..df2cec5 100644
 --- a/crates/emmylua_ls/src/server/main_loop.rs
 +++ b/crates/emmylua_ls/src/server/main_loop.rs
 @@ -8,7 +8,7 @@ use crate::handlers::initialized_handler;
@@ -221,7 +308,7 @@ index 21f324a0..df2cec50 100644
      params: InitializeParams,
      cmd_args: CmdArgs,
 diff --git a/crates/emmylua_ls/src/server/mod.rs b/crates/emmylua_ls/src/server/mod.rs
-index b2d5dacf..00172945 100644
+index b2d5dac..0017294 100644
 --- a/crates/emmylua_ls/src/server/mod.rs
 +++ b/crates/emmylua_ls/src/server/mod.rs
 @@ -1,7 +1,7 @@
@@ -235,7 +322,7 @@ index b2d5dacf..00172945 100644
  pub use connection::AsyncConnection;
 diff --git a/crates/emmylua_ls/src/wasm.rs b/crates/emmylua_ls/src/wasm.rs
 new file mode 100644
-index 00000000..72d26aec
+index 0000000..72d26ae
 --- /dev/null
 +++ b/crates/emmylua_ls/src/wasm.rs
 @@ -0,0 +1,156 @@

@@ -52,8 +52,13 @@
   }
 
   class AceEditorAdapter {
-    constructor(containerId, content, modeId) {
+    // filePath is the file's path on the SAS server (item.uri), when there is
+    // one. It becomes the LSP document's URI instead of ace-linters' default
+    // "file:///<ace session id>.lua", which is what lets the Lua server work out
+    // a module name for it - see _maybeRegisterLsp.
+    constructor(containerId, content, modeId, filePath) {
       this.containerId = containerId;
+      this._filePath = filePath || null;
       this.container = document.getElementById(containerId);
       this._isAceEditorAdapter = true;
 
@@ -72,6 +77,7 @@
 
       const resolvedMode =
         typeof modeId === "string" && modeId.startsWith("ace/mode/") ? modeId : "ace/mode/sas";
+      this._resolvedMode = resolvedMode; // read by setupAceEventBindings below
       this.aceEditor = ace.edit(
         containerId,
         Object.assign(
@@ -210,15 +216,13 @@
       this._disposed = false;
       this._lspRegistered = false;
       this._lspRegistering = false;
-      this._resolvedMode = resolvedMode;
       this._maybeRegisterLsp();
     }
 
     // Eligible when the mode has a language server behind it - SAS
     // (lib/sas-lsp, via ensureLsp) or Lua (lib/emmylua-lsp, via
-    // ensureLuaLinters: a .lua file opened as text IS one language, so unlike a
-    // PROC LUA block it can go through ace-linters like any other) - and the
-    // current line count is within aceConfig.lspMaxLines (0/unset = no limit).
+    // ensureLuaLinters) - and the current line count is within
+    // aceConfig.lspMaxLines (0/unset = no limit).
     // Called from the constructor (empty new-program editors) and from setText
     // (real content, which for the code editor arrives after construction).
     _lspEligible() {
@@ -251,7 +255,15 @@
           this.aceEditor.completers = (this.aceEditor.completers || []).filter(
             (c) => c.id !== "lspCompleters",
           );
-          provider.registerEditor(this.aceEditor);
+          // A real path (rather than ace-linters' session-id default) is what
+          // gives the Lua server a module name for this document, so a
+          // require() of another open .lua tab resolves. Only for the Lua
+          // provider: the SAS server has no module concept, and its documents
+          // are better left on the ids the rest of this file's LSP code keys on.
+          provider.registerEditor(
+            this.aceEditor,
+            lua && this._filePath ? { filePath: this._filePath } : undefined,
+          );
           this._lspRegistered = true;
           // Which provider to unregister from in dispose() - there are two now.
           this._lspProvider = provider;
@@ -303,6 +315,7 @@
     setupAceEventBindings() {
       this.aceEditor.session.on("change", (delta) => {
         this._scheduleDirtyGutter();
+        nudgeSasFnCompletions(this.aceEditor);
         this.triggerEvent("textChanged", { delta });
       });
       this.aceEditor.session.selection.on("changeSelection", () => {
@@ -884,7 +897,7 @@
     await loadScript(`${libPath}/ext-language_tools.js`);
     registerOtherEditorsCompleter();
     registerSasContextCompleter();
-    registerLuaCompleter();
+    registerSasFnCompleter();
     await loadScript(`${srcAcePath}/ext-browse_ss.js`);
     // Warm the command-history cache now (fire-and-forget - "SsCmdPaletteHistory",
     // inlined since CMD_HISTORY_KEY is defined later in this closure but not yet
@@ -1391,7 +1404,52 @@
       clearTimeout(this._ssextTokenTimer);
       this._ssextTokenTimer = setTimeout(() => origGet.call(this), SEMANTIC_TOKEN_DEBOUNCE);
     };
+
+    proto.toAceTokenClassName = function (tokenType) {
+      return "ace_" + themedSemanticScope(tokenType).replace(/\./g, " ace_");
+    };
   }
+
+  // ace-linters turns an LSP semantic token type into a TextMate-ish scope
+  // (method -> "entity.name.function.member") and that scope straight into the
+  // marker's class list. Ace THEMES, though, only style a handful of scopes -
+  // gruvbox has keyword/comment/variable/constant/string/support/storage and
+  // nothing else - so most semantic markers carry a class no rule matches and
+  // the text keeps whatever the mode's own tokenizer gave it. That is the whole
+  // of "sas.symput() isn't colored like os.date()": both get the identical
+  // (invisible) class.name.static / function.member markers, and os only looks
+  // highlighted because ace's lua mode hardcodes it as constant.library. So
+  // rewrite the leading segments onto scopes themes actually paint; modifiers
+  // (".static", ".readonly", ...) ride along untouched.
+  const SEMANTIC_SCOPE_ALIASES = {
+    "entity.name.type.class": "support.class",
+    "entity.name.type.enum": "support.type.enum",
+    "entity.name.type.interface": "support.type.interface",
+    "entity.name.type": "support.type",
+    "entity.name.namespace": "support.class.namespace",
+    "entity.name.function.member": "support.function.member",
+    "entity.name.function": "support.function",
+    "entity.name.variable": "variable",
+    "variable.other.enummember": "constant.language.enummember",
+    number: "constant.numeric",
+    operator: "keyword.operator",
+    macro: "constant.language.macro",
+    regexp: "string.regexp",
+    modifier: "storage.modifier",
+    decorator: "support.function.decorator",
+  };
+  // Longest first, so ".function.member" wins over ".function".
+  const SEMANTIC_SCOPE_KEYS = Object.keys(SEMANTIC_SCOPE_ALIASES).sort((a, b) => b.length - a.length);
+
+  function themedSemanticScope(tokenType) {
+    const type = String(tokenType || "");
+    for (const key of SEMANTIC_SCOPE_KEYS) {
+      if (type === key) return SEMANTIC_SCOPE_ALIASES[key];
+      if (type.startsWith(key + ".")) return SEMANTIC_SCOPE_ALIASES[key] + type.slice(key.length);
+    }
+    return type;
+  }
+  ssExt._semanticScope = themedSemanticScope; // test/units.js
 
   // -- Library/table names for LSP completion -------------------------------------
   // Answered from SAS Studio's own library tree model - the same source
@@ -1670,6 +1728,25 @@
           console.warn("[SS Ext] LSP worker error:", (e && e.message) || e);
         });
 
+        // A side channel onto the same server, for questions ace-linters has no
+        // API for (sasFunctions() below). String ids so a response of ours can
+        // never collide with ace-linters' numeric ones, and the message listener
+        // swallows them rather than forwarding - same rule as sas/getLibList.
+        const rawPending = new Map();
+        let rawSeq = 0;
+        ssExt._lspRaw = {
+          notify: (method, params) => worker.postMessage({ jsonrpc: "2.0", method, params }),
+          request: (method, params) =>
+            new Promise((resolve) => {
+              const id = `ssext:${++rawSeq}`;
+              rawPending.set(id, resolve);
+              worker.postMessage({ jsonrpc: "2.0", id, method, params });
+              setTimeout(() => {
+                if (rawPending.delete(id)) resolve(null);
+              }, 5000);
+            }),
+        };
+
         // Workaround for ace-linters 2.2.0: its filterByFeature() checks
         // `capabilities.hoverProvider == true`, but the SAS server advertises the
         // LSP-spec-legal object form (e.g. {workDoneProgress: true}), so hover
@@ -1693,6 +1770,14 @@
           // answer MethodNotFound as soon as it saw this - first response wins, and
           // ours is async - so answer it here and DON'T forward the message.
           const msg = e.data;
+          if (msg && typeof msg.id === "string" && msg.id.startsWith("ssext:")) {
+            const resolve = rawPending.get(msg.id);
+            if (resolve) {
+              rawPending.delete(msg.id);
+              resolve(msg.error ? null : msg.result);
+            }
+            return;
+          }
           if (msg && msg.method === "sas/getLibList" && msg.id !== undefined) {
             getLibList(msg.params && msg.params.libId).then((result) => {
               worker.postMessage({ jsonrpc: "2.0", id: msg.id, result });
@@ -1760,68 +1845,178 @@
     return ssExt._lspStarting;
   }
 
-  // -- Lua language server (PROC LUA blocks, and .lua files as text) ---------------
+  // -- SAS DATA step functions, for `sas.<name>(...)` --------------------------------
   //
-  // A separate server from the SAS one above, and deliberately NOT wired through
-  // ace-linters: a session is one language to ace-linters, and the session that
-  // needs this most is ace/mode/sas, where the Lua only lives inside
-  // `proc lua; submit; ... endsubmit;`. A .lua file opened as text (mode
-  // ace/mode/lua) goes through the same client, with the whole file as the range.
-  // So this is a plain LSP client (~1 request per completion popup) feeding one
-  // extra ace completer, with the embedded language handled the cheapest way
-  // that keeps positions honest: the document sent to the server is the SAS file
-  // with every non-Lua LINE blanked out. Line and column then map 1:1 in both
-  // directions - no position translation anywhere - and the Lua the server sees
-  // is exactly the Lua the user wrote.
+  // PROC LUA makes every DATA step function callable as sas.<name> - in a .lua
+  // script it runs as much as in a submit block - which no Lua server can know. Their names and
+  // docs are already in the SAS language server, so ask IT at runtime rather than
+  // shipping a second, immediately-stale copy: one scratch SAS document parked at
+  // a data-step expression, one completion request per popup, and one
+  // completionItem/resolve for the doc tooltip of the selected row only.
+  // src/lua/sas.lua stays the source for the PACKAGE api (sas.submit, sas.open,
+  // ...), which the SAS server knows nothing about; this covers the other half.
   //
-  // ponytail: completion only. Diagnostics would have to fight ace-linters for
-  // session.setAnnotations (it replaces the whole set), and hover/signature help
-  // for the same popups; add them when the conflict is worth solving.
-  const LUA_SCORE = 2000; // above the SAS context completer's 1000, inside a block
+  // ponytail: the server filters by prefix itself and answers nothing under two
+  // characters, so this is prefix-driven - there is no "list them all", and no
+  // cache (a request is ~20 ms against a worker that is already warm).
+  const SAS_FN_URI = "file:///ssext/sas-functions.sas";
+  const SAS_FN_LINE = " x = "; // row 1 of the scratch document, a data-step expression
+  let sasFnVersion = 0;
 
-  // Rows covered by `proc lua ... submit;` / `endsubmit;`, line-granular: the
-  // fence lines themselves are SAS, so the Lua body is the rows between them.
-  function luaRanges(lines) {
-    const ranges = [];
-    let state = 0; // 0 = outside, 1 = in a proc lua step, 2 = inside submit
-    let start = 0;
-    lines.forEach((line, row) => {
-      if (state === 2) {
-        // `\bsubmit\b` cannot match inside "endsubmit" (no word boundary there),
-        // so the two tests below can't confuse the closing fence for an opening one.
-        if (/\bendsubmit\b/i.test(line)) {
-          ranges.push([start, row - 1]);
-          state = 0;
-        }
-        return;
-      }
-      if (state === 0 && /\bproc\s+lua\b/i.test(line)) state = 1;
-      else if (state === 1 && /\b(run|quit)\s*;/i.test(line)) state = 0;
-      if (state === 1 && /\bsubmit\b[^;]*;/i.test(line)) {
-        state = 2;
-        start = row + 1;
-      }
+  function sasFnText(prefix) {
+    return `data _null_;\n${SAS_FN_LINE}${prefix}\nrun;\n`;
+  }
+
+  async function sasFunctions(prefix) {
+    if (!prefix || prefix.length < 2) return [];
+    await ensureLsp();
+    const raw = ssExt._lspRaw;
+    if (!raw) return [];
+    const text = sasFnText(prefix);
+    if (!sasFnVersion) {
+      sasFnVersion = 1;
+      raw.notify("textDocument/didOpen", {
+        textDocument: { uri: SAS_FN_URI, languageId: "sas", version: 1, text },
+      });
+    } else {
+      raw.notify("textDocument/didChange", {
+        textDocument: { uri: SAS_FN_URI, version: ++sasFnVersion },
+        contentChanges: [{ text }],
+      });
+    }
+    const res = await raw.request("textDocument/completion", {
+      textDocument: { uri: SAS_FN_URI },
+      position: { line: 1, character: SAS_FN_LINE.length + prefix.length },
     });
-    if (state === 2) ranges.push([start, lines.length - 1]);
-    return ranges;
+    const items = (res && (res.items || res)) || [];
+    return items
+      .filter((i) => i.kind === 3) // CompletionItemKind.Function
+      .map((i) => ({
+        caption: i.label,
+        value: i.label,
+        meta: "sas fn",
+        score: SAS_FN_SCORE,
+        __sasFn: true,
+      }));
   }
 
-  function inLuaRange(ranges, row) {
-    return ranges.some(([from, to]) => row >= from && row <= to);
+  function sasFunctionDoc(label) {
+    const raw = ssExt._lspRaw;
+    if (!raw) return Promise.resolve("");
+    return raw
+      .request("completionItem/resolve", {
+        label,
+        kind: 3,
+        data: { _languageService: "sas", _uri: SAS_FN_URI },
+      })
+      .then((r) => {
+        const doc = r && r.documentation;
+        return mdToText((doc && doc.value) || doc || "");
+      });
   }
 
-  // Exposed for test/units.js.
-  ssExt._lua = { luaRanges, inLuaRange };
+  // The server's answer is markdown with a doc link and a stray <span>; ace's
+  // doc tooltip takes plain text (nothing here bundles a markdown converter).
+  function mdToText(md) {
+    return String(md)
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/<[^>]+>/g, "")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .trim();
+  }
 
-  // Start one emmylua worker. Called twice at most per page, by two independent
-  // consumers: ensureLuaLinters() (a .lua file, driven by ace-linters) and
-  // ensureLuaLsp() (PROC LUA blocks, driven by our own client below). They get a
-  // worker each rather than sharing one, because two LSP clients on one
-  // connection means two id spaces on one server - and a wasm instance is 2.6 MB
-  // of linear memory (measured, with the Lua stdlib loaded), against a module
-  // the browser has already fetched and compiled once.
-  // ponytail: if a page ever runs both and the memory matters, multiplex on one
-  // worker by giving our own client string ids and routing by id type.
+  // Is the caret completing right after `sas.`?
+  function afterSasDot(session, pos, prefix) {
+    return session.getLine(pos.row).slice(0, pos.column - prefix.length).endsWith("sas.");
+  }
+
+  // The whole `<name>` of a `sas.<name>` the caret is inside, for hover.
+  function sasDotWordAt(session, pos) {
+    const line = session.getLine(pos.row) || "";
+    const before = line.slice(0, pos.column).match(/\bsas\.(\w*)$/);
+    if (!before) return null;
+    const after = (line.slice(pos.column).match(/^\w*/) || [""])[0];
+    const name = before[1] + after;
+    return name.length >= 2 ? { name, column: pos.column - before[1].length } : null;
+  }
+
+  // emmylua only knows sas.<name> through the index signature in src/lua/sas.lua
+  // ("fun(...): any"), so the doc has to come from the same place the completion
+  // did. Undefined for anything the SAS server doesn't list as a function, which
+  // is what lets the caller fall through to the real Lua hover (sas.submit and
+  // the rest of the package API are documented in sas.lua, not by this server).
+  // The names src/lua/sas.lua declares itself, so a hover on one of them is left
+  // to emmylua. They overlap the DATA step functions (open, close, put, symget,
+  // exist, sleep, ...) and the package's version is the one that is actually in
+  // scope - sas.put PRINTS, while the SAS PUT() function formats a value. The
+  // completer dedupes the same way, by caption.
+  let sasLuaNames = null;
+  function sasLuaDeclared() {
+    if (!sasLuaNames) {
+      const extRoot = ssExt.libPath.replace(/\/lib\/ace\/src-noconflict$/, "");
+      sasLuaNames = fetch(`${extRoot}/src/lua/sas.lua`)
+        .then((r) => r.text())
+        .then((text) => new Set((text.match(/^function sas\.\w+/gm) || []).map((m) => m.slice(13))))
+        .catch(() => new Set());
+    }
+    return sasLuaNames;
+  }
+
+  async function sasFnHover(session, pos) {
+    const word = sasDotWordAt(session, pos);
+    if (!word) return undefined;
+    if ((await sasLuaDeclared()).has(word.name.toLowerCase())) return undefined;
+    const items = await sasFunctions(word.name);
+    const match = items.some((i) => i.caption.toLowerCase() === word.name.toLowerCase());
+    if (!match) return undefined;
+    const text = await sasFunctionDoc(word.name);
+    if (!text) return undefined;
+    return {
+      content: { type: "markdown", text },
+      range: {
+        start: { row: pos.row, column: word.column },
+        end: { row: pos.row, column: word.column + word.name.length },
+      },
+    };
+  }
+
+  // ace gathers completions ONCE when the popup opens and only re-filters on
+  // later keystrokes (Autocomplete.updateCompletions' keepPopupPosition branch),
+  // so a popup opened at `sas.t` - where the SAS server, which answers nothing
+  // under two characters, gave us nothing - can never grow the entries that
+  // exist at `sas.to`. Force one fresh gather at exactly two characters; by
+  // three the list already has them, so this runs at most once per popup.
+  function nudgeSasFnCompletions(editor) {
+    // Deferred by a tick because the caller is the session's change event, where
+    // the caret has NOT moved yet - and updateCompletions re-derives the prefix
+    // from the caret, so a synchronous call re-gathers at the old
+    // one-character prefix and changes nothing.
+    setTimeout(() => {
+      const completer = editor.completer;
+      if (!completer || !completer.activated || !completer.completions) return;
+      const pos = editor.getCursorPosition();
+      const line = (editor.session.getLine(pos.row) || "").slice(0, pos.column);
+      if (!/\bsas\.\w\w$/.test(line)) return;
+      if ((completer.completions.all || []).some((item) => item.__sasFn)) return;
+      try {
+        completer.updateCompletions(false);
+      } catch (e) {}
+    }, 0);
+  }
+
+  ssExt._sasFns = { mdToText, afterSasDot, sasDotWordAt }; // test/units.js
+
+  // -- Lua language server (.lua files opened as text) ----------------------------
+  //
+  // A second server, for Lua, driven entirely by ace-linters: a .lua file is one
+  // language end to end, which is exactly ace-linters' case, so it needs no
+  // client of its own here. src/lua/sas.lua (opened by the worker) and the
+  // sas.<name> completer above are what make the SAS `sas` table known to it.
+  const SAS_FN_SCORE = 2000; // above the SAS context completer's 1000
+
+  // Start the emmylua worker - once per page, for ensureLuaLinters() below.
   async function startEmmyLuaWorker() {
     const extRoot = ssExt.libPath.replace(/\/lib\/ace\/src-noconflict$/, "");
     const wasmUrl = `${extRoot}/lib/emmylua-lsp/emmylua_ls.wasm`;
@@ -1831,8 +2026,11 @@
     // Same blob + importScripts shape as the SAS server above: a worker created
     // straight from a chrome-extension: URL is at the mercy of the page's
     // worker-src, a blob: one isn't.
+    // The worker opens the definitions as one extra document right after the
+    // initialize, so the server knows the `sas` API with no client-side code.
     const boot =
       `self.__ssExtEmmyLuaWasm=${JSON.stringify(wasmUrl)};` +
+      `self.__ssExtEmmyLuaDefs=${JSON.stringify(`${extRoot}/src/lua/sas.lua`)};` +
       `importScripts(${JSON.stringify(`${extRoot}/src/emmylua-worker.js`)})`;
     return new Worker(URL.createObjectURL(new Blob([boot], { type: "text/javascript" })));
   }
@@ -1842,8 +2040,7 @@
   // feature set at once - diagnostics (the server pushes
   // textDocument/publishDiagnostics), hover, signature help, document
   // highlights, code actions, semantic tokens, completion+resolve and format -
-  // with no UI code here. Only the PROC LUA case needs the hand-rolled client
-  // below, since that session is ace/mode/sas and ace-linters is per-session.
+  // with no UI code here.
   function ensureLuaLinters() {
     if (getAceConfig().luaLsp === false) return Promise.resolve(null);
     if (ssExt._luaLintersStarting) return ssExt._luaLintersStarting;
@@ -1881,6 +2078,7 @@
           },
         );
         ssExt._luaLintersProvider = provider; // asserted by test/smoke.js
+        installLuaFileHover(provider);
         return provider;
       } catch (e) {
         console.warn(
@@ -1894,157 +2092,54 @@
     return ssExt._luaLintersStarting;
   }
 
-  function ensureLuaLsp() {
-    if (getAceConfig().luaLsp === false) return Promise.resolve(null);
-    if (ssExt._luaLspStarting) return ssExt._luaLspStarting;
-
-    ssExt._luaLspStarting = (async () => {
-      try {
-        const worker = await startEmmyLuaWorker();
-
-        let nextId = 1;
-        const pending = new Map();
-        worker.addEventListener("message", (e) => {
-          const msg = e.data;
-          if (!msg) return;
-          if (msg.__ssextLuaLspFailed) {
-            pending.forEach(({ reject }) => reject(new Error(msg.__ssextLuaLspFailed)));
-            pending.clear();
-            return;
-          }
-          const entry = msg.id !== undefined && pending.get(msg.id);
-          if (!entry) return; // notifications (diagnostics, logs) are not used yet
-          pending.delete(msg.id);
-          if (msg.error) entry.reject(new Error(msg.error.message));
-          else entry.resolve(msg.result);
-        });
-
-        const client = {
-          notify: (method, params) => worker.postMessage({ jsonrpc: "2.0", method, params }),
-          request: (method, params) =>
-            new Promise((resolve, reject) => {
-              const id = nextId++;
-              pending.set(id, { resolve, reject });
-              worker.postMessage({ jsonrpc: "2.0", id, method, params });
-            }),
-          docs: new Map(), // uri -> { version, text }
-        };
-
-        await client.request("initialize", {
-          processId: null,
-          rootUri: null,
-          workspaceFolders: [],
-          capabilities: { workspace: { configuration: true } },
-        });
-        // No `initialized` notification: this server has no handler for it
-        // (it warns "Unhandled notification method") - its own init runs off
-        // the initialize request, from main_loop.
-        ssExt._luaLspClient = client; // asserted by test/smoke.js
-        return client;
-      } catch (e) {
-        console.warn(
-          "[SS Ext] Lua LSP unavailable (run ./tools/build_lib.sh):",
-          (e && e.message) || e,
-        );
-        return null;
-      }
-    })();
-
-    return ssExt._luaLspStarting;
+  // A .lua file's hover is ace-linters' (emmylua's), which knows sas.<name> only
+  // as the index signature - so that one gets the same SAS-function pass first.
+  function installLuaFileHover(provider) {
+    if (ssExt._luaFileHoverPatched) return;
+    ssExt._luaFileHoverPatched = true;
+    const original = provider.doHover.bind(provider);
+    provider.doHover = (session, position, callback) => {
+      const fallback = () => original(session, position, callback);
+      sasFnHover(session, position).then(
+        (tooltip) => (tooltip ? callback && callback(tooltip) : fallback()),
+        fallback,
+      );
+    };
   }
 
-  let luaUriSeq = 0;
-  function luaUriFor(session) {
-    if (!session.$ssExtLuaUri) session.$ssExtLuaUri = `file:///ssext/${++luaUriSeq}.lua`;
-    return session.$ssExtLuaUri;
-  }
+  let lastCompletionEditor = null;
 
-  // Push the current text and ask for completions at pos. Syncing here rather
-  // than from a change listener means one didChange per popup instead of one per
-  // keystroke, and the server's sync kind is FULL anyway.
-  async function luaComplete(session, pos, ranges) {
-    const client = await ensureLuaLsp();
-    if (!client) return [];
-    const uri = luaUriFor(session);
-    const text = session
-      .getDocument()
-      .getAllLines()
-      .map((line, row) => (inLuaRange(ranges, row) ? line : ""))
-      .join("\n");
-
-    const doc = client.docs.get(uri);
-    if (!doc) {
-      client.docs.set(uri, { version: 1, text });
-      client.notify("textDocument/didOpen", {
-        textDocument: { uri, languageId: "lua", version: 1, text },
-      });
-    } else if (doc.text !== text) {
-      doc.version += 1;
-      doc.text = text;
-      client.notify("textDocument/didChange", {
-        textDocument: { uri, version: doc.version },
-        contentChanges: [{ text }],
-      });
-    }
-
-    const res = await client.request("textDocument/completion", {
-      textDocument: { uri },
-      position: { line: pos.row, character: pos.column },
-    });
-    const items = (res && (res.items || res)) || [];
-    return items.map((item) => ({
-      caption: item.label,
-      // emmylua returns plain labels (no textEdit/insertText) for these, but a
-      // server is allowed to send either, so prefer what it asks to insert.
-      value: (item.textEdit && item.textEdit.newText) || item.insertText || item.label,
-      meta: LUA_ITEM_KINDS[item.kind] || "lua",
-      docText: (item.labelDetails && item.labelDetails.detail) || item.detail || "",
-      score: LUA_SCORE,
-    }));
-  }
-
-  // LSP CompletionItemKind -> the popup's right-hand column.
-  const LUA_ITEM_KINDS = {
-    2: "method",
-    3: "function",
-    5: "field",
-    6: "variable",
-    7: "class",
-    9: "module",
-    10: "property",
-    12: "value",
-    14: "keyword",
-    21: "constant",
-    22: "struct",
-    25: "type param",
-  };
-
-  function registerLuaCompleter() {
-    if (ssExt._luaCompleterAdded) return;
-    ssExt._luaCompleterAdded = true;
+  // The sas.<name> DATA step functions, offered inside a .lua file. Deliberately
+  // NOT a general Lua completer: everything else in that session is ace-linters'
+  // (ensureLuaLinters above), and this is the one thing its server cannot know.
+  function registerSasFnCompleter() {
+    if (ssExt._sasFnCompleterAdded) return;
+    ssExt._sasFnCompleterAdded = true;
     ace.require("ace/ext/language_tools").addCompleter({
-      id: "ssextLua",
+      id: "ssextSasFns",
       getCompletions: (editor, session, pos, prefix, callback) => {
-        // SAS sessions only: a .lua file is an ace/mode/lua session and gets
-        // the full ace-linters treatment instead (ensureLuaLinters above), so
-        // this completer would only duplicate its entries there. Nothing here
-        // starts a server (a 12 MB wasm fetch) until the caret is actually
-        // inside a PROC LUA block.
-        if (session.$modeId !== "ace/mode/sas") return callback(null, []);
-        let ranges;
-        try {
-          ranges = luaRanges(session.getDocument().getAllLines());
-        } catch (e) {
-          return callback(null, []);
-        }
-        if (!inLuaRange(ranges, pos.row)) return callback(null, []);
-        luaComplete(session, pos, ranges).then(
-          (items) => callback(null, items),
+        if (session.$modeId !== "ace/mode/lua") return callback(null, []);
+        if (!afterSasDot(session, pos, prefix)) return callback(null, []);
+        lastCompletionEditor = editor; // for getDocTooltip, which gets no editor
+        sasFunctions(prefix).then(
+          (fns) => callback(null, fns),
           (e) => {
-            console.warn("[SS Ext] Lua completion failed:", (e && e.message) || e);
+            console.warn("[SS Ext] sas.<name> completion failed:", (e && e.message) || e);
             callback(null, []);
           },
         );
+      },
+      // Resolve a DATA step function's doc only when its row is selected, the
+      // way ace-linters does: fill docText in and re-render the tooltip.
+      getDocTooltip: (item) => {
+        if (!item || !item.__sasFn || item.docText !== undefined) return;
+        item.docText = "";
+        sasFunctionDoc(item.caption).then((text) => {
+          item.docText = text;
+          const completer = lastCompletionEditor && lastCompletionEditor.completer;
+          if (text && completer) completer.updateDocTooltip();
+        });
+        return item;
       },
     });
   }
@@ -2315,6 +2410,7 @@
       divId,
       textarea ? textarea.get("value") : "",
       aceModeFor(item && item.name),
+      item && item.uri,
     );
     // Always editable (like a normal editor); the dirty state drives the tab
     // marker and Save button, and Ctrl/Cmd+S / vim :w save. That includes the

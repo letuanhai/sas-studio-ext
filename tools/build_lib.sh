@@ -185,8 +185,12 @@ fi
 # stub WASI shim. wasip1 rather than wasm32-unknown-unknown: that one
 # additionally needs a forked emmy_lsp_types (url::Url::from_file_path is gated
 # off on it), and the imports a browser has to fill are the same handful either way.
-if [ -f lib/emmylua-lsp/emmylua_ls.wasm ] && [ "$(cat lib/emmylua-lsp/.version 2>/dev/null)" = "$EMMYLUA_VERSION" ]; then
-  echo "== lib/emmylua-lsp already at $EMMYLUA_VERSION - skipping Lua LSP build"
+# The build is the tag PLUS tools/emmylua-wasm.patch, and the patch changes far
+# more often than the tag does - so the stamp covers both, or a patch-only change
+# silently keeps the previous wasm.
+EMMYLUA_STAMP="$EMMYLUA_VERSION-$(cksum "$ROOT/tools/emmylua-wasm.patch" | cut -d" " -f1)"
+if [ -f lib/emmylua-lsp/emmylua_ls.wasm ] && [ "$(cat lib/emmylua-lsp/.version 2>/dev/null)" = "$EMMYLUA_STAMP" ]; then
+  echo "== lib/emmylua-lsp already at $EMMYLUA_STAMP - skipping Lua LSP build"
 elif ! command -v cargo >/dev/null 2>&1; then
   echo "== WARNING: cargo not found - skipping lib/emmylua-lsp (Lua completions in"
   echo "   PROC LUA blocks will be unavailable; everything else is unaffected)"
@@ -208,7 +212,7 @@ else
   mkdir -p lib/emmylua-lsp
   cp "$SRC/target/wasm32-wasip1/release/emmylua_ls.wasm" lib/emmylua-lsp/emmylua_ls.wasm
   cp "$SRC/LICENSE" lib/emmylua-lsp/LICENSE-emmylua
-  echo "$EMMYLUA_VERSION" > lib/emmylua-lsp/.version
+  echo "$EMMYLUA_STAMP" > lib/emmylua-lsp/.version
 fi
 
 echo "== Done: ace@$ACE_VERSION ace-linters@$ACE_LINTERS_VERSION sas-lsp@$SAS_LSP_VERSION emmylua@$EMMYLUA_VERSION"

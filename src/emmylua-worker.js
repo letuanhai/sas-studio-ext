@@ -11,7 +11,9 @@
 // message. Nothing blocks, so the worker's event loop stays responsive.
 //
 // The wasm URL comes from self.__ssExtEmmyLuaWasm, set by the blob wrapper that
-// importScripts()es this file (see ensureLuaLsp in editor-swap.js).
+// importScripts()es this file (see startEmmyLuaWorker in editor-swap.js), as
+// does self.__ssExtEmmyLuaDefs, the URL of the SAS API definitions this opens
+// as an extra document.
 "use strict";
 
 // wasi_snapshot_preview1, only as far as this module actually needs it. Rust's
@@ -93,6 +95,18 @@ function wasiShim(getMemory, onStderr) {
   };
 }
 
+// The server's own config (an .emmyrc.json object), handed back from the
+// workspace/configuration request it makes at startup - there is no file for it
+// to read here. Left at its default it assumes Lua 5.4, but PROC LUA is tkLua
+// 5.2 (`print(_VERSION)` in a submit block), so 5.3+ syntax the SAS runtime
+// would reject - integer division, goto - passes unremarked and 5.4-only stdlib
+// is offered. Verified: with this, `7 // 2` is reported as "integer division is
+// not supported".
+// ponytail: hardcoded. The Lua version is a property of SAS, not of the user.
+// workspaceRoots starts empty and is filled from the documents that open - see
+// addRoot below.
+const EMMYRC = { runtime: { version: "Lua5.2" }, workspace: { workspaceRoots: [] } };
+
 let ex = null; // the wasm instance's exports
 
 // The server writes its own `[timestamp LEVEL module] message` log to stderr,
@@ -125,16 +139,19 @@ function drain() {
       new Uint8Array(ex.memory.buffer).slice(ptr + 4, ptr + 4 + len),
     );
     const msg = JSON.parse(json);
-    // Server-to-client requests: the client half of this pair has no settings
-    // and no capabilities to register, so answer them here and keep them off
-    // the main thread. A request left unanswered stalls the server's own init.
+    // Server-to-client requests: the client half of this pair has no
+    // capabilities to register, so answer them here and keep them off the main
+    // thread. A request left unanswered stalls the server's own init. The one
+    // that carries settings is workspace/configuration (section "emmylua"),
+    // which the server asks once at startup - that is the only hook for its
+    // config, so EMMYRC goes back for every requested item.
     if (msg.method && msg.id !== undefined) {
       send({
         jsonrpc: "2.0",
         id: msg.id,
         result:
           msg.method === "workspace/configuration"
-            ? ((msg.params && msg.params.items) || [{}]).map(() => null)
+            ? ((msg.params && msg.params.items) || [{}]).map(() => EMMYRC)
             : null,
       });
       continue;
@@ -177,9 +194,92 @@ function fullText(change) {
   return first && first.range === undefined ? first.text : undefined;
 }
 
+// The `sas` table PROC LUA puts in scope is not discoverable from any Lua the
+// user writes, so the server is handed src/lua/sas.lua as one more open
+// document: emmylua indexes every open document into the same workspace, so its
+// globals are in scope in the user's file too (verified against the server).
+// Opening it right after the initialize request keeps the client out of it -
+// both consumers get the definitions with no code of their own.
+let sasDefs = null; // { uri, text }
+
+function openSasDefs() {
+  if (!sasDefs) return;
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: {
+      textDocument: { uri: sasDefs.uri, languageId: "lua", version: 1, text: sasDefs.text },
+    },
+  });
+}
+
+// Workspace roots, which is what makes require() resolve: the server derives a
+// module name for every file it knows by stripping a root off its path
+// (add_module_by_path), so with a root covering an open document, a require of
+// it from another one resolves - no filesystem needed, which is just as well
+// since there isn't one (tools/emmylua-wasm.patch cuts the workspace scan and
+// the file watcher out of the wasm build for exactly that reason).
+//
+// The folder can't be known at startup, so it is taken from the documents
+// themselves as they open and pushed with workspace/didChangeConfiguration;
+// the server re-reads its configuration and re-indexes. Verified: a late push
+// turns "Cannot resolve module `helper`" into the real signature on hover.
+const roots = new Set();
+
+// The server reads its configuration in exactly one way: by REQUESTING it
+// (workspace/configuration), and only if the client said it can answer -
+// `on_did_change_configuration` throws the notification's own `settings` away
+// and re-requests instead. ace-linters never declares that capability (it sends
+// `workspace: { didChangeConfiguration, executeCommand, applyEdit, ... }` and
+// nothing else), so without this the server never asks, EMMYRC is never
+// applied, and both the Lua version and the workspace roots are silently
+// ignored - which is exactly how it behaved before this was found.
+function withConfigCapability(msg) {
+  const params = (msg && msg.params) || {};
+  const capabilities = params.capabilities || {};
+  return {
+    ...msg,
+    params: {
+      ...params,
+      capabilities: {
+        ...capabilities,
+        workspace: { ...(capabilities.workspace || {}), configuration: true },
+      },
+    },
+  };
+}
+
+// The parent folder of a "file:///a/b/c.lua" document, or null for one of ours
+// (the defs live at an /ssext/ path that no user file can be under).
+function rootOf(uri) {
+  if (typeof uri !== "string" || !uri.startsWith("file:///")) return null;
+  const p = decodeURIComponent(uri.slice("file://".length));
+  if (p.startsWith("/ssext/")) return null;
+  const cut = p.lastIndexOf("/");
+  return cut > 0 ? p.slice(0, cut) : null;
+}
+
+function addRoot(uri) {
+  const root = rootOf(uri);
+  // A root already covered by one we have adds nothing but a re-index.
+  if (!root || roots.has(root)) return;
+  roots.add(root);
+  EMMYRC.workspace.workspaceRoots = [...roots];
+  send({
+    jsonrpc: "2.0",
+    method: "workspace/didChangeConfiguration",
+    params: { settings: EMMYRC },
+  });
+}
+
 function forward(msg) {
   const uri = uriOf(msg);
   const method = msg && msg.method;
+  if (method === "initialize") {
+    send(withConfigCapability(msg));
+    openSasDefs();
+    return;
+  }
   if (method === "textDocument/didChange" && uri && !openDocs.has(uri)) {
     heldChanges.set(uri, msg);
     return;
@@ -196,6 +296,7 @@ function forward(msg) {
       };
     }
     send(msg);
+    addRoot(uri);
     return;
   }
   if (method === "textDocument/didClose" && uri) {
@@ -217,6 +318,18 @@ self.onmessage = (e) => {
 
 (async () => {
   const url = self.__ssExtEmmyLuaWasm;
+  const defsUrl = self.__ssExtEmmyLuaDefs;
+  // Loaded before the queued messages are forwarded, so the initialize that
+  // opens it can never outrun the fetch.
+  if (defsUrl) {
+    sasDefs = await fetch(defsUrl)
+      .then((r) => r.text())
+      .then((text) => ({ uri: "file:///ssext/defs/sas.lua", text }))
+      .catch((e) => {
+        console.warn("[SS Ext] SAS Lua definitions unavailable:", (e && e.message) || e);
+        return null;
+      });
+  }
   const wasm = await WebAssembly.compileStreaming(fetch(url)).catch(async () =>
     // compileStreaming needs an application/wasm content type; fall back to the
     // buffered form rather than depending on how the resource is served.

@@ -1228,79 +1228,12 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     popupWidth,
   );
 
-  // -- Lua language server inside PROC LUA submit blocks ---------------------------
-  // The emmylua server (wasm, its own worker - see src/emmylua-worker.js) is fed the
-  // SAS file with every non-Lua line blanked out, so an LSP position is an ace
-  // position unchanged. Checks both halves of that: real Lua completions inside the
-  // block, and silence outside it (where SAS, not Lua, is the language).
-  const luaState = await page.evaluate(async () => {
-    const div = document.createElement("div");
-    div.id = "ssext_smoke_lua";
-    div.style.cssText = "position:fixed;left:-9999px;top:0;width:600px;height:300px";
-    document.body.appendChild(div);
-    const program = [
-      "data work.a;",
-      "  set sashelp.class;",
-      "run;",
-      "",
-      "proc lua;",
-      "submit;",
-      '  local s = "abc"',
-      "  print(s:up",
-      "endsubmit;",
-      "run;",
-    ].join("\n");
-    const adapter = new window.__ssExt.AceEditorAdapter(div.id, program, "sas");
-    const editor = adapter.aceEditor;
-    const completer = (editor.completers || []).find((c) => c.id === "ssextLua");
-    const complete = (row, column, prefix) =>
-      new Promise((res) =>
-        completer.getCompletions(editor, editor.session, { row, column }, prefix, (e, r) =>
-          res(r || []),
-        ),
-      );
-
-    // First call starts the worker (a ~12 MB wasm fetch + server init), so retry
-    // until it answers rather than racing it.
-    let inside = [];
-    for (let i = 0; i < 40; i++) {
-      inside = await complete(7, 12, "up");
-      if (inside.length) break;
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    const outside = await complete(1, 20, "");
-    const started = !!window.__ssExt._luaLspClient;
-    adapter.dispose();
-    div.remove();
-    return {
-      started,
-      captions: inside.map((i) => i.caption),
-      metas: inside.map((i) => i.meta),
-      scores: inside.map((i) => i.score),
-      outside: outside.length,
-    };
-  });
-  check(
-    luaState.started
-      ? "Lua LSP: string methods are offered inside a PROC LUA submit block"
-      : "Lua LSP: string methods offered inside PROC LUA (skipped: lib/emmylua-lsp not built)",
-    !luaState.started ||
-      (luaState.captions.includes("upper") &&
-        luaState.metas.every((m) => m === "function") &&
-        luaState.scores.every((s) => s === 2000)),
-    luaState,
-  );
-  check(
-    "Lua LSP: nothing is offered outside the submit block",
-    luaState.outside === 0,
-    luaState,
-  );
-
+  // -- Lua language server (.lua files) --------------------------------------------
   // A .lua file opened as text is one language end to end, so it goes through
-  // ace-linters against the same server (ensureLuaLinters) instead of the
-  // blanked-document client - which is what buys diagnostics/hover/format there
-  // for free. Checks the mode mapping, the registration hygiene, LSP-ranked
-  // completions, and that the server's pushed diagnostics reach the session.
+  // ace-linters against the emmylua server (ensureLuaLinters), which is what
+  // buys diagnostics/hover/format for free. Checks the mode mapping, the
+  // registration hygiene, LSP-ranked completions, the server's pushed
+  // diagnostics, formatting, and the sas.<name> DATA step functions on top.
   const luaFileState = await page.evaluate(async () => {
     const div = document.createElement("div");
     div.id = "ssext_smoke_lua_file";
@@ -1338,6 +1271,55 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       await new Promise((r) => setTimeout(r, 500));
     }
     const hasFormatCommand = !!ed.commands.commands.formatDocument;
+
+    // sas.<name>: the DATA step functions, and their two known traps in a .lua
+    // session - emmylua calling them undefined fields, and ace never re-gathering
+    // a popup that opened at `sas.t` (where the SAS server, which answers nothing
+    // under two characters, had nothing for us).
+    ed.setValue("x = sas.t", -1);
+    ed.focus();
+    ed.moveCursorTo(0, 9);
+    await new Promise((r) => setTimeout(r, 2000));
+    ed.execCommand("startAutocomplete");
+    await new Promise((r) => setTimeout(r, 1500));
+    const beforeNudge = ((ed.completer && ed.completer.completions.all) || []).filter(
+      (i) => i.__sasFn,
+    ).length;
+    ed.insert("o");
+    let afterNudge = [];
+    let afterNudgeAll = [];
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const all = (ed.completer && ed.completer.completions.all) || [];
+      afterNudge = all.filter((i) => i.__sasFn).map((i) => i.caption);
+      afterNudgeAll = all.map((i) => i.caption);
+      if (afterNudge.length) break;
+    }
+    ed.execCommand("hideAutocomplete") || (ed.completer && ed.completer.detach());
+    // Hover: the SAS server's doc for a DATA step function, emmylua's own for
+    // what src/lua/sas.lua declares (sas.symget is BOTH - sas.lua wins).
+    ed.setValue("sas.today()\nsas.symget('a')\n", -1);
+    await new Promise((r) => setTimeout(r, 2000));
+    const provider = window.__ssExt._luaLintersProvider;
+    const hoverAt = (row, column) =>
+      new Promise((res) => {
+        if (!provider) return res(null);
+        const t = setTimeout(() => res(null), 20000);
+        provider.doHover(ed.session, { row, column }, (tt) => {
+          clearTimeout(t);
+          res((tt && tt.content && tt.content.text) || null);
+        });
+      });
+    const sasFnHoverText = (await hoverAt(0, 6)) || "";
+    const packageHoverText = (await hoverAt(1, 6)) || "";
+    let undefinedField = [];
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      undefinedField = (ed.session.getAnnotations() || []).filter((a) =>
+        /Undefined field/i.test(a.text),
+      );
+      if (undefinedField.length) break;
+    }
     // Formatting for real: messy input in, the server's edits applied back.
     ed.setValue("local   x=1\nif x    then\nprint(  x )\nend\n", -1);
     await new Promise((r) => setTimeout(r, 1200));
@@ -1363,6 +1345,14 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       beforeFormat,
       afterFormat,
       leaked,
+      beforeNudge,
+      afterNudge,
+      // "to_xml" is src/lua/sas.lua's, offered by emmylua because the worker
+      // opens that file as a document - the package half of the sas table.
+      defsEntry: afterNudgeAll.includes("to_xml"),
+      sasFnHoverText: sasFnHoverText.slice(0, 160),
+      packageHoverText: packageHoverText.slice(0, 160),
+      undefinedField: undefinedField.map((a) => a.text),
     };
   });
   check(
@@ -1399,6 +1389,101 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       beforeFormat: luaFileState.beforeFormat,
       afterFormat: luaFileState.afterFormat,
     },
+  );
+  check(
+    luaFileState.started
+      ? "Lua LSP: sas.<name> offers both halves, and a popup opened at sas.t grows them"
+      : "Lua LSP: sas.<name> completion (skipped: lib/emmylua-lsp not built)",
+    !luaFileState.started ||
+      (luaFileState.beforeNudge === 0 &&
+        luaFileState.afterNudge.includes("today") &&
+        luaFileState.defsEntry),
+    luaFileState,
+  );
+  check(
+    luaFileState.started
+      ? "Lua LSP: sas.<name> is a known field, hovering to the right doc from each source"
+      : "Lua LSP: sas.<name> hover (skipped: lib/emmylua-lsp not built)",
+    !luaFileState.started ||
+      (luaFileState.undefinedField.length === 0 &&
+        /Syntax: TODAY/.test(luaFileState.sasFnHoverText) &&
+        /function sas\.symget/.test(luaFileState.packageHoverText)),
+    luaFileState,
+  );
+
+  // -- require() across two open .lua documents ------------------------------------
+  // The server resolves a module by stripping a workspace ROOT off a file's
+  // path, so this needs both halves: real filePath URIs on the documents (the
+  // adapter's 4th argument) and the root the worker derives from them and pushes
+  // with didChangeConfiguration. Detached adapters, so no file has to exist -
+  // only the paths matter.
+  const luaRequireState = await page.evaluate(async () => {
+    if (!window.__ssExt._luaLintersProvider) return { started: false };
+    const dir = "/ssext-smoke/req";
+    const mk = (id, path, text) => {
+      const div = document.createElement("div");
+      div.id = id;
+      div.style.cssText = "position:fixed;left:-9999px;top:0;width:600px;height:300px";
+      document.body.appendChild(div);
+      const adapter = new window.__ssExt.AceEditorAdapter(id, text, "ace/mode/lua", path);
+      return { div, adapter };
+    };
+    const mod = mk(
+      "ssext_smoke_lua_mod",
+      `${dir}/ssext_helper.lua`,
+      "local M = {}\nfunction M.greet(name) return 'hi ' .. name end\nreturn M\n",
+    );
+    const main = mk(
+      "ssext_smoke_lua_main",
+      `${dir}/ssext_main.lua`,
+      'local h = require("ssext_helper")\nprint(h.greet("x"))\n',
+    );
+    for (let i = 0; i < 60; i++) {
+      if (mod.adapter._lspRegistered && main.adapter._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const uris = Object.keys(window.__ssExt._luaLintersProvider.$urisToSessionsIds || {});
+
+    // The root push re-indexes, so give the require a few rounds to resolve.
+    const provider = window.__ssExt._luaLintersProvider;
+    const session = main.adapter.aceEditor.session;
+    let hover = "";
+    let unresolved = [];
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      unresolved = (session.getAnnotations() || []).filter((a) => /resolve module/.test(a.text));
+      const tip = await new Promise((r) => {
+        try {
+          provider.doHover(session, { row: 1, column: 9 }, r);
+        } catch (e) {
+          r(null);
+        }
+      });
+      hover = (tip && tip.content && tip.content.text) || "";
+      if (!unresolved.length && /greet/.test(hover)) break;
+    }
+    [mod, main].forEach((e) => {
+      e.adapter.dispose();
+      e.div.remove();
+    });
+    return {
+      started: true,
+      // The document URI has to be the real path, not ace-linters' session-id
+      // default, or no module name can ever be derived from it.
+      namedByPath: uris.some((u) => u.endsWith("/ssext_helper.lua")),
+      unresolved: unresolved.map((a) => a.text),
+      hover: hover.slice(0, 120),
+    };
+  });
+  check(
+    luaRequireState.started
+      ? 'Lua LSP: require() resolves to another open .lua document'
+      : "Lua LSP: require() across documents (skipped: lib/emmylua-lsp not built)",
+    !luaRequireState.started ||
+      (luaRequireState.namedByPath === true &&
+        luaRequireState.unresolved.length === 0 &&
+        /greet/.test(luaRequireState.hover)),
+    luaRequireState,
   );
 
   // -- Completion from the other open editors --------------------------------------
