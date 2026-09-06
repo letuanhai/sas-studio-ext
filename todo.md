@@ -7,3 +7,8 @@
   → options page "File browser config" (`chrome.storage.local.browseFileActions`, extension -> action;
     anything unlisted is revealed in the tree) + two new browse keys: `acceptDownload` (Alt+Enter) and
     `acceptDefault` (Ctrl+Shift+Enter, let SAS Studio decide)
+- ~~add copy path to context menu library item in libraries tree to copy physical path of the library
+  (folder paths for SAS datasets, path string for DBMS,...), note that SAS dataset library can have
+  multiple paths~~
+  → `librariesContextMenuCopyPath` patch: "Copy Path" in the libraries tree menu, copying every
+    `data.concats[].physicalName` (one per line) - the same source the stock Properties dialog reads

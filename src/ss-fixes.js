@@ -1611,6 +1611,49 @@ Add a prefix to the path for different option:
       };
     },
 
+    librariesContextMenuCopyPath: function () {
+      const libraries = window.appDMS.libraries;
+
+      // The physical path(s) of a library, exactly where the stock Properties
+      // dialog reads them from (DMSLibraries.onProperties): item.data.concats,
+      // one entry per concatenated location for a SAS data set library, the
+      // connection string for a DBMS one. `path` is the fallback the temp
+      // libraries AppDMS.js:3725 creates carry instead.
+      const physicalPaths = (item) => {
+        const concats = (item.data || item).concats;
+        if (Array.isArray(concats)) return concats.map((c) => c.physicalName).filter(Boolean);
+        return item.path ? [item.path] : [];
+      };
+
+      // One item per menu instance: the menu is rebuilt from scratch on every
+      // tree refresh (DMSLibraries.refreshTree), and a dijit widget has a single
+      // parent, so a shared instance would be moved out of the old menu and then
+      // destroyed with it. See tabsContextMenuCopyUri below for the same trap.
+      const newCopyPathMenuItem = () =>
+        new dijit.MenuItem({
+          label: "Copy Path",
+          onClick: function () {
+            const paths = (libraries.getSelection() || []).filter((i) => i && i.isLibrary).flatMap(physicalPaths);
+            if (!paths.length) {
+              showNotification({ message: "No library with a physical path is selected", isError: true });
+              return;
+            }
+            copyTextWithNotice(paths.join("\n"));
+          },
+        });
+
+      const addCopyPath = (menu) => menu && menu.addChild(newCopyPathMenuItem());
+
+      addCopyPath(libraries.librariesContextMenu);
+
+      const _orig_createLibrariesContextMenu = libraries.createLibrariesContextMenu;
+      libraries.createLibrariesContextMenu = function (targetNodeId) {
+        const r = _orig_createLibrariesContextMenu.call(this, targetNodeId);
+        addCopyPath(this.librariesContextMenu);
+        return r;
+      };
+    },
+
     tabsContextMenuCopyUri: function () {
       const tabs = window.appDMS.tabs;
       // One item PER MENU, not one shared instance: a dijit widget has a single

@@ -309,6 +309,12 @@ Add a prefix to the path for different option:
       title: "Add a Copy Path item to the project tree's right-click menu",
     },
     {
+      name: "librariesContextMenuCopyPath",
+      kind: "patch",
+      label: "\"Copy Path\" in libraries tree context menu",
+      title: "Add a Copy Path item copying a library's physical path(s) to the libraries tree's right-click menu",
+    },
+    {
       name: "tabsContextMenuCopyUri",
       kind: "patch",
       label: "\"Copy Path\" in tab context menu",
