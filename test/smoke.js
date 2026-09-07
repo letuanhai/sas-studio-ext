@@ -596,7 +596,15 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
         await new Promise((r) => setTimeout(r, 120));
       }
       await new Promise((r) => setTimeout(r, 2000));
-      const state = { afterFirst, afterEdits: live(), storeLength: (session.$textMarkers || []).length };
+      const state = {
+        afterFirst,
+        afterEdits: live(),
+        storeLength: (session.$textMarkers || []).length,
+        // These separate "the perf patch regressed" from "the server answered
+        // nothing this run", which look identical from the counts alone.
+        markerPatched: !!window.__ssExt._lspMarkerPatched,
+        registered: !!a._lspRegistered,
+      };
       a.dispose();
       div.remove();
       return state;
@@ -2089,6 +2097,124 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     );
   }
 
+  // -- Save As under a new extension -----------------------------------------------
+  // Save As ends in successfulOnFileSave, NOT successfulSave, so nothing used to
+  // re-derive the mode (a program saved as .lua kept SAS highlighting) or clear
+  // the unsaved-change gutter. Placed BEFORE the dark-mode block, which reloads
+  // the page: after a reload Ace is off and no tab is focused, and a Save As
+  // driven from an unfocused tab silently does nothing - saveFocusedFileAtPath
+  // bails to a notification and returns undefined, so awaiting it looks like
+  // success. It opens and closes its own tab, so it disturbs no other block.
+  const saveAs = await page.evaluate(async (lp) => {
+    const a = window.appDMS;
+    if (!window.__ssExt.active) {
+      await window.__ssExt.toggle(lp);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    const root = "/folders/myfolders";
+    const url =
+      a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(root) + "?includeChildren=true";
+    const children = await new Promise((res) => {
+      dojo.xhrGet({
+        url,
+        handleAs: "json",
+        preventCache: true,
+        load: (d) => res((d && d[0] && d[0].children) || []),
+        error: () => res([]),
+      });
+    });
+    const openUris = new Set(a.tabs.getAllTabObjects().map((t) => t.uri));
+    const f = children.find(
+      (c) => c.size && Number(c.size) > 0 && /\.sas$/i.test(c.name) && !openUris.has(root + "/" + c.name),
+    );
+    if (!f) return { skipped: "no unopened .sas file to save as" };
+    const uri = root + "/" + f.name;
+    a.handleWebOneEvent("FileOpen", { uri, name: f.name, id: uri.replaceAll("/", "~ps~"), type: "FILE" });
+    let t = null;
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      t = a.tabs.getAllTabObjects().find((x) => x.uri === uri && x.editor && x.editor.editor);
+      if (t && t.editor.editor.aceEditor) break;
+    }
+    if (!t || !t.editor.editor.aceEditor) return { skipped: "opened tab never got an Ace editor" };
+    const adapter = t.editor.editor;
+    // saveFocusedFileAtPath works off appDMS.tabs.getFocusedTab().editor, which is
+    // not the same thing as the Ace editor holding DOM focus.
+    let tabFocused = false;
+    for (let i = 0; i < 20; i++) {
+      a.tabs.selectTab(t);
+      adapter.aceEditor.focus();
+      await new Promise((r) => setTimeout(r, 250));
+      const ft = a.tabs.getFocusedTab();
+      tabFocused = !!(ft && ft.editor === t.editor && typeof ft.editor.saveFileAs === "function");
+      if (tabFocused && adapter.aceEditor.isFocused()) break;
+    }
+    adapter.aceEditor.insert("\n* ssext save-as probe;\n");
+    await new Promise((r) => setTimeout(r, 600));
+    const before = {
+      mode: adapter.aceEditor.session.$modeId,
+      dirty: (adapter._dirtyRows || []).length,
+      name: t.editor.name,
+    };
+    // Unique name: a second run would otherwise hit the overwrite prompt and the
+    // save would silently not happen. Deleted again below.
+    const path = root + "/ssext_saveas_" + Date.now() + ".lua";
+    await window.__ssf.saveFocusedFileAtPath(path);
+    for (let i = 0; i < 40; i++) {
+      if (t.editor.name !== before.name) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const out = {
+      before,
+      tabFocused,
+      name: t.editor.name,
+      mode: adapter.aceEditor.session.$modeId,
+      dirty: (adapter._dirtyRows || []).length,
+    };
+    const delUrl = a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(path);
+    out.deleted = await new Promise((res) =>
+      dojo.xhrDelete({ url: delUrl, preventCache: true, load: () => res(true), error: () => res(false) }),
+    );
+    // Leave nothing behind. A failed save leaves the tab DIRTY, and closing a dirty
+    // tab raises the save-confirmation modal, which would then hold focus through
+    // every later block - so answer it if it appears.
+    // tabs.closeTab, NOT tab.onClose: onClose is the X-button path and it left the
+    // tab open here (measured - no error thrown, the tab still in getAllTabObjects
+    // 5s later), while closeTab is the programmatic one the rest of this file uses.
+    try {
+      a.tabs.closeTab(t);
+      await new Promise((r) => setTimeout(r, 500));
+      const dlg = Object.values(dijit.registry._hash || {}).find(
+        (w) => w.id && w.id.indexOf("tabsFileCloseConfirmation_") === 0,
+      );
+      if (dlg) {
+        dijit.byId(dlg.id + "_dontSaveBtn").onClick();
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } catch (e) {
+      out.closeError = String((e && e.message) || e);
+    }
+    // Identify the tab by OBJECT, not by id: successfulOnFileSave rewrites the tab
+    // id from the new uri, so the id captured before the save is already stale.
+    for (let i = 0; i < 20; i++) {
+      out.closed = !a.tabs.getAllTabObjects().some((x) => x === t);
+      if (out.closed) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return out;
+  }, libPath);
+  if (saveAs.skipped) {
+    check("save-as test setup (skipped: " + saveAs.skipped + ")", false, saveAs);
+  } else {
+    check(
+      "Save As to .lua switches the editor off the SAS mode",
+      saveAs.before.mode === "ace/mode/sas" && saveAs.mode === "ace/mode/lua",
+      saveAs,
+    );
+    check("Save As re-baselines the unsaved-change gutter", saveAs.before.dirty > 0 && saveAs.dirty === 0, saveAs);
+    check("save-as test cleans up its own tab", saveAs.closed, saveAs);
+  }
+
   // -- Dark mode (src/dark.css via a registered CSS content script) -----------------
   // The headline check is the regression that made a runtime dark-mode
   // extension unusable here: on reload, SAS Studio's ~95 nested-@import
@@ -2328,69 +2454,6 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     offAfterReload.linkGone && !/36, 37, 37/.test(offAfterReload.bodyBg),
     offAfterReload,
   );
-
-  // -- Save As under a new extension -----------------------------------------------
-  // Save As ends in successfulOnFileSave, NOT successfulSave, so nothing used to
-  // re-derive the mode (a program saved as .lua kept SAS highlighting) or clear
-  // the unsaved-change gutter. Late in the run, since it renames a code tab: the
-  // blocks above open theirs as .sas and expect the SAS mode.
-  const saveAs = await page.evaluate(async (lp) => {
-    const a = window.appDMS;
-    // Self-contained: the dark-mode block above reloads the page, which leaves
-    // Ace inactive and every restored code tab on the stock editor.
-    const wasActive = !!window.__ssExt.active;
-    if (!wasActive) {
-      await window.__ssExt.toggle(lp);
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-    const restore = async () => {
-      if (!wasActive) await window.__ssExt.toggle(lp);
-    };
-    const t = a.tabs.getAllTabObjects().find((x) => x.editor && x.editor.editor && x.editor.editor.aceEditor);
-    if (!t) {
-      await restore();
-      return { skipped: true, wasActive };
-    }
-    a.tabs.selectTab(t);
-    const adapter = t.editor.editor;
-    adapter.aceEditor.focus();
-    adapter.aceEditor.insert("\n* ssext save-as probe;\n");
-    await new Promise((r) => setTimeout(r, 600));
-    const before = { mode: adapter.aceEditor.session.$modeId, dirty: (adapter._dirtyRows || []).length };
-    // Unique name: a second run would otherwise hit the overwrite prompt and the
-    // save would silently not happen. Deleted again below.
-    const path = "/folders/myfolders/ssext_saveas_" + Date.now() + ".lua";
-    await window.__ssf.saveFocusedFileAtPath(path);
-    await new Promise((r) => setTimeout(r, 6000));
-    const url = a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(path);
-    const deleted = await new Promise((res) =>
-      dojo.xhrDelete({ url, preventCache: true, load: () => res(true), error: () => res(false) }),
-    );
-    const out = {
-      before,
-      name: t.editor.name,
-      mode: adapter.aceEditor.session.$modeId,
-      dirty: (adapter._dirtyRows || []).length,
-      deleted,
-      wasActive,
-    };
-    await restore();
-    return out;
-  }, libPath);
-  if (saveAs.skipped) {
-    check("save-as test setup - a code tab is open", false, saveAs);
-  } else {
-    check(
-      "Save As to .lua switches the editor off the SAS mode",
-      saveAs.before.mode === "ace/mode/sas" && saveAs.mode === "ace/mode/lua",
-      saveAs,
-    );
-    check(
-      "Save As re-baselines the unsaved-change gutter",
-      saveAs.before.dirty > 0 && saveAs.dirty === 0,
-      saveAs,
-    );
-  }
 
   // -- Keyboard entry points into SAS Studio's own widgets --------------------------
   // These are pure widget lookups, so what they guard against is SAS Studio's own

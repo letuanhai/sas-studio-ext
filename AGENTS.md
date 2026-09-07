@@ -1089,21 +1089,24 @@ the browse prompt's per-extension Enter action, the blanket reveal fallback for 
 stubbed, so nothing is really opened or downloaded and no file of a given extension has to exist), the aceConfig flow
 (seeding, live apply, settings-menu persistence via relay.js, vimrc), the `createCodeEditor` dispatcher being installed
 with no code tab open (plus opening a real `.sas` file as the fixture the code-tab-dependent blocks need), Save As under
-a new extension (the editor leaving `ace/mode/sas` for `ace/mode/lua`, and the unsaved-change gutter re-baselining —
-late in the run, since it renames a code tab), the keyboard entry points into SAS Studio's widgets (tab bar / pane bar /
-side-bar tree focus plus arrow-key navigation from there, plus `switchTabGroup`/`moveTabToOtherGroup` against a real
-split, which `moveTabToOtherGroup` both creates and undoes: the refusals, three split/un-split/re-split round trips with
-`switchTabGroup` exercised after each — the regression guard for the shared-`MenuItem` bug above — Copy Path being on
-both tab menus once each, and `unsplitTabGroups` collapsing a two-tab secondary group while keeping the focused tab;
-this block runs LAST because it mutates the tab layout), the pane-group actions plus `runFocus`/`openLogInTextTab`
-(which need real submissions — a one-line `proc print` against `sashelp` run once per `runFocus` mode that changes
-anything, the only tests that actually run SAS: the `"log"` start-jump, `"none"` moving neither pane nor keyboard, the
-live mode push from storage, Results AND the new Output data pane being outlined while the Log never is, the marks being
-cleared by both a hotkey and a real chip click, and the log tab's mode/editability/F5 refresh), and dark mode (live
-apply without a reload, survives a reload, icons still render with no 404s, icon-button labels stay hidden — i.e.
-`dijit.css` is intact, which is the exact symptom a runtime dark-mode extension kept producing — the stylesheet is a
-page-owned `<link>` rather than extension-injected CSS, Ace forced onto its dark theme by `"on"` and back off with it,
-follow-system gated by the link's media attribute, and clean removal both live and after a reload);
+a new extension (the editor leaving `ace/mode/sas` for `ace/mode/lua`, and the unsaved-change gutter re-baselining — it
+opens and closes its own tab rather than renaming a shared one, and sits BEFORE the dark-mode block, which reloads the
+page: after a reload Ace is off and nothing is focused, and a Save As driven from an unfocused tab silently does
+nothing, since `saveFocusedFileAtPath` bails to a notification and returns undefined, so awaiting it looks like
+success), the keyboard entry points into SAS Studio's widgets (tab bar / pane bar / side-bar tree focus plus arrow-key
+navigation from there, plus `switchTabGroup`/`moveTabToOtherGroup` against a real split, which `moveTabToOtherGroup`
+both creates and undoes: the refusals, three split/un-split/re-split round trips with `switchTabGroup` exercised after
+each — the regression guard for the shared-`MenuItem` bug above — Copy Path being on both tab menus once each, and
+`unsplitTabGroups` collapsing a two-tab secondary group while keeping the focused tab; this block runs LAST because it
+mutates the tab layout), the pane-group actions plus `runFocus`/`openLogInTextTab` (which need real submissions — a
+one-line `proc print` against `sashelp` run once per `runFocus` mode that changes anything, the only tests that actually
+run SAS: the `"log"` start-jump, `"none"` moving neither pane nor keyboard, the live mode push from storage, Results AND
+the new Output data pane being outlined while the Log never is, the marks being cleared by both a hotkey and a real chip
+click, and the log tab's mode/editability/F5 refresh), and dark mode (live apply without a reload, survives a reload,
+icons still render with no 404s, icon-button labels stay hidden — i.e. `dijit.css` is intact, which is the exact symptom
+a runtime dark-mode extension kept producing — the stylesheet is a page-owned `<link>` rather than extension-injected
+CSS, Ace forced onto its dark theme by `"on"` and back off with it, follow-system gated by the link's media attribute,
+and clean removal both live and after a reload);
 see the file header for `SS_URL`/`CHROME_BIN` env vars and the playwright requirement.
 **Run it single-threaded** — the live instance is rate-limited (see top of file), so never launch two runs at once.
 Setup is `npm i && npx playwright install chromium` — with playwright in `node_modules` it finds its own matching
