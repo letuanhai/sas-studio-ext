@@ -4,18 +4,34 @@
 #
 #   ./tools/dev-browser.sh                 # headless unless DISPLAY is set
 #   ./tools/dev-browser.sh stop            # kill it
+#   ./tools/dev-browser.sh status          # WHICH browser is on the port
+#
+# One fixed port serves two devices, so that the MCP config never changes:
+#   phone   - chrome runs HERE, X11-forwarded to the phone, CDP is local.
+#   laptop  - chrome runs THERE, `ssh -R 9333:localhost:9222` puts its CDP
+#             on this port instead; don't run this script at all.
+# They collide only if a browser here is still holding the port when the
+# laptop connects. Mostly it is not: chrome EXITS when its X display goes
+# away (measured - kill the X server and the process is gone, port free),
+# so leaving the phone usually clears it by itself. When the ssh session
+# lingers instead, `ssh -o ExitOnForwardFailure=yes -R ...` from the laptop
+# refuses to connect rather than leaving you pointed at the stale browser
+# here, and `dev-browser.sh stop` over ssh frees it. `status` says which
+# one you are actually on.
 #
 # The port is reachable only over an ssh tunnel, by design and by Chrome's:
 # --remote-debugging-address is accepted and then silently IGNORED, so the
 # debug port is always on 127.0.0.1 (measured on 151/153 - `ss -ltn` shows
 # 127.0.0.1 with =0.0.0.0 and with an explicit interface address alike).
-#   ssh -N -L 9222:localhost:9222 user@host
-# Then open http://localhost:9222 on the client. Keep "localhost" in that url:
+#   ssh -N -L 9333:localhost:9333 user@host
+# Then open http://localhost:9333 on the client. Keep "localhost" in that url:
 # the DevTools endpoint answers "Host header is specified and is not an IP
 # address or localhost" to anything else.
-#   PORT=9333 ./tools/dev-browser.sh       # another port
+#   PORT=9334 ./tools/dev-browser.sh       # another port, if 9333 is taken too
 #   CLEAN=1 ./tools/dev-browser.sh         # also drop the extension's settings
 #   URL= ./tools/dev-browser.sh            # don't open SAS Studio at startup
+#   WINDOW=1600,1000 ./tools/dev-browser.sh  # window size (default: fill the
+#                                          #  display; WINDOW= to opt out)
 #   ./tools/dev-browser.sh --headless=new  # extra flags pass through
 #
 # Re-running this IS the reload: it kills the previous instance and starts a
@@ -33,17 +49,76 @@
 set -e
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PORT=${PORT:-9222}
+# Not chrome's default 9222, deliberately: that port is the one an `ssh -R`
+# tunnel from a laptop lands on, and sharing it is how an agent ends up
+# driving someone else's browser (see the in-use check below).
+PORT=${PORT:-9333}
 DATA=${DATA:-/tmp/ssext-chrome}
 PIDFILE=$DATA/.launcher.pid
+DISPFILE=$DATA/.display
 
 # Kill by pid, not `pkill -f`: the pattern would match this script's own cmdline.
 stop() {
 	[ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null || true
-	rm -f "$PIDFILE"
+	rm -f "$PIDFILE" "$DISPFILE"
+}
+
+# Everything is keyed on DATA, so a second run with the same DATA kills the
+# first - that IS the reload. The bad case is a HEADLESS run killing a HEADED
+# session someone is working in, which is invisible from the far end of an ssh
+# connection: the window just vanishes. So refuse when the running instance is
+# attached to a display this run is not, unless FORCE=1 (or `stop`, which is an
+# explicit request). Use a different DATA to run two side by side.
+# Read back what the running instance recorded at launch. NOT from
+# /proc/<pid>/environ: chrome scrubs its own environment block, so DISPLAY is
+# simply not there to read (measured - a browser plainly running on :97 reports
+# nothing), and the guard silently passed every time.
+running_display() {
+	[ -f "$PIDFILE" ] || return 1
+	pid=$(cat "$PIDFILE")
+	[ -d "/proc/$pid" ] || return 1
+	cat "$DISPFILE" 2>/dev/null || echo ""
+}
+
+guarded_stop() {
+	old=$(running_display) || { stop; return; }
+	if [ -n "$old" ] && [ "$old" != "$DISPLAY" ]; then
+		echo "refusing to kill the browser already running on DISPLAY=$old" >&2
+		echo "  (this run has DISPLAY=${DISPLAY:-<none>}). FORCE=1 to kill it anyway," >&2
+		echo "  DATA=/tmp/other to run a second one alongside, or 'stop' to end it." >&2
+		[ -n "$FORCE" ] || exit 1
+	fi
+	stop
 }
 
 [ "$1" = "stop" ] && { stop; echo "stopped"; exit 0; }
+
+# `status` answers the only question that matters when one fixed port serves two
+# devices: WHICH browser is the MCP talking to right now. On the laptop the port
+# is an `ssh -R` tunnel to chrome over there; on the phone it is a headed chrome
+# here. Both look identical to a client, so ask the browser itself - a tunnelled
+# one runs on a different host and has no extension of ours loaded.
+if [ "$1" = "status" ]; then
+	echo "port:  $PORT"
+	if own=$(running_display); then
+		echo "local: dev-browser running (pid $(cat "$PIDFILE"), ${own:+headed on DISPLAY=$own}${own:-headless})"
+	else
+		echo "local: no dev-browser instance"
+	fi
+	ss -ltnpH "sport = :$PORT" 2>/dev/null | sed 's/^/sock:  /'
+	ver=$(curl -s --max-time 3 "http://localhost:$PORT/json/version" 2>/dev/null || true)
+	if [ -z "$ver" ]; then
+		echo "cdp:   nothing answering on $PORT"
+		exit 1
+	fi
+	echo "cdp:   $(printf %s "$ver" | sed -n 's/.*"Browser": "\([^"]*\)".*/\1/p')"
+	if curl -s --max-time 3 "http://localhost:$PORT/json/list" 2>/dev/null | grep -q '/src/sw\.js'; then
+		echo "ext:   loaded -> this is the browser on THIS machine"
+	else
+		echo "ext:   NOT loaded -> a tunnelled browser (your laptop), or the extension is off"
+	fi
+	exit 0
+fi
 
 # Playwright's build, not /usr/bin/google-chrome: stable Chrome silently
 # ignores --load-extension in headless (checked on 151, including with
@@ -52,8 +127,30 @@ CHROME=${CHROME_BIN:-$(ls -d "$HOME"/.cache/ms-playwright/chromium-*/chrome-linu
 [ -x "$CHROME" ] || { echo "no playwright chromium - run: npx playwright install chromium" >&2; exit 1; }
 
 mkdir -p "$DATA"
-stop
+guarded_stop
 sleep 1
+
+# Refuse a port someone else is already listening on, because chrome does NOT
+# fail loudly enough to notice. With 127.0.0.1:9222 taken it logs one
+# `bind() failed: Address already in use` and then binds [::1]:9222 instead
+# (measured), so `localhost:9222` reaches one of two different browsers
+# depending on the resolver - and the readiness probe below, finding an
+# extension on the OTHER one, reports success. The case that matters is an
+# `ssh -R 9222:localhost:9222` tunnel putting a laptop's chrome on this box:
+# an agent launching here would silently drive that browser instead.
+# Our own previous instance is already gone by this point (guarded_stop above),
+# but the kernel may need a moment to release the socket.
+for _ in 1 2 3 4 5 6; do
+	ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q . || break
+	sleep 0.5
+done
+if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q .; then
+	echo "port $PORT is already in use by something else:" >&2
+	ss -ltnpH "sport = :$PORT" 2>/dev/null | sed 's/^/  /' >&2
+	echo "  an ssh -R tunnel or another browser holds it. Use PORT=9334 (or free it)." >&2
+	echo "  chrome would otherwise bind the other IP stack and you would not notice." >&2
+	exit 1
+fi
 
 # Wipe the profile, because a restart alone does NOT reload src/sw.js: Chrome
 # caches the extension's service-worker script in the user-data-dir and reuses
@@ -83,6 +180,29 @@ rm -rf "$STASH"
 
 if [ -n "$DISPLAY" ]; then
 	MODE="headed on DISPLAY=$DISPLAY"
+	# Chrome's own default window is small, and --start-maximized does NOTHING
+	# here: maximising is a window-manager operation and an X11-forwarded
+	# session (Termux:X11, plain `ssh -Y`) normally has no WM - measured on a
+	# 1920x1200 display, 945x1180 both with and without the flag, against an
+	# exact 1536x960 from --window-size. So size it explicitly, filling the
+	# display (there is no WM to maximise it, and no titlebar taking space
+	# either). WINDOW=1536,960 overrides; WINDOW= leaves chrome's own default.
+	if command -v xdpyinfo >/dev/null 2>&1; then
+		dim=$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')
+		SCRW=${dim%x*}
+		SCRH=${dim#*x}
+	fi
+	case "$SCRW$SCRH" in *[!0-9]* | "") SCRW= SCRH= ;; esac
+	if [ -z "${WINDOW+set}" ] && [ -n "$SCRW" ]; then
+		WINDOW=$SCRW,$SCRH
+	fi
+	if [ -n "$WINDOW" ]; then
+		set -- --window-size="$WINDOW" "$@"
+		if [ -n "$SCRW" ]; then
+			set -- --window-position=$(((SCRW - ${WINDOW%,*}) / 2)),$(((SCRH - ${WINDOW#*,}) / 2)) "$@"
+		fi
+		MODE="$MODE, window $WINDOW"
+	fi
 else
 	set -- --headless=new "$@"
 	MODE="headless (no DISPLAY)"
@@ -113,6 +233,7 @@ URL=${URL-https://sas.lth0.net/SASStudio/38/}
 	--no-first-run --no-default-browser-check \
 	--load-extension="$ROOT" "$@" ${URL:+"$URL"} >"$DATA/chrome.log" 2>&1 &
 echo $! >"$PIDFILE"
+printf %s "$DISPLAY" >"$DISPFILE"
 
 i=0
 while [ $i -lt 60 ]; do

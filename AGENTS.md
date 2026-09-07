@@ -1136,8 +1136,40 @@ It opens `https://sas.lth0.net/SASStudio/38/` at startup, that being the only pa
 an empty value is a choice rather than a fallback).
 That costs one leaked workspace session per launch, for the reason in the session-leak note above;
 the browser is driven by hand rather than by a harness, so there is no `releaseSession` equivalent here.
-Re-running it IS the reload — it kills the previous instance by pidfile, WIPES the user-data-dir and starts a fresh one
-(the extension id is derived from the source path, so it survives one).
+Re-running it IS the reload — it kills the previous instance by pidfile, WIPES the user-data-dir and starts a fresh one.
+Everything is keyed on `DATA`, so a second run with the same `DATA` takes over the first, and the failure that makes
+ruinous is a headless run silently killing a HEADED session someone is working in — over ssh the window just vanishes
+with no message.
+So the launch refuses when the running instance recorded a different `DISPLAY` than this run has (`FORCE=1` overrides, a
+different `DATA` runs two side by side, `stop` is never blocked).
+It also refuses a `PORT` something else already listens on, which is not paranoia: chrome does not fail loudly there.
+With `127.0.0.1:9222` taken it logs one `bind() failed: Address already in use` and then binds `[::1]:9222` instead
+(measured), so `localhost:9222` reaches one of two different browsers depending on the resolver, and the readiness probe
+— finding the extension on the OTHER one — reports success.
+The case that matters is an `ssh -R 9222:localhost:9222` tunnel putting a laptop's chrome onto this box, where an agent
+launching here would silently drive that browser instead of its own;
+`PORT=` picks another.
+The default is 9333 rather than chrome's own 9222 for exactly that reason, and the `chrome-devtools` MCP server for this
+project (in `~/.claude.json`, project-scoped) carries a matching `--browserUrl http://127.0.0.1:9333` — the two have to
+agree or the MCP attaches to whatever else is on the port.
+That one fixed port is what lets the SAME MCP config serve two devices without editing: on the phone chrome runs HERE
+(X11-forwarded, CDP local, `npm run dev`), on the laptop chrome runs THERE and `ssh -R 9333:localhost:9222` puts its CDP
+on this port instead, with the script not run at all.
+The collision is a browser here still holding the port when the laptop connects, and it mostly does not happen: chrome
+EXITS when its X display goes away (measured — kill the X server and the process is gone, the port frees itself), so
+leaving the phone usually clears it by itself.
+When the ssh session lingers instead, `ssh -o ExitOnForwardFailure=yes -R ...` makes the laptop refuse to connect rather
+than silently leaving the MCP pointed at the stale browser here, and `dev-browser.sh stop` over ssh frees it.
+A headed window is sized to fill the display (`WINDOW=1600,1000` overrides and centres that instead, `WINDOW=` opts out
+— there is no WM to maximise it and no titlebar taking space either), because chrome's own default is small and
+`--start-maximized` does NOTHING over X11 forwarding: maximising is a window-manager operation and a forwarded session
+(Termux:X11, plain `ssh -Y`) has no WM — measured on a 1920x1200 display, 945x1180 both with and without the flag,
+against an exact 1536x960 from `--window-size`.
+`./tools/dev-browser.sh status` answers which browser is actually on the port: it asks the browser itself and reports
+whether OUR extension is loaded, since a tunnelled one runs on the other host and has none.
+The display is recorded in `$DATA/.display` at launch rather than read back from `/proc/<pid>/environ`: chrome scrubs
+its own environment block, so a browser plainly running on `:97` reports no `DISPLAY` at all and the guard passed every
+time (the extension id is derived from the source path, so it survives one).
 The extension's own settings DO survive: `chrome.storage.local` is one leveldb directory per extension id under
 `Default/Local Extension Settings`, so the script carries just that across the wipe — keeping the whole profile instead
 would bring the stale service worker back with it, which is the one thing the wipe exists to prevent.
@@ -1171,7 +1203,7 @@ It kills by pid rather than `pkill -f` because the pattern would match the launc
 For a human to watch the same instance from a phone, open the printed `devtools:` url — the DevTools frontend Chrome
 serves locally screencasts with input passthrough, so no X server is involved.
 Two things make that link non-obvious, which is why the script prints it rather than leaving you to find it: the bare
-`http://localhost:9222/` is a 200 with `Content-Length: 0`, i.e. a genuinely blank page and not a broken tunnel (there
+`http://localhost:9333/` is a 200 with `Content-Length: 0`, i.e. a genuinely blank page and not a broken tunnel (there
 is no inspectable-pages index in this build), and `/json/list`'s own `devtoolsFrontendUrl` points at the
 `chrome-devtools-frontend.appspot.com` copy, which a client reaching the browser only through an ssh tunnel cannot load.
 The local one is `/devtools/inspector.html?ws=localhost:<port>/devtools/page/<target id>`, and it needs
@@ -1179,13 +1211,13 @@ The local one is `/devtools/inspector.html?ws=localhost:<port>/devtools/page/<ta
 websocket handshake carrying ANY `Origin` header is answered 403, and a frontend page served over http always sends one
 — measured both ways, and the same handshake without the header gets a 101, which is why playwright and curl never
 needed the flag (`ssh -Y` into Termux:X11 with `DISPLAY` set works too, and is only worth it for native window chrome).
-Reaching that url from another machine is an ssh tunnel — `ssh -N -L 9222:localhost:9222 user@host`, which the script
+Reaching that url from another machine is an ssh tunnel — `ssh -N -L 9333:localhost:9333 user@host`, which the script
 prints — and there is no alternative to one: Chrome accepts `--remote-debugging-address` and then silently ignores it,
 always binding the debug port to 127.0.0.1 (measured on 151/153 — `ss -ltn` shows 127.0.0.1 with both `=0.0.0.0` and an
 explicit interface address).
 Keep `localhost` in the url on the client side: the DevTools endpoint answers
 `Host header is specified and is not an IP address or localhost` to a hostname, so a tunnel opened under a name fails
-where `http://localhost:9222` works.
+where `http://localhost:9333` works.
 To build the publishable zip: `./tools/package.sh` → `dist/sas-studio-ext-<version>.zip` (dist/ is gitignored; it packs
 `manifest.json src assets lib` — rebuilding `lib/` first if incomplete — so a new runtime file belongs in one of those).
 All extension logs are prefixed `[SS Ext]`;
