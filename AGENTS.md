@@ -1107,6 +1107,69 @@ of them started and never exited over one uptime, until the dev box died of memo
 URL and asserts the context still closes, bounded, with no browser process left).
 To test changes manually: `chrome://extensions/` → reload the unpacked extension (loaded from the repo root) → refresh
 the SAS Studio page → toggle with `Ctrl+.` (or the popup's toggle button).
+With no GUI to hand (headless box, ssh from a phone), `npm run dev` (= `./tools/dev-browser.sh`; env vars go in front,
+extra Chrome flags after a `--`) replaces that whole loop: it launches playwright's chromium with `--load-extension` and
+`--remote-debugging-port` (headless unless `DISPLAY` is set — with a loud warning when it falls back, since the symptom
+of a dropped X11 forwarding is just "no window appeared"; a `DISPLAY` that is set but unreachable is reported as such
+rather than as the misleading "extension did not load".
+`PORT`/`DATA`/`CHROME_BIN` override), waits for the extension's service-worker target and prints the mode it came up in,
+the CDP url and the assigned `chrome-extension://<id>`, so `chrome://extensions` is never needed and the options/popup
+pages are reachable by URL.
+It opens `https://sas.lth0.net/SASStudio/38/` at startup, that being the only page the extension does anything on
+(`URL=` empty starts on the new-tab page, `URL=...` goes elsewhere — written `${URL-default}`, not `${URL:-default}`, so
+an empty value is a choice rather than a fallback).
+That costs one leaked workspace session per launch, for the reason in the session-leak note above;
+the browser is driven by hand rather than by a harness, so there is no `releaseSession` equivalent here.
+Re-running it IS the reload — it kills the previous instance by pidfile, WIPES the user-data-dir and starts a fresh one
+(the extension id is derived from the source path, so it survives one).
+The extension's own settings DO survive: `chrome.storage.local` is one leveldb directory per extension id under
+`Default/Local Extension Settings`, so the script carries just that across the wipe — keeping the whole profile instead
+would bring the stale service worker back with it, which is the one thing the wipe exists to prevent.
+Chrome flushes that store on exit and the kill is awaited, so what lands on disk is current;
+`CLEAN=1` drops it too, for a genuine first-run.
+Both halves are verified together: with a marker line added to `src/sw.js`, one restart shows the new service worker AND
+the previous config still there.
+Most edits need none of that, and which ones do was measured with a purpose-built probe extension rather than assumed.
+**A page reload alone picks up**: everything `sw.js` injects with `chrome.scripting.executeScript({files})` —
+`ss-fixes.js`, `tools-meta.js`, `editor-swap.js`, `ace-patches.js`, i.e. the bulk of this codebase — plus every resource
+the page fetches over a `chrome-extension:` URL (`src/ace/*.js`, `src/lua/*.lua`, `lib/*`, `src/dark.css`) and the
+extension's own pages (`options.html`/`popup.html`/`changelog.html`).
+**Re-running the script is needed for**: `manifest.json`, `src/relay.js` (or any other `content_scripts` entry — a
+declared content script's file is cached at extension load, so an edited one keeps firing the OLD body for the rest of
+the browser's life), the `dark-inject.js`/`dark-media-auto.js` pair (`chrome.scripting.registerContentScripts` caches
+exactly the same way — verified separately, a re-registration does not re-read the file), and `src/sw.js`.
+That last one is why the wipe exists: **Chrome caches the service-worker script in the profile and keeps running the
+stale body across a full browser restart**, even with the manifest version bumped (measured:
+`chrome.runtime.getManifest().version` reporting the new `1.1` while the old `sw.js` body was still live, on a browser
+18 seconds old).
+Terminating the worker doesn't help either — a genuinely cold respawn, after the debugger detached and the target
+vanished from `/json/list`, still ran the old file.
+Only a clean user-data-dir brings the new one back.
+Two traps it exists to encode: `/usr/bin/google-chrome` silently IGNORES `--load-extension` in headless (checked on
+stable 151, including with `--disable-features=DisableLoadExtensionCommandLineSwitch`; only playwright's build honours
+it, which is also why the smoke test uses that binary), and `chrome.runtime.reload()` over CDP — the obvious way to
+reload without a restart — permanently UNLOADS an extension loaded that way: no service-worker target comes back and
+every extension page then fails `ERR_BLOCKED_BY_CLIENT` until Chrome is restarted.
+It kills by pid rather than `pkill -f` because the pattern would match the launching shell's own command line.
+`./tools/dev-browser.sh stop` kills it (by pidfile, for the same reason).
+For a human to watch the same instance from a phone, open the printed `devtools:` url — the DevTools frontend Chrome
+serves locally screencasts with input passthrough, so no X server is involved.
+Two things make that link non-obvious, which is why the script prints it rather than leaving you to find it: the bare
+`http://localhost:9222/` is a 200 with `Content-Length: 0`, i.e. a genuinely blank page and not a broken tunnel (there
+is no inspectable-pages index in this build), and `/json/list`'s own `devtoolsFrontendUrl` points at the
+`chrome-devtools-frontend.appspot.com` copy, which a client reaching the browser only through an ssh tunnel cannot load.
+The local one is `/devtools/inspector.html?ws=localhost:<port>/devtools/page/<target id>`, and it needs
+`--remote-allow-origins` (the script passes `http://localhost:$PORT`): since Chrome 111 a `/devtools/page/<id>`
+websocket handshake carrying ANY `Origin` header is answered 403, and a frontend page served over http always sends one
+— measured both ways, and the same handshake without the header gets a 101, which is why playwright and curl never
+needed the flag (`ssh -Y` into Termux:X11 with `DISPLAY` set works too, and is only worth it for native window chrome).
+Reaching that url from another machine is an ssh tunnel — `ssh -N -L 9222:localhost:9222 user@host`, which the script
+prints — and there is no alternative to one: Chrome accepts `--remote-debugging-address` and then silently ignores it,
+always binding the debug port to 127.0.0.1 (measured on 151/153 — `ss -ltn` shows 127.0.0.1 with both `=0.0.0.0` and an
+explicit interface address).
+Keep `localhost` in the url on the client side: the DevTools endpoint answers
+`Host header is specified and is not an IP address or localhost` to a hostname, so a tunnel opened under a name fails
+where `http://localhost:9222` works.
 To build the publishable zip: `./tools/package.sh` → `dist/sas-studio-ext-<version>.zip` (dist/ is gitignored; it packs
 `manifest.json src assets lib` — rebuilding `lib/` first if incomplete — so a new runtime file belongs in one of those).
 All extension logs are prefixed `[SS Ext]`;
@@ -1150,10 +1213,10 @@ Everything else npm-adjacent stays out of it too: ace-linters and Dark Reader ar
 `tools/build_lib.sh`/`tools/gen-dark-css.js`, ace is a pinned git clone, and duplicating those pins in a dependency list
 would only give them a second place to drift;
 `package-lock.json` is gitignored for the same reason, one caret-ranged dev dependency not being worth a lockfile.
-The scripts: `test` (= `test:units` then `test:smoke`), `build` (= `build:lib` + `build:dark-css`), `build:force`
-(`rm -rf lib` then `build` — every step of `tools/build_lib.sh` is already skip-if-current via its per-component
-`lib/<name>/.version` files, so wiping `lib/` IS the force), `package` (`build` then `tools/package.sh`) and `dist`
-(`rm -rf dist/*` then `package`).
+The scripts: `dev` (= `tools/dev-browser.sh`, the unpacked-extension dev browser — see Development above), `test` (=
+`test:units` then `test:smoke`), `build` (= `build:lib` + `build:dark-css`), `build:force` (`rm -rf lib` then `build` —
+every step of `tools/build_lib.sh` is already skip-if-current via its per-component `lib/<name>/.version` files, so
+wiping `lib/` IS the force), `package` (`build` then `tools/package.sh`) and `dist` (`rm -rf dist/*` then `package`).
 `build:dark-css` is guarded on `src/dark.css` existing, which it always does — the file is committed and regenerating it
 needs a live SAS Studio instance, which packaging must not — so in practice it is a no-op that keeps `build` honest;
 to actually re-run it, delete the file first or call `node tools/gen-dark-css.js` directly.

@@ -3,6 +3,7 @@
   "private": true,
   "description": "Dev-time manifest: test/build script aliases and the one dev dependency (playwright). No version field on purpose - manifest.json's is the extension's only version.",
   "scripts": {
+    "dev": "./tools/dev-browser.sh",
     "test": "node test/units.js && node test/smoke.js",
     "test:units": "node test/units.js",
     "test:smoke": "node test/smoke.js",
