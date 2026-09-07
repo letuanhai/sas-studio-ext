@@ -519,8 +519,24 @@ meta relabelling.
 Vimrc: `aceConfig.vimrc` is a small subset of vim config lines (`map`/`nmap`/`imap`/`vmap`, `noremap` variants, `unmap`
 variants — one mapping per line, `"` comments, unsupported lines just `console.warn` and get skipped) applied to the
 shared `ace/keyboard/vim` module's `Vim.map`/`Vim.noremap`/`Vim.unmap`.
-`editor-swap.js`'s `applyVimrcLine(Vim, line)` is the parser (duplicated, not shared, in `options.js` as the same
-function — MAIN-world and options-page code can't share a file);
+`editor-swap.js`'s `applyVimrcLine(Vim, line, keymap)` is the parser (duplicated, not shared, in `options.js` as the
+same function — MAIN-world and options-page code can't share a file);
+its `keymap` argument (the vim module's `handler.defaultKeymap`) exists for `dropShadowingAlias`, which is what makes a
+LEADER KEY possible: ace's vim resolves a keystroke by taking the first FULL match and discarding every partial one
+(`commandDispatcher.matchCommand`), with no `timeoutlen` to sit on the ambiguity the way real vim does, so the built-in
+`{ keys: '<Space>', type: 'keyToKey', toKeys: 'l' }` permanently shadowed a user's `<Space>d` — the second key was never
+waited for, and mapping anything behind Space silently did nothing (verified by driving real key events at a vim editor:
+`<Space>` arrives correctly named, the mapping just never matches).
+So a user mapping whose lhs is more than one key drops any default entry whose `keys` is exactly its first key AND whose
+`type` is `keyToKey`, which is the same thing a vim user writes as `nnoremap <Space> <Nop>`.
+The drop is scoped to the mapping's own mode: a context-less alias shadows every mode so it always goes, but a
+mode-specific one is left alone for a mapping in another mode - `s` and `S` each have a normal AND a visual entry, and
+an `nmap sa` has no business breaking visual-mode `s`.
+The `keyToKey` restriction is the whole safety of it: those 31 defaults are pure aliases (`<Space>`, `<CR>`, `<BS>`,
+`s`/`S`, the arrow keys), whereas the bare key of an operator (`d`, `c`, `y`) has to keep working — so `dd` as a user
+mapping stays shadowed, and dropping `d` would have broken deletion outright.
+`ssExt._vimrc` exposes both functions for `test/units.js`, which covers the alias drop, the operator surviving, and
+`<CR>x` counting the angle-bracket name as one key;
 `applyVimrcConfig(text)` (editor-swap.js) and `installVimExCommands()`'s vim-module-loaded callback both drive it,
 tracking `ssExt._vimrcApplied` (a counter, for test visibility) and `ssExt._vimrcLastText` (to skip a no-op reapply in
 `applyAceConfig`).

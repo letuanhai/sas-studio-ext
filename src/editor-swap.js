@@ -569,6 +569,7 @@
     _foldNav: { nextFoldStart, prevFoldEnd, enclosingFold }, // pure, covered by test/units.js
     _vimMarks: { vimMarksOf, refreshVimMarkGutter }, // ditto
     _dirtyGutter: { dirtyRowsFromChunks, sameLines }, // ditto
+    _vimrc: { applyVimrcLine, dropShadowingAlias }, // ditto
   };
   window.__ssExt = ssExt;
 
@@ -2512,7 +2513,8 @@
       }
 
       const vimrcText = (ssExt.aceConfig && ssExt.aceConfig.vimrc) || "";
-      vimrcText.split("\n").forEach((line) => applyVimrcLine(Vim, line));
+      const keymap = (vim.handler && vim.handler.defaultKeymap) || null;
+      vimrcText.split("\n").forEach((line) => applyVimrcLine(Vim, line, keymap));
       ssExt._vimrcApplied = (ssExt._vimrcApplied || 0) + 1;
       ssExt._vimrcLastText = vimrcText;
     } catch (e) {
@@ -2966,7 +2968,33 @@
   //   unmap/nunmap/iunmap/vunmap <lhs>      -> Vim.unmap(lhs, ctx)
   const VIMRC_CTX = { n: "normal", i: "insert", v: "visual" };
 
-  function applyVimrcLine(Vim, line) {
+  // ace's vim resolves a keystroke by taking the first FULL match and throwing
+  // every partial match away (commandDispatcher.matchCommand) - it has no
+  // timeoutlen to sit on an ambiguity the way real vim does. So a built-in
+  // single-key alias permanently shadows any user mapping that STARTS with that
+  // key: with `<Space>` -> `l` in the default keymap, `<Space>d` never got to
+  // wait for the `d`, which is the whole reason Space could not be used as a
+  // leader. Dropping the alias is what a vim user writes as `nnoremap <Space>
+  // <Nop>`. Only `keyToKey` aliases go: those are pure conveniences (`<Space>`,
+  // `<CR>`, `<BS>`, `s`/`S`), whereas the bare key of an operator (`d`, `c`,
+  // `y`) has to keep working - so a mapping like `dd` stays shadowed, which is
+  // true of real vim's own `dd` too.
+  function dropShadowingAlias(keymap, lhs, ctx) {
+    const first = (lhs.match(/^(?:<[^>]+>|[\s\S])/) || [])[0];
+    if (!keymap || !first || first === lhs) return;
+    for (let i = keymap.length - 1; i >= 0; i--) {
+      const c = keymap[i];
+      if (!c || c.keys !== first || c.type !== "keyToKey") continue;
+      // Only the aliases that can actually shadow THIS mapping. A context-less
+      // alias applies in every mode so it always can; a mode-specific one only
+      // matters to a mapping in the same mode - `s` and `S` each have a normal
+      // and a visual entry, and an `nmap sa` has no business breaking visual s.
+      if (ctx && c.context && c.context !== ctx) continue;
+      keymap.splice(i, 1);
+    }
+  }
+
+  function applyVimrcLine(Vim, line, keymap) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.charAt(0) === '"') return;
 
@@ -2974,6 +3002,7 @@
     if (m) {
       const ctx = m[1] ? VIMRC_CTX[m[1]] : undefined;
       try {
+        dropShadowingAlias(keymap, m[3], ctx);
         if (m[2]) Vim.noremap(m[3], m[4], ctx);
         else Vim.map(m[3], m[4], ctx);
       } catch (e) {
@@ -3003,7 +3032,8 @@
     ssExt.newLib.ace.config.loadModule("ace/keyboard/vim", (vim) => {
       const Vim = vim && vim.Vim;
       if (!Vim) return;
-      (text || "").split("\n").forEach((line) => applyVimrcLine(Vim, line));
+      const keymap = (vim.handler && vim.handler.defaultKeymap) || null;
+      (text || "").split("\n").forEach((line) => applyVimrcLine(Vim, line, keymap));
       ssExt._vimrcApplied = (ssExt._vimrcApplied || 0) + 1;
       ssExt._vimrcLastText = text || "";
     });

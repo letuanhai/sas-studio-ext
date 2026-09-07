@@ -19,3 +19,6 @@
 - ~~plain text editors restored at app start is not swapped to ace editor~~
   → `activate()` also converts text viewers that already exist (restored tabs, and any opened while
     the toggle was off), not just the ones `createFileView` builds while active
+- ~~allow using <space> for mapping in ace vim mode (use <space> as vim leader key)~~
+  → a user mapping longer than one key drops the built-in `keyToKey` alias for its first key, since
+    ace's vim takes the first full match and has no `timeoutlen`

@@ -259,3 +259,78 @@ SSF_BROWSE_FILE_ACTIONS.forEach((a) =>
 );
 
 console.log("PASS  browse prompt file actions");
+
+// ---------------------------------------------------------------------------
+// src/editor-swap.js - the vimrc parser dropping a built-in alias that would
+// otherwise shadow a user mapping starting with the same key. ace's vim takes
+// the first FULL match and discards partials, so `<Space>` -> `l` made
+// `<Space>d` unreachable and Space unusable as a leader key.
+const { applyVimrcLine, dropShadowingAlias } = global.window.__ssExt._vimrc;
+
+const stockKeymap = () => [
+  { keys: "<Space>", type: "keyToKey", toKeys: "l" },
+  { keys: "<CR>", type: "keyToKey", toKeys: "j^", context: "normal" },
+  { keys: "d", type: "operator", operator: "delete" },
+  { keys: "s", type: "keyToKey", toKeys: "cl", context: "normal" },
+];
+const keysOf = (km) => km.map((c) => c.keys + ":" + c.type);
+
+// a multi-key mapping drops the single-key alias that would shadow it
+let km = stockKeymap();
+dropShadowingAlias(km, "<Space>d");
+assert.deepEqual(keysOf(km), ["<CR>:keyToKey", "d:operator", "s:keyToKey"]);
+
+// ...but never an operator's own key: `dd` stays shadowed rather than breaking `d`
+km = stockKeymap();
+dropShadowingAlias(km, "dd");
+assert.ok(
+  km.some((c) => c.keys === "d" && c.type === "operator"),
+  "the delete operator must survive a `dd` mapping",
+);
+
+// a single-key mapping replaces the alias outright, so nothing is dropped for it
+km = stockKeymap();
+dropShadowingAlias(km, "<Space>");
+assert.equal(km.length, 4);
+
+// angle-bracket names are one key, not one character
+km = stockKeymap();
+dropShadowingAlias(km, "<CR>x", undefined);
+assert.ok(!km.some((c) => c.keys === "<CR>"));
+
+// a mode-specific alias is only dropped for a mapping in that same mode: `s` has
+// a normal and a visual entry, and `nmap sa` must not break visual-mode `s`.
+km = [
+  { keys: "s", type: "keyToKey", toKeys: "cl", context: "normal" },
+  { keys: "s", type: "keyToKey", toKeys: "c", context: "visual" },
+];
+dropShadowingAlias(km, "sa", "normal");
+assert.deepEqual(
+  km.map((c) => c.context),
+  ["visual"],
+);
+
+// a context-less alias shadows every mode, so it goes whatever the mapping's mode
+km = stockKeymap();
+dropShadowingAlias(km, "<Space>d", "normal");
+assert.ok(!km.some((c) => c.keys === "<Space>"));
+
+// and it is wired into the map branch of the parser, for every map flavour
+for (const line of ["map <Space>d dd", "nmap <Space>d dd", "nnoremap <Space>d dd"]) {
+  km = stockKeymap();
+  const calls = [];
+  const Vim = { map: (...a) => calls.push(["map", ...a]), noremap: (...a) => calls.push(["noremap", ...a]) };
+  applyVimrcLine(Vim, line, km);
+  assert.ok(!km.some((c) => c.keys === "<Space>"), `${line} left the alias in place`);
+  assert.equal(calls.length, 1, line);
+}
+
+// an unmap line must not drop anything on its own
+km = stockKeymap();
+applyVimrcLine({ unmap: () => {} }, "unmap <Space>d", km);
+assert.equal(km.length, 4);
+
+// missing keymap (nothing loaded yet) must not throw
+applyVimrcLine({ map: () => {} }, "map <Space>d dd", null);
+
+console.log("PASS  vimrc alias shadowing (space as leader)");

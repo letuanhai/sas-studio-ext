@@ -357,7 +357,20 @@
   // supported-syntax note shown to the user.
   const VIMRC_CTX = { n: "normal", i: "insert", v: "visual" };
 
-  function applyVimrcLine(Vim, line) {
+  // See editor-swap.js's copy for why a user mapping that starts with a
+  // built-in keyToKey alias needs the alias removed first.
+  function dropShadowingAlias(keymap, lhs, ctx) {
+    const first = (lhs.match(/^(?:<[^>]+>|[\s\S])/) || [])[0];
+    if (!keymap || !first || first === lhs) return;
+    for (let i = keymap.length - 1; i >= 0; i--) {
+      const c = keymap[i];
+      if (!c || c.keys !== first || c.type !== "keyToKey") continue;
+      if (ctx && c.context && c.context !== ctx) continue;
+      keymap.splice(i, 1);
+    }
+  }
+
+  function applyVimrcLine(Vim, line, keymap) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.charAt(0) === '"') return;
 
@@ -365,6 +378,7 @@
     if (m) {
       const ctx = m[1] ? VIMRC_CTX[m[1]] : undefined;
       try {
+        dropShadowingAlias(keymap, m[3], ctx);
         if (m[2]) Vim.noremap(m[3], m[4], ctx);
         else Vim.map(m[3], m[4], ctx);
       } catch (e) {
@@ -391,7 +405,8 @@
     ace.config.loadModule("ace/keyboard/vim", (vim) => {
       const Vim = vim && vim.Vim;
       if (!Vim) return;
-      (text || "").split("\n").forEach((line) => applyVimrcLine(Vim, line));
+      const keymap = (vim.handler && vim.handler.defaultKeymap) || null;
+      (text || "").split("\n").forEach((line) => applyVimrcLine(Vim, line, keymap));
     });
   }
 
