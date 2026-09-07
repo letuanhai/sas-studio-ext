@@ -1127,19 +1127,44 @@ URL and asserts the context still closes, bounded, with no browser process left)
 To test changes manually: `chrome://extensions/` → reload the unpacked extension (loaded from the repo root) → refresh
 the SAS Studio page → toggle with `Ctrl+.` (or the popup's toggle button).
 With no GUI to hand (headless box, ssh from a phone), `npm run dev` (= `./tools/dev-browser.sh`; env vars go in front,
-extra Chrome flags after a `--`) replaces that whole loop: it launches playwright's chromium with `--load-extension` and
-`--remote-debugging-port` (headless unless `DISPLAY` is set — with a loud warning when it falls back, since the symptom
-of a dropped X11 forwarding is just "no window appeared"; a `DISPLAY` that is set but unreachable is reported as such
-rather than as the misleading "extension did not load".
-`PORT`/`DATA`/`CHROME_BIN` override), waits for the extension's service-worker target and prints the mode it came up in,
-the CDP url and the assigned `chrome-extension://<id>`, so `chrome://extensions` is never needed and the options/popup
-pages are reachable by URL.
+extra Chrome flags after a `--`) replaces that whole loop: it launches stable `/usr/bin/google-chrome` with
+`--remote-debugging-port`, then installs this repo as an unpacked extension over CDP via `tools/ext-load.js` (headless
+unless `DISPLAY` is set — with a loud warning when it falls back, since the symptom of a dropped X11 forwarding is just
+"no window appeared";
+a `DISPLAY` that is set but unreachable is reported as such rather than as the misleading "extension did not load".
+`PORT`/`DATA`/`CHROME_BIN` override), and prints the mode it came up in, the CDP url and the assigned
+`chrome-extension://<id>`, so `chrome://extensions` is never needed and the options/popup pages are reachable by URL.
 It opens `https://sas.lth0.net/SASStudio/38/` at startup, that being the only page the extension does anything on
 (`URL=` empty starts on the new-tab page, `URL=...` goes elsewhere — written `${URL-default}`, not `${URL:-default}`, so
 an empty value is a choice rather than a fallback).
 That costs one leaked workspace session per launch, for the reason in the session-leak note above;
 the browser is driven by hand rather than by a harness, so there is no `releaseSession` equivalent here.
-Re-running it IS the reload — it kills the previous instance by pidfile, WIPES the user-data-dir and starts a fresh one.
+A plain run then STAYS in the foreground and watches the five files a page reload cannot pick up (`manifest.json`,
+`src/sw.js`, `src/relay.js`, `src/dark-inject.js`, `src/dark-media-auto.js`), reloading the extension on every change
+until Ctrl-C, which stops the browser and cleans up the pidfile.
+`WATCH=0` gives the old launch-and-return behaviour, which is what an agent wants — a foreground watch would hang its
+shell.
+Only those five: everything else under `src/` is live on a page reload, and reloading the extension for an
+`editor-swap.js` edit would restart the service worker while you type.
+The watching is `tools/ext-load.js --watch` (node's `fs.watch`, no new dependency — playwright is already there), on the
+two DIRECTORIES rather than the five files: an editor that saves atomically (write temp + rename, which vim and most
+others do) leaves a per-file watch bound to the dead inode, silently never firing again, while a directory watch reports
+the name and survives the swap — smoke-checked with two consecutive rename-saves of `relay.js`.
+Events are coalesced 300 ms, since one save fires several.
+It also exits when the browser does (a 1 s `process.kill(pid, 0)` on the chrome pid, not a CDP round trip), so the shell
+falls through to the same cleanup Ctrl-C runs.
+The caveat inotify cannot fix, and neither could polling: the repo is on an **NFS4 mount**, where inotify only ever
+fires for changes made by THIS client.
+Measured against a file on the same server written from a second NFS client (sas-ue) — no event in 72 seconds, and no
+mtime change either, the mount being `acregmin=acregmax=1800`, a 30-minute attribute cache, so a poll would have been
+just as blind.
+Edit on this box, or run `dev-browser.sh reload` by hand.
+The watch loop also exits when the browser does, so a chrome that dies with its X display takes the script with it.
+`./tools/dev-browser.sh reload` is the same reload on demand, from another shell — one more
+`Extensions.loadUnpacked` on the same path, which is exactly what the chrome://extensions Reload button does;
+over X11 forwarding, restarting the browser is the expensive part, so this is the normal way to pick up an edit.
+Re-running the script itself is a full restart (previous instance killed by pidfile), and it no longer wipes the
+user-data-dir — the whole profile persists, settings, history and logins alike (`CLEAN=1` for a genuine first run).
 Everything is keyed on `DATA`, so a second run with the same `DATA` takes over the first, and the failure that makes
 ruinous is a headless run silently killing a HEADED session someone is working in — over ssh the window just vanishes
 with no message.
@@ -1170,57 +1195,56 @@ A headed window is sized to fill the display (`WINDOW=1600,1000` overrides and c
 against an exact 1536x960 from `--window-size`.
 `./tools/dev-browser.sh status` answers which browser is actually on the port: it asks the browser itself and reports
 whether OUR extension is loaded, since a tunnelled one runs on the other host and has none.
+It asks the extension REGISTRY (`Extensions.getExtensions`, matched on the source path) rather than looking for a
+service-worker target in `/json/list`: the worker goes dormant after ~30 s idle, and its missing target read as "NOT
+loaded — a tunnelled browser", which is a confident lie about the one thing the command exists to answer.
 The display is recorded in `$DATA/.display` at launch rather than read back from `/proc/<pid>/environ`: chrome scrubs
 its own environment block, so a browser plainly running on `:97` reports no `DISPLAY` at all and the guard passed every
 time (the extension id is derived from the source path, so it survives one).
-The extension's own settings DO survive: `chrome.storage.local` is one leveldb directory per extension id under
-`Default/Local Extension Settings`, so the script carries just that across the wipe — keeping the whole profile instead
-would bring the stale service worker back with it, which is the one thing the wipe exists to prevent.
-Chrome flushes that store on exit and the kill is awaited, so what lands on disk is current;
-`CLEAN=1` drops it too, for a genuine first-run.
-Both halves are verified together: with a marker line added to `src/sw.js`, one restart shows the new service worker AND
-the previous config still there.
+The extension id is the same one `--load-extension` used to produce (both derive it from the source path), so
+`chrome.storage.local` — one leveldb directory per id under `Default/Local Extension Settings` — keeps matching across
+the switch and across restarts.
+Verified with a marker line in `src/sw.js`: a restart shows the new service worker AND the previous config still there.
 Most edits need none of that, and which ones do was measured with a purpose-built probe extension rather than assumed.
 **A page reload alone picks up**: everything `sw.js` injects with `chrome.scripting.executeScript({files})` —
 `ss-fixes.js`, `tools-meta.js`, `editor-swap.js`, `ace-patches.js`, i.e. the bulk of this codebase — plus every resource
 the page fetches over a `chrome-extension:` URL (`src/ace/*.js`, `src/lua/*.lua`, `lib/*`, `src/dark.css`) and the
 extension's own pages (`options.html`/`popup.html`/`changelog.html`).
-**Re-running the script is needed for**: `manifest.json`, `src/relay.js` (or any other `content_scripts` entry — a
-declared content script's file is cached at extension load, so an edited one keeps firing the OLD body for the rest of
-the browser's life), the `dark-inject.js`/`dark-media-auto.js` pair (`chrome.scripting.registerContentScripts` caches
-exactly the same way — verified separately, a re-registration does not re-read the file), and `src/sw.js`.
-That last one is why the wipe exists: **Chrome caches the service-worker script in the profile and keeps running the
-stale body across a full browser restart**, even with the manifest version bumped (measured:
-`chrome.runtime.getManifest().version` reporting the new `1.1` while the old `sw.js` body was still live, on a browser
-18 seconds old).
-Terminating the worker doesn't help either — a genuinely cold respawn, after the debugger detached and the target
-vanished from `/json/list`, still ran the old file.
-Only a clean user-data-dir brings the new one back.
-Two traps it exists to encode: `/usr/bin/google-chrome` silently IGNORES `--load-extension` in headless (checked on
-stable 151, including with `--disable-features=DisableLoadExtensionCommandLineSwitch`; only playwright's build honours
-it, which is also why the smoke test uses that binary), and `chrome.runtime.reload()` over CDP — the obvious way to
-reload without a restart — permanently UNLOADS an extension loaded that way: no service-worker target comes back and
-every extension page then fails `ERR_BLOCKED_BY_CLIENT` until Chrome is restarted.
+**An extension reload is needed for** (which a foreground `npm run dev` does by itself, and
+`./tools/dev-browser.sh reload` does on demand): `manifest.json`, `src/relay.js` (or any other
+`content_scripts` entry — a declared content script's file is cached at extension load, so an edited one keeps firing
+the OLD body until the extension is reloaded), the `dark-inject.js`/`dark-media-auto.js` pair
+(`chrome.scripting.registerContentScripts` caches exactly the same way — verified separately, a re-registration does not
+re-read the file), and `src/sw.js`;
+the page then needs its own reload to re-inject.
+Both caches are cleared by a `loadUnpacked` of an ALREADY-loaded extension, and only by that — verified with a marker
+content script (A → edit → still A after a page reload → B after the extension reload).
+Which is why `tools/ext-load.js` calls it TWICE at launch: installing an extension the profile has seen before re-uses
+**Chrome's cached copy of the service-worker script**, so a first load into a freshly started browser can still come up
+running yesterday's `sw.js` (measured — file reverted, worker still answering with the old global;
+this is the same cache that used to make a full browser restart, even with the manifest version bumped, keep the stale
+body: `chrome.runtime.getManifest().version` reporting the new `1.1` while the old `sw.js` was still live, on a browser
+18 seconds old, and a genuinely cold respawn after the target vanished from `/json/list` still running the old file).
+The second call is a reload rather than an install, so it re-reads;
+that pair is what replaced the profile wipe, verified twice over: cache `OLD`, stop, edit the file to `NEW`, relaunch,
+worker answers `NEW`.
+Three traps encoded here: `/usr/bin/google-chrome` silently IGNORES `--load-extension` — **headed as well as headless**,
+and with `--disable-features=DisableLoadExtensionCommandLineSwitch` too (checked on stable 151: the extension is simply
+absent), only playwright's build honours it, which is why the smoke test still uses that binary while the dev browser
+gets the extension over CDP instead;
+`Extensions.loadUnpacked` needs no flag on stable but does NOT persist across a browser restart, so the launch installs
+it every time;
+and `chrome.runtime.reload()` over CDP — the obvious way to reload without a restart — permanently UNLOADS an extension
+loaded that way: no service-worker target comes back and every extension page then fails `ERR_BLOCKED_BY_CLIENT` until
+Chrome is restarted.
 It kills by pid rather than `pkill -f` because the pattern would match the launching shell's own command line.
 `./tools/dev-browser.sh stop` kills it (by pidfile, for the same reason).
-For a human to watch the same instance from a phone, open the printed `devtools:` url — the DevTools frontend Chrome
-serves locally screencasts with input passthrough, so no X server is involved.
-Two things make that link non-obvious, which is why the script prints it rather than leaving you to find it: the bare
-`http://localhost:9333/` is a 200 with `Content-Length: 0`, i.e. a genuinely blank page and not a broken tunnel (there
-is no inspectable-pages index in this build), and `/json/list`'s own `devtoolsFrontendUrl` points at the
-`chrome-devtools-frontend.appspot.com` copy, which a client reaching the browser only through an ssh tunnel cannot load.
-The local one is `/devtools/inspector.html?ws=localhost:<port>/devtools/page/<target id>`, and it needs
-`--remote-allow-origins` (the script passes `http://localhost:$PORT`): since Chrome 111 a `/devtools/page/<id>`
-websocket handshake carrying ANY `Origin` header is answered 403, and a frontend page served over http always sends one
-— measured both ways, and the same handshake without the header gets a 101, which is why playwright and curl never
-needed the flag (`ssh -Y` into Termux:X11 with `DISPLAY` set works too, and is only worth it for native window chrome).
-Reaching that url from another machine is an ssh tunnel — `ssh -N -L 9333:localhost:9333 user@host`, which the script
-prints — and there is no alternative to one: Chrome accepts `--remote-debugging-address` and then silently ignores it,
-always binding the debug port to 127.0.0.1 (measured on 151/153 — `ss -ltn` shows 127.0.0.1 with both `=0.0.0.0` and an
-explicit interface address).
-Keep `localhost` in the url on the client side: the DevTools endpoint answers
-`Host header is specified and is not an IP address or localhost` to a hostname, so a tunnel opened under a name fails
-where `http://localhost:9333` works.
+The window is watched over X11 forwarding (`ssh -Y` into Termux:X11 on the phone), not through the DevTools frontend:
+that frontend's local screencast used to be printed as a `devtools:` url and is deliberately gone, along with the
+`--remote-allow-origins` flag that only ever existed to make it work.
+The debug port stays on 127.0.0.1 regardless — Chrome accepts `--remote-debugging-address` and then silently ignores it
+(measured on 151/153 — `ss -ltn` shows 127.0.0.1 with both `=0.0.0.0` and an explicit interface address) — so anything
+off this box reaches it through ssh or not at all.
 To build the publishable zip: `./tools/package.sh` → `dist/sas-studio-ext-<version>.zip` (dist/ is gitignored; it packs
 `manifest.json src assets lib` — rebuilding `lib/` first if incomplete — so a new runtime file belongs in one of those).
 All extension logs are prefixed `[SS Ext]`;

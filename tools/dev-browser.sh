@@ -2,7 +2,10 @@
 # Launch a CDP-debuggable Chromium with this extension loaded unpacked, so
 # nothing has to be installed or reloaded through chrome://extensions.
 #
-#   ./tools/dev-browser.sh                 # headless unless DISPLAY is set
+#   ./tools/dev-browser.sh                 # launch, then WATCH and reload the
+#                                          #  extension on every relevant edit,
+#                                          #  until Ctrl-C (which stops chrome)
+#   ./tools/dev-browser.sh reload          # reload the extension, keep the browser
 #   ./tools/dev-browser.sh stop            # kill it
 #   ./tools/dev-browser.sh status          # WHICH browser is on the port
 #
@@ -19,33 +22,41 @@
 # here, and `dev-browser.sh stop` over ssh frees it. `status` says which
 # one you are actually on.
 #
-# The port is reachable only over an ssh tunnel, by design and by Chrome's:
-# --remote-debugging-address is accepted and then silently IGNORED, so the
-# debug port is always on 127.0.0.1 (measured on 151/153 - `ss -ltn` shows
-# 127.0.0.1 with =0.0.0.0 and with an explicit interface address alike).
-#   ssh -N -L 9333:localhost:9333 user@host
-# Then open http://localhost:9333 on the client. Keep "localhost" in that url:
-# the DevTools endpoint answers "Host header is specified and is not an IP
-# address or localhost" to anything else.
+# The debug port is always on 127.0.0.1: --remote-debugging-address is accepted
+# and then silently IGNORED (measured on 151/153 - `ss -ltn` shows 127.0.0.1
+# with =0.0.0.0 and with an explicit interface address alike), so anything off
+# this box reaches it through ssh or not at all.
 #   PORT=9334 ./tools/dev-browser.sh       # another port, if 9333 is taken too
-#   CLEAN=1 ./tools/dev-browser.sh         # also drop the extension's settings
+#   CLEAN=1 ./tools/dev-browser.sh         # start from an empty profile
+#   WATCH=0 ./tools/dev-browser.sh         # launch and return, don't watch
 #   URL= ./tools/dev-browser.sh            # don't open SAS Studio at startup
 #   WINDOW=1600,1000 ./tools/dev-browser.sh  # window size (default: fill the
 #                                          #  display; WINDOW= to opt out)
 #   ./tools/dev-browser.sh --headless=new  # extra flags pass through
 #
-# Re-running this IS the reload: it kills the previous instance and starts a
-# fresh one. Deliberately not chrome.runtime.reload() over CDP - under
-# --load-extension that unloads the extension permanently (no service-worker
-# target, every extension page ERR_BLOCKED_BY_CLIENT) until Chrome restarts.
-#
-# Most edits do NOT need this at all - just reload the SAS Studio page. What a
-# page reload already picks up: everything sw.js file-injects (ss-fixes.js,
+# Most edits need NOTHING here - just reload the SAS Studio page. What a page
+# reload already picks up: everything sw.js file-injects (ss-fixes.js,
 # tools-meta.js, editor-swap.js, ace-patches.js), every page-fetched resource
 # (src/ace/*.js, src/lua/*.lua, lib/*, src/dark.css) and the extension's own
-# pages (options/popup/changelog). What needs this script re-run: manifest.json,
+# pages (options/popup/changelog). What needs an EXTENSION reload: manifest.json,
 # src/relay.js and any other declared content script, the dark-inject.js /
 # dark-media-auto.js pair registered via chrome.scripting, and src/sw.js.
+#
+# A foreground run does that reload for you, watching exactly those files.
+# `dev-browser.sh reload` is the same thing on demand, from another shell.
+#
+# The reload is Extensions.loadUnpacked over CDP,
+# i.e. exactly the chrome://extensions Reload button, with the browser and its
+# windows left alone (which matters over X11 forwarding, where restarting the
+# browser is the expensive part). It is NOT chrome.runtime.reload(), which
+# unloads an extension permanently (no service-worker target, every extension
+# page ERR_BLOCKED_BY_CLIENT) until Chrome restarts.
+#
+# Re-running the script still works and is a full restart. It no longer wipes
+# the profile: the wipe only ever existed because Chrome caches the extension's
+# service worker in the user-data-dir and reuses it across restarts even with
+# the manifest version bumped, and a CDP-loaded extension does not survive a
+# restart at all - every launch installs it fresh from disk.
 set -e
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -93,6 +104,16 @@ guarded_stop() {
 
 [ "$1" = "stop" ] && { stop; echo "stopped"; exit 0; }
 
+# The chrome://extensions Reload button, without the page or the mouse. Open
+# SAS Studio tabs still need their own reload afterwards to pick up the new
+# content scripts.
+if [ "$1" = "reload" ]; then
+	ID=$(PORT=$PORT node "$ROOT/tools/ext-load.js") || exit 1
+	echo "reloaded: chrome-extension://$ID"
+	echo "          reload the SAS Studio tab to re-inject"
+	exit 0
+fi
+
 # `status` answers the only question that matters when one fixed port serves two
 # devices: WHICH browser is the MCP talking to right now. On the laptop the port
 # is an `ssh -R` tunnel to chrome over there; on the phone it is a headed chrome
@@ -101,7 +122,8 @@ guarded_stop() {
 if [ "$1" = "status" ]; then
 	echo "port:  $PORT"
 	if own=$(running_display); then
-		echo "local: dev-browser running (pid $(cat "$PIDFILE"), ${own:+headed on DISPLAY=$own}${own:-headless})"
+		[ -n "$own" ] && where="headed on DISPLAY=$own" || where="headless"
+		echo "local: dev-browser running (pid $(cat "$PIDFILE"), $where)"
 	else
 		echo "local: no dev-browser instance"
 	fi
@@ -112,23 +134,31 @@ if [ "$1" = "status" ]; then
 		exit 1
 	fi
 	echo "cdp:   $(printf %s "$ver" | sed -n 's/.*"Browser": "\([^"]*\)".*/\1/p')"
-	if curl -s --max-time 3 "http://localhost:$PORT/json/list" 2>/dev/null | grep -q '/src/sw\.js'; then
-		echo "ext:   loaded -> this is the browser on THIS machine"
+	if ID=$(PORT=$PORT node "$ROOT/tools/ext-load.js" --check 2>/dev/null); then
+		echo "ext:   loaded ($ID) -> this is the browser on THIS machine"
 	else
 		echo "ext:   NOT loaded -> a tunnelled browser (your laptop), or the extension is off"
 	fi
 	exit 0
 fi
 
-# Playwright's build, not /usr/bin/google-chrome: stable Chrome silently
-# ignores --load-extension in headless (checked on 151, including with
-# --disable-features=DisableLoadExtensionCommandLineSwitch).
-CHROME=${CHROME_BIN:-$(ls -d "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux64/chrome 2>/dev/null | tail -1)}
-[ -x "$CHROME" ] || { echo "no playwright chromium - run: npx playwright install chromium" >&2; exit 1; }
+# Stable Chrome, not playwright's build: this is a browser a human sits in
+# front of, and playwright's carries "Chrome for Testing" branding. It can be
+# stable now because the extension arrives over CDP (tools/ext-load.js) rather
+# than through --load-extension, which stable ignores. Falls back to
+# playwright's chromium when there is no google-chrome; CHROME_BIN overrides.
+# (test/smoke.js still needs playwright's build - it uses --load-extension.)
+CHROME=$CHROME_BIN
+[ -n "$CHROME" ] || CHROME=$(command -v google-chrome || true)
+[ -n "$CHROME" ] || CHROME=$(ls -d "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux64/chrome 2>/dev/null | tail -1)
+[ -x "$CHROME" ] || { echo "no chrome - install google-chrome, or: npx playwright install chromium" >&2; exit 1; }
 
 mkdir -p "$DATA"
 guarded_stop
 sleep 1
+# The profile is kept across runs now (settings, history, logins). CLEAN=1 is
+# the way back to a genuine first run.
+[ -n "$CLEAN" ] && rm -rf "$DATA" && mkdir -p "$DATA"
 
 # Refuse a port someone else is already listening on, because chrome does NOT
 # fail loudly enough to notice. With 127.0.0.1:9222 taken it logs one
@@ -151,32 +181,6 @@ if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q .; then
 	echo "  chrome would otherwise bind the other IP stack and you would not notice." >&2
 	exit 1
 fi
-
-# Wipe the profile, because a restart alone does NOT reload src/sw.js: Chrome
-# caches the extension's service-worker script in the user-data-dir and reuses
-# it across browser restarts even when the file changed AND the manifest
-# version was bumped (measured - manifest 1.1 live, old sw.js body still
-# running). Everything else refreshes without this; the service worker only
-# comes back from a clean profile. The extension id is derived from the source
-# path, so it survives the wipe.
-#
-# The one thing worth keeping across it is the extension's own settings, which
-# live in ONE leveldb directory per extension id, so carry that over rather
-# than keeping the whole profile (which would bring the stale service worker
-# with it). Chrome flushes it on exit, and `stop` above already waited, so
-# what is on disk now is current. CLEAN=1 drops it too, for a true first-run.
-SETTINGS="Default/Local Extension Settings"
-STASH=$(mktemp -d)
-if [ -z "$CLEAN" ] && [ -d "$DATA/$SETTINGS" ]; then
-	cp -a "$DATA/$SETTINGS" "$STASH/settings"
-fi
-rm -rf "$DATA"
-mkdir -p "$DATA/Default"
-if [ -d "$STASH/settings" ]; then
-	mv "$STASH/settings" "$DATA/$SETTINGS"
-	echo "config: carried over (CLEAN=1 to reset)"
-fi
-rm -rf "$STASH"
 
 if [ -n "$DISPLAY" ]; then
 	MODE="headed on DISPLAY=$DISPLAY"
@@ -213,12 +217,6 @@ else
 	echo "         for a window: ssh -Y -C <host>, verify with 'xdpyinfo | head -3', re-run here." >&2
 fi
 
-# --remote-allow-origins is what makes the DevTools frontend usable from a
-# browser at all: since Chrome 111 a /devtools/page/<id> websocket handshake
-# carrying ANY Origin header is answered 403 (measured - the same handshake
-# without the header gets 101), and a frontend page served over http always
-# sends one. Tools that speak CDP directly (playwright, curl) send none, which
-# is why they work without it.
 # Opens SAS Studio, since that is the only page this extension does anything
 # on. `URL=` (empty) starts on the new-tab page instead, `URL=...` elsewhere -
 # hence ${URL-default} rather than ${URL:-default}, so an empty value is a
@@ -229,20 +227,25 @@ fi
 URL=${URL-https://sas.lth0.net/SASStudio/38/}
 
 "$CHROME" --remote-debugging-port="$PORT" --user-data-dir="$DATA" \
-	--remote-allow-origins="http://localhost:$PORT" \
 	--no-first-run --no-default-browser-check \
-	--load-extension="$ROOT" "$@" ${URL:+"$URL"} >"$DATA/chrome.log" 2>&1 &
+	"$@" ${URL:+"$URL"} >"$DATA/chrome.log" 2>&1 &
 echo $! >"$PIDFILE"
 printf %s "$DISPLAY" >"$DISPFILE"
 
+# No --load-extension (stable Chrome ignores it): install over CDP once the
+# debug port answers. A CDP-loaded extension is gone after a restart, so this
+# runs every launch - which is also what makes a stale service worker
+# impossible and the old profile wipe unnecessary.
 i=0
 while [ $i -lt 60 ]; do
-	ID=$(curl -s "http://localhost:$PORT/json/list" 2>/dev/null |
-		sed -n 's|.*chrome-extension://\([a-p]*\)/src/sw\.js.*|\1|p' | head -1)
-	[ -n "$ID" ] && break
+	curl -s --max-time 2 "http://localhost:$PORT/json/version" >/dev/null 2>&1 && break
 	i=$((i + 1))
 	sleep 0.5
 done
+ID=$(PORT=$PORT node "$ROOT/tools/ext-load.js" 2>&1) || {
+	echo "$ID" | sed 's/^/  /' >&2
+	ID=
+}
 
 if [ -z "$ID" ]; then
 	# A dead X connection lands here too, and "extension did not load" is a
@@ -257,16 +260,23 @@ if [ -z "$ID" ]; then
 	exit 1
 fi
 
-# The bare http://localhost:$PORT/ is a 200 with Content-Length 0 - a genuinely
-# blank page, not a broken tunnel. The frontend lives at /devtools/inspector.html
-# and needs the ws= of a specific target; /json/list's own devtoolsFrontendUrl
-# points at the appspot.com-hosted copy instead, which a phone behind an ssh
-# tunnel cannot use. So print a ready-to-open link to the LOCAL frontend.
-PAGE=$(curl -s "http://localhost:$PORT/json/list" |
-	tr ',' '\n' | sed -n 's|.*"id": "\([A-F0-9]\{20,\}\)".*|\1|p' | head -1)
-
 echo "mode:     $MODE"
-echo "cdp:      http://localhost:$PORT   (tunnel: ssh -N -L $PORT:localhost:$PORT $(whoami)@$(hostname))"
-echo "devtools: http://localhost:$PORT/devtools/inspector.html?ws=localhost:$PORT/devtools/page/$PAGE"
+echo "cdp:      http://localhost:$PORT"
 echo "ext:      chrome-extension://$ID  (options: /src/options.html, popup: /src/popup.html)"
-echo "stop:     ./tools/dev-browser.sh stop"
+
+if [ "$WATCH" = "0" ]; then
+	echo "stop:     ./tools/dev-browser.sh stop   (not watching, this shell returns)"
+	exit 0
+fi
+
+# Stay in the foreground and reload the extension when one of the files that a
+# page reload CANNOT pick up changes (which files, and why fs.watch on their
+# directories, is in tools/ext-load.js). It exits by itself when the browser
+# does, so the stop below runs either way. WATCH=0 keeps the old
+# fire-and-forget behaviour, for an agent that wants its shell back.
+trap 'echo; stop; echo "stopped"; exit 0' INT TERM HUP
+
+echo "watch:    manifest.json, sw.js, relay.js, dark-inject.js, dark-media-auto.js"
+echo "          Ctrl-C to stop the browser and exit"
+CHROME_PID=$(cat "$PIDFILE") PORT=$PORT node "$ROOT/tools/ext-load.js" --watch || true
+stop
