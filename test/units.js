@@ -233,7 +233,7 @@ assert.deepEqual(dirtyRowsFromChunks([], 5), []);
 console.log("PASS  unsaved-change gutter");
 
 // --- completion popup: width from the widest row ----------------------------------
-const { sizePopupToContent } = global.window.__ssExt._popupSizing;
+const { sizePopupToContent, size: popupSize } = global.window.__ssExt._popupSizing;
 global.window.innerWidth = 1600;
 
 const fakePopup = (data, width) => ({
@@ -262,6 +262,24 @@ global.window.innerWidth = 1600;
 // Re-opening on the same width is not a change, so nothing gets repositioned.
 p = fakePopup([{ caption: "x".repeat(40), meta: "SASHELP." }], "510px");
 assert.equal(sizePopupToContent(p), false);
+// A dragged width becomes the ceiling, below the 400px floor as well as above.
+popupSize().width = 300;
+p = fakePopup([{ caption: "x".repeat(200) }], "");
+sizePopupToContent(p);
+assert.equal(p.container.style.width, "300px");
+// ...and the auto width is recorded, so the resize observer can tell the two
+// apart and not save our own write back as another drag.
+assert.equal(p.container.__ssExtAutoWidth, 300);
+popupSize().width = 600;
+p = fakePopup([{ caption: "x".repeat(200) }], "");
+sizePopupToContent(p);
+assert.equal(p.container.style.width, "600px");
+// Short rows still stay short - the saved size is a maximum, not a fixed width.
+p = fakePopup([{ caption: "x".repeat(40), meta: "SASHELP." }], "");
+sizePopupToContent(p);
+assert.equal(p.container.style.width, "510px");
+delete popupSize().width;
+
 // Nothing measurable yet (no rows, or a popup that hasn't rendered).
 assert.equal(sizePopupToContent(fakePopup([], "")), false);
 assert.equal(

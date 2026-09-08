@@ -418,9 +418,19 @@ Consequences of that split: manifest entries and `chrome.scripting` `files:` lis
   and 10px for the scrollbar gutter `.ace_text-layer` reserves (`calc(100% - 8px)`) and the borders, clamped to
   400…800px and the window;
   an absent inline width counts as the 400px minimum, so a popup of short rows is left alone.
-  Only a changed width repositions the popup (and re-renders — the listener being one-shot is what stops that looping),
-  and a width the user dragged is overwritten on the next open (`ponytail:` comment on the spot).
-  `sizePopupToContent` is on `ssExt._popupSizing` and unit-tested in `test/units.js`.
+  Only a changed width repositions the popup (and re-renders — the listener being one-shot is what stops that looping).
+  **A size the user drags the editor's completion popup to becomes its CEILING**, kept in `completionPopupSize`
+  (module-level, page session only, the `promptSizes` pattern): width caps `sizePopupToContent`'s clamp — the 400px
+  FLOOR included, since somebody who pulled the box in to 300 meant 300 — and height rides the existing
+  `el.__ssExtLines` → `$maxLines` path, so short content still opens short and nothing ever grows back past the drag.
+  Without it a dragged width was simply overwritten on the next open, which with an LSP's long captions and metas meant
+  the popup snapped back to the 800px cap every time.
+  Telling a drag from our own write is the whole trick, since both land as an inline `style.width` on the same element
+  and `sizePopupToContent` runs on every open: it records what it wrote as `__ssExtAutoWidth`, and the `ResizeObserver`
+  treats any other inline width as the user's (height already had this, via `desiredHeight`).
+  `sizePopupToContent` and `completionPopupSize` are on `ssExt._popupSizing` (the latter behind a getter — it is
+  declared below the `ssExt` literal) and unit-tested in `test/units.js`;
+  `test/smoke.js` drives a real drag and reopens the popup.
 
 SAS language server (LSP): `ensureLsp()` lazily starts one shared ace-linters `LanguageProvider` for the whole page,
 memoized on `ssExt._lspStarting` (a failure sets `ssExt._lspFailed` so it's never retried until reload).
@@ -1135,7 +1145,8 @@ run SAS: the `"log"` start-jump, `"none"` moving neither pane nor keyboard, the 
 the new Output data pane being outlined while the Log never is, the marks being cleared by both a hotkey and a real chip
 click, and the log tab's mode/editability plus its F5 refresh reading the log ENDPOINT rather than the pane — a `blob:`
 URL stands in for the endpoint, and clearing `logURL` covers the pane fallback), the completion popup growing past its
-400px stylesheet width for a long caption (detached adapter with its own completer, so no server), and dark mode (live
+400px stylesheet width for a long caption, and a width dragged after that being remembered as the ceiling the next open
+sizes under (detached adapter with its own completer, so no server), and dark mode (live
 apply without a reload, survives a reload,
 icons still render with no 404s, icon-button labels stay hidden — i.e. `dijit.css` is intact, which is the exact symptom
 a runtime dark-mode extension kept producing — the stylesheet is a page-owned `<link>` rather than extension-injected

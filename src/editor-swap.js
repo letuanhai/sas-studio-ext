@@ -569,7 +569,8 @@
     _foldNav: { nextFoldStart, prevFoldEnd, enclosingFold }, // pure, covered by test/units.js
     _vimMarks: { vimMarksOf, refreshVimMarkGutter }, // ditto
     _dirtyGutter: { dirtyRowsFromChunks, sameLines }, // ditto
-    _popupSizing: { sizePopupToContent }, // ditto
+    // `size` is a getter: completionPopupSize is declared further down.
+    _popupSizing: { sizePopupToContent, size: () => completionPopupSize },
     _vimrc: { applyVimrcLine, dropShadowingAlias }, // ditto
   };
   window.__ssExt = ssExt;
@@ -2788,6 +2789,14 @@
   // sizing to their box.
   const POPUP_MIN_WIDTH = 400; // ssExtCompletionPopup's width, i.e. never narrower
   const POPUP_MAX_WIDTH = 800;
+  /**
+   * The size the user last dragged the editor's completion popup to, and from
+   * then on its CEILING: content sizing still shrinks the box below it, nothing
+   * grows it past it again. Width here, height as `lines` (see $autosize, which
+   * feeds it back as $maxLines). Page session only, like promptSizes - dragging
+   * a popup is a "not now" rather than a preference.
+   */
+  const completionPopupSize = {};
 
   /** @return true if the width changed (the caller then has to reposition). */
   function sizePopupToContent(popup) {
@@ -2804,15 +2813,17 @@
     // of them cover it at any font size), +10px for the 8px .ace_text-layer keeps
     // free for the scrollbar and the popup's 1px borders.
     const want = Math.ceil((cols + 2) * charWidth) + 10;
-    const width = Math.max(
-      POPUP_MIN_WIDTH,
-      Math.min(want, POPUP_MAX_WIDTH, window.innerWidth - 40),
-    );
+    let width = Math.max(POPUP_MIN_WIDTH, Math.min(want, POPUP_MAX_WIDTH, window.innerWidth - 40));
+    // A dragged width caps everything, the 400px floor included - somebody who
+    // pulled the box in to 300 meant 300.
+    if (completionPopupSize.width) width = Math.min(width, completionPopupSize.width);
     // No inline width yet = the stylesheet's, i.e. the minimum - so a popup of
     // short rows is left alone rather than written back at its own width.
     const current = Math.round(parseFloat(popup.container.style.width)) || POPUP_MIN_WIDTH;
     if (current === width) return false;
     popup.container.style.width = width + "px";
+    // Remember what WE wrote, so the observer can tell this apart from a drag.
+    popup.container.__ssExtAutoWidth = width;
     popup.renderer.onResize(true);
     return true;
   }
@@ -2829,9 +2840,9 @@
       // still 0 (measured), so wait for the render ace has just scheduled. The
       // listener is one-shot per open, so the re-render a width change causes
       // can't loop.
-      // ponytail: this also overwrites a width the user dragged (resize: both,
-      // see installResizablePopups) on the next open. Remember the drag if that
-      // ever annoys - promptSizes is the pattern.
+      // A width the user dragged is remembered by installResizablePopups and
+      // caps this from then on (completionPopupSize), so reopening never grows
+      // the box back past it.
       popup.renderer.once("afterRender", () => {
         if (sizePopupToContent(popup)) this.$updatePopupPosition();
       });
@@ -2890,6 +2901,11 @@
               el.__ssExtBox.style.width = saved.width;
               r.onResize(true);
             }
+          } else if (completionPopupSize.lines) {
+            // The editor's own popup: ace reuses the element per editor, so this
+            // only matters for the second editor of a page - but it is the same
+            // ceiling either way.
+            el.__ssExtLines = completionPopupSize.lines;
           }
         }
         const h = el.clientHeight;
@@ -2906,13 +2922,25 @@
         }
         if (dragged || w !== el.__ssExtWidth) r.onResize(true);
         el.__ssExtWidth = w;
-        if (el.__ssExtBox)
+        if (el.__ssExtBox) {
           promptSizes[el.__ssExtBox.className] = {
             lines: el.__ssExtLines,
             // The COMPUTED width - offsetWidth would add the padding back on
             // every open and the box would creep wider each time.
             width: getComputedStyle(el.__ssExtBox).width,
           };
+          continue;
+        }
+        // The editor's completion popup. A width is only the user's if it is not
+        // the one sizePopupToContent last wrote - that one runs on every open and
+        // would otherwise save itself straight back as the ceiling.
+        const styleWidth = Math.round(parseFloat(el.style.width)) || 0;
+        if (styleWidth && styleWidth !== el.__ssExtAutoWidth) {
+          completionPopupSize.width = styleWidth;
+          // Adopt it as ours too, so the next resize event doesn't re-save it.
+          el.__ssExtAutoWidth = styleWidth;
+        }
+        if (dragged) completionPopupSize.lines = el.__ssExtLines;
       }
     });
     proto.$autosize = function () {

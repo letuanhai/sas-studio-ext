@@ -779,7 +779,20 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       captionShown: caption ? Math.round(caption.getBoundingClientRect().width) : 0,
       captionFull: caption ? caption.scrollWidth : 0,
     };
+    // A drag writes an inline width, which is exactly what this does - so from
+    // here the size is remembered AND caps the content sizing on every reopen.
+    if (popup) {
+      popup.container.style.width = "320px";
+      await new Promise((r) => setTimeout(r, 300));
+      state.saved = window.__ssExt._popupSizing.size().width;
+      ed.completer.detach();
+      ed.execCommand("startAutocomplete");
+      await new Promise((r) => setTimeout(r, 1000));
+      // The inline width, not the bounding rect - that adds the 1px borders.
+      state.reopened = Math.round(parseFloat(ed.completer.popup.container.style.width));
+    }
     if (ed.completer) ed.completer.detach();
+    delete window.__ssExt._popupSizing.size().width;
     a.dispose();
     div.remove();
     return state;
@@ -788,6 +801,11 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   check(
     "...so the caption is shown in full, not ellipsized",
     popupWidth.captionFull > 0 && popupWidth.captionShown >= popupWidth.captionFull,
+    popupWidth,
+  );
+  check(
+    "...and a dragged width is remembered and caps the next open",
+    popupWidth.saved === 320 && popupWidth.reopened === 320,
     popupWidth,
   );
 
