@@ -1411,6 +1411,43 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     luaFileState,
   );
 
+  // -- the SAS server still answers with the Lua one up ----------------------------
+  // Both providers register into ONE page-wide ServiceManager keyed by service
+  // name and talk over ONE MockWorker: unnamed, the Lua server replaced the SAS
+  // one outright, and even named, the two callback counters used to collide.
+  // Either way SAS hover went silent the moment a .lua file was opened.
+  const sasAfterLuaState = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_sas_after_lua";
+    div.style.cssText = "position:absolute;left:-9999px;width:600px;height:300px";
+    document.body.appendChild(div);
+    const adapter = new window.__ssExt.AceEditorAdapter(div.id, "%put hello;\n", "sas");
+    for (let i = 0; i < 60; i++) {
+      if (adapter._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+    const provider = window.__ssExt._lspProvider;
+    const text = await new Promise((res) => {
+      if (!provider) return res(null);
+      const t = setTimeout(() => res(null), 20000);
+      provider.doHover(adapter.aceEditor.session, { row: 0, column: 2 }, (tt) => {
+        clearTimeout(t);
+        res((tt && tt.content && tt.content.text) || null);
+      });
+    });
+    adapter.dispose();
+    div.remove();
+    return { luaUp: !!window.__ssExt._luaLintersProvider, sasUp: !!provider, text: (text || "").slice(0, 200) };
+  });
+  check(
+    sasAfterLuaState.sasUp
+      ? "SAS LSP: hover still answers in a .sas file with the Lua server running"
+      : "SAS LSP: hover with the Lua server up (skipped: lib/sas-lsp not built)",
+    !sasAfterLuaState.sasUp || /%PUT/i.test(sasAfterLuaState.text),
+    sasAfterLuaState,
+  );
+
   // -- require() across two open .lua documents ------------------------------------
   // The server resolves a module by stripping a workspace ROOT off a file's
   // path, so this needs both halves: real filePath URIs on the documents (the

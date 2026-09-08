@@ -1364,6 +1364,29 @@
   //     forEach()es over it, so the editor gets steadily slower the longer the
   //     page has been open. Reset the store once nothing is left in it.
   //  3. debounce the request itself, so a scroll doesn't fire one per frame.
+  // AceLanguageClient.for() keeps ONE module-level MockWorker and ONE
+  // ServiceManager for the whole page, so the SAS and Lua providers'
+  // MessageControllers post to - and listen on - the same channel while each
+  // numbers its own callbacks from 1. Every reply reaches both controllers and
+  // the default branch fires whatever callbacks[id] it happens to hold, so once
+  // the Lua server was up a SAS hover's callback was being consumed by a Lua
+  // reply (and vice versa) whenever the two counters overlapped - hover in a
+  // .sas file simply stopped answering. Draw both from one counter instead:
+  // `this.callbackId++` reads then writes, so the setter can ignore its argument
+  // and just advance the shared value.
+  let lspCallbackId = 1;
+  function shareLspCallbackIds(provider) {
+    const mc = provider && provider.$messageController;
+    if (!mc || mc._ssextSharedIds) return;
+    mc._ssextSharedIds = true;
+    Object.defineProperty(mc, "callbackId", {
+      get: () => lspCallbackId,
+      set: () => {
+        lspCallbackId++;
+      },
+    });
+  }
+
   function installLspMarkerPatches(provider, session) {
     if (ssExt._lspMarkerPatched) return;
     let slp;
@@ -1813,6 +1836,12 @@
           // import of a bare specifier) - language-client.js already set
           // window.LanguageClient.
           module: () => Promise.resolve({ LanguageClient: window.LanguageClient }),
+          // AceLanguageClient.for() registers into ONE page-wide ServiceManager
+          // keyed by this name, defaulting to "server" - so without a name of
+          // its own the Lua server registered second simply REPLACED this one
+          // and every .sas request found no service for its mode (hover went
+          // silent the moment a .lua file was opened).
+          serviceName: "sas",
           modes: "sas",
           type: "webworker",
           worker,
@@ -1826,6 +1855,7 @@
           functionality: { completion: { overwriteCompleters: false }, semanticTokens: true },
         });
         ssExt._lspProvider = provider;
+        shareLspCallbackIds(provider);
 
         if (!ssExt._lspStyleInjected) {
           ssExt._lspStyleInjected = true;
@@ -2069,6 +2099,7 @@
         const provider = window.AceLanguageClient.for(
           {
             module: () => Promise.resolve({ LanguageClient: window.LanguageClient }),
+            serviceName: "lua", // see the SAS serverData: one shared registry, keyed by name
             modes: "lua",
             type: "webworker",
             worker,
@@ -2078,6 +2109,7 @@
           },
         );
         ssExt._luaLintersProvider = provider; // asserted by test/smoke.js
+        shareLspCallbackIds(provider);
         installLuaFileHover(provider);
         return provider;
       } catch (e) {

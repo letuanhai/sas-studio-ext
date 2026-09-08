@@ -679,6 +679,19 @@ page's "Lua language server" checkbox) HEAD-probes `lib/emmylua-lsp/emmylua_ls.w
 a blob+`importScripts` worker (same reason as the SAS one: a worker created straight from a `chrome-extension:` URL is
 at the mercy of the page's `worker-src`) via `startEmmyLuaWorker()`, and builds a second ace-linters provider
 (`modes: "lua"`, same options as the SAS one).
+**Two providers on one page share one registry, and both halves of that have to be named apart.**
+`AceLanguageClient.for()` keeps a MODULE-LEVEL `ServiceManager` plus a single `MockWorker` pair for the whole page, so
+the second `for()` call registers into the first one's manager rather than building its own.
+It keys `$services` by `serverData.serviceName ?? "server"` — so with the name left off, the Lua server simply REPLACED
+the SAS one, `findServicesByMode("sas")` then matched nothing, and every SAS request routed through the manager
+(hover first and most visibly) started answering `undefined` the moment a `.lua` file was opened.
+Hence the explicit `serviceName: "sas"` / `serviceName: "lua"` on the two `serverData` objects.
+The shared `MockWorker` is the second half: both providers' `MessageController`s post to and listen on that one
+channel while each numbers its callbacks from 1, and the handler's default branch fires whatever `callbacks[id]` it
+happens to hold — so a Lua reply could consume a SAS callback (and vice versa) wherever the two counters overlapped.
+`shareLspCallbackIds(provider)` (called on each provider right after it is built) redefines `callbackId` as an accessor
+over one page-wide counter: `this.callbackId++` reads then writes, so the setter can ignore its argument and just
+advance the shared value, and no two in-flight requests can collide.
 `_maybeRegisterLsp` registers the editor with it — `_lspEligible()` admits both modes, so the
 constructor/`setText`/`dispose` paths and the `lspMaxLines` limit apply unchanged, and the adapter remembers WHICH
 provider took it (`this._lspProvider`) since there are two.
