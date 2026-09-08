@@ -656,6 +656,15 @@
           : targetItem.fileType === "EXT"
             ? "FileOpenWithExternalProgram"
             : "FileOpen";
+    // handleWebOneEvent backfills item.id from the uri only for the
+    // FileOpen/FileOpenWithCodeEditor actions (AppDMS.js:5239); the TextViewer
+    // branch rewrites the action to FileOpen *after* that, so an id-less item
+    // (every entry in __ssfClosedTabs - the clone keeps no id) builds its widgets
+    // as "<perspective>_undefined_texttoolbar". The second such tab collides on
+    // that dijit id and createFileView throws, leaving perspectiveFileOpen's
+    // "Reading file" modal up forever. Same backfill as browse_ss's openItemInSs.
+    if (action !== "TableOpen" && !targetItem.id && targetItem.uri)
+      targetItem.id = targetItem.uri.replaceAll("/", "~ps~");
     window.appDMS.handleWebOneEvent(action, targetItem);
   }
 
