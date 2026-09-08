@@ -60,6 +60,43 @@ const releaseSession = async (page) => {
     .catch(() => {});
 };
 
+// Opens the first non-empty .sas file in /folders/myfolders as a code tab. Two
+// blocks need a real saved file (the close/reopen tracking only records FILE
+// tabs, and the Ace-adapter check needs a uri and some content), and a session
+// can restore with none at all.
+const openFirstSasFile = (page) =>
+  page.evaluate(async () => {
+    const a = window.appDMS;
+    const root = "/folders/myfolders";
+    const url =
+      a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(root) + "?includeChildren=true";
+    const children = await new Promise((res) => {
+      dojo.xhrGet({
+        url,
+        handleAs: "json",
+        preventCache: true,
+        load: (d) => res((d && d[0] && d[0].children) || []),
+        error: () => res([]),
+      });
+    });
+    const f = children.find((c) => c.size && Number(c.size) > 0 && /\.sas$/i.test(c.name));
+    if (!f) return { found: false };
+    const uri = `${root}/${f.name}`;
+    // id backfill: handleWebOneEvent only derives it for some actions, and an
+    // id-less item opens as tab id "undefined" (see ext-browse_ss's openItemInSs).
+    a.handleWebOneEvent("FileOpen", { uri, name: f.name, id: uri.replaceAll("/", "~ps~"), type: "FILE" });
+    await new Promise((r) => setTimeout(r, 6000));
+    const t = a.tabs.getAllTabObjects().find((t) => t.uri === uri);
+    const ed = t && t.editor && t.editor.editor;
+    return {
+      found: !!t,
+      name: f.name,
+      uri,
+      isAdapter: !!(ed && ed._isAceEditorAdapter),
+      lines: ed && ed.aceEditor ? ed.aceEditor.session.getLength() : 0,
+    };
+  });
+
 let ctx, page;
 // Runs on every exit path, including a harness error, a signal and the watchdog -
 // a leaked headless Chromium pings its session every 10s, so it never even goes
@@ -125,6 +162,9 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     closedTabsTracking: Array.isArray(window.__ssfClosedTabs),
     closeChildWrapped: /__ssfClosedTabs/.test(String(window.dijit.layout.StackContainer.prototype.closeChild)),
     tabCount: window.appDMS.tabs.getAllTabObjects().length,
+    // As RESTORED, before anything below opens a fixture of its own - which is
+    // the condition the dispatcher check further down is about.
+    codeTabs: window.appDMS.tabs.getAllTabObjects().filter((t) => t.editor).length,
   }));
   check("ss-fixes injected and initialized", state.initialized && state.toolsMeta, state);
   check("reopenClosedTab tracking installed", state.closedTabsTracking && state.closeChildWrapped, state);
@@ -161,15 +201,29 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     dropState.perDrop === 1 && dropState.nextDrop === 2,
     dropState,
   );
-  if (state.tabCount < 1) {
-    check("at least one tab open in session (needed for middle-click test)", false, state);
+  // ss-fixes only tracks FILE/DATA/IMPORTTOOL tabs for reopen, so this whole
+  // block needs a FILE tab - and a session can restore with none (a blank
+  // "Program 1" only). That is what used to make it flake: the middle click
+  // closed the one tab, nothing was tracked, and the X-button check found
+  // nothing to click either. Open a real file when there is none.
+  let fileTabs = await page.evaluate(
+    () => window.appDMS.tabs.getAllTabObjects().filter((t) => t.type === "FILE").length,
+  );
+  if (!fileTabs) {
+    const fixture = await openFirstSasFile(page);
+    check("opened a .sas file as the close/reopen fixture", fixture.found, fixture);
+    fileTabs = fixture.found ? 1 : 0;
+  }
+  const openTabs = await page.evaluate(() => window.appDMS.tabs.getAllTabObjects().length);
+  if (!fileTabs) {
+    check("a FILE tab is open (needed for the middle-click test)", false, { openTabs });
   } else {
     // -- middle-click close (raw CDP input) --------------------------------------
-    // Pick a tab whose button is actually hittable at its center - depending on
-    // session layout, some tab buttons are overlaid (elementFromPoint lands
+    // Pick a FILE tab whose button is actually hittable at its center - depending
+    // on session layout, some tab buttons are overlaid (elementFromPoint lands
     // elsewhere) and a trusted click can never reach them.
     const pt = await page.evaluate(() => {
-      for (const t of window.appDMS.tabs.getAllTabObjects()) {
+      for (const t of window.appDMS.tabs.getAllTabObjects().filter((t) => t.type === "FILE")) {
         const node = (t.tab ?? t).controlButton && (t.tab ?? t).controlButton.domNode;
         if (!node) continue;
         const r = node.getBoundingClientRect();
@@ -192,8 +246,8 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
         count: window.appDMS.tabs.getAllTabObjects().length,
         stack: window.__ssfClosedTabs.map((c) => c.name),
       }));
-      const closed = afterClose.count === state.tabCount - 1 && afterClose.stack.includes(pt.name);
-      check("middle-click closes tab", afterClose.count === state.tabCount - 1, afterClose);
+      const closed = afterClose.count === openTabs - 1 && afterClose.stack.includes(pt.name);
+      check("middle-click closes tab", afterClose.count === openTabs - 1, afterClose);
       check("closed tab tracked for reopen", afterClose.stack.includes(pt.name), afterClose);
 
       // -- reopen (only meaningful if the close above actually happened) -----------
@@ -201,7 +255,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
         await page.evaluate(() => window.__ssf.run("reopenClosedTab"));
         await page.waitForTimeout(2500);
         const afterReopen = await page.evaluate(() => window.appDMS.tabs.getAllTabObjects().length);
-        check("reopenClosedTab restores tab", afterReopen === state.tabCount, { afterReopen });
+        check("reopenClosedTab restores tab", afterReopen === openTabs, { afterReopen });
       } else {
         check("reopenClosedTab restores tab (skipped: close failed)", false, afterClose);
       }
@@ -379,37 +433,11 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // new program is empty (so "non-virgin" checks still skip) and has no uri (so
   // the Alt+C copy-tab-uri check has nothing to copy). Opening it also checks
   // end to end that the dispatcher above really is in place.
-  if (!dispatcher.codeTabs) {
-    const opened = await page.evaluate(async () => {
-      const a = window.appDMS;
-      const root = "/folders/myfolders";
-      const url =
-        a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(root) + "?includeChildren=true";
-      const children = await new Promise((res) => {
-        dojo.xhrGet({
-          url,
-          handleAs: "json",
-          preventCache: true,
-          load: (d) => res((d && d[0] && d[0].children) || []),
-          error: () => res([]),
-        });
-      });
-      const f = children.find((c) => c.size && Number(c.size) > 0 && /\.sas$/i.test(c.name));
-      if (!f) return { found: false };
-      const uri = `${root}/${f.name}`;
-      // id backfill: handleWebOneEvent only derives it for some actions, and an
-      // id-less item opens as tab id "undefined" (see ext-browse_ss's openItemInSs).
-      a.handleWebOneEvent("FileOpen", { uri, name: f.name, id: uri.replaceAll("/", "~ps~"), type: "FILE" });
-      await new Promise((r) => setTimeout(r, 6000));
-      const t = a.tabs.getAllTabObjects().find((t) => t.uri === uri);
-      const ed = t && t.editor && t.editor.editor;
-      return {
-        found: true,
-        name: f.name,
-        isAdapter: !!(ed && ed._isAceEditorAdapter),
-        lines: ed && ed.aceEditor ? ed.aceEditor.session.getLength() : 0,
-      };
-    });
+  // state.codeTabs, not dispatcher.codeTabs: the close/reopen block above may
+  // have opened a fixture of its own by now, and the question here is whether
+  // the SESSION restored without a code tab.
+  if (!state.codeTabs) {
+    const opened = await openFirstSasFile(page);
     check(
       "a .sas file opens as an Ace code tab when the session restored without one",
       opened.found && opened.isAdapter && opened.lines > 1,
