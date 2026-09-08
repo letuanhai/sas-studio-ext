@@ -570,8 +570,13 @@ an `nmap sa` has no business breaking visual-mode `s`.
 The `keyToKey` restriction is the whole safety of it: those 31 defaults are pure aliases (`<Space>`, `<CR>`, `<BS>`,
 `s`/`S`, the arrow keys), whereas the bare key of an operator (`d`, `c`, `y`) has to keep working — so `dd` as a user
 mapping stays shadowed, and dropping `d` would have broken deletion outright.
-`ssExt._vimrc` exposes both functions for `test/units.js`, which covers the alias drop, the operator surviving, and
-`<CR>x` counting the angle-bracket name as one key;
+`ssExt._vimrc` exposes both functions for `test/units.js`, which covers the alias drop, the operator surviving,
+`<CR>x` counting the angle-bracket name as one key, and the `<Cmd>` form below;
+An `<Cmd>name` right-hand side (vim 8.2's own form, the `<CR>` optional since nothing here is an ex command) maps the
+key to an ACE COMMAND instead of to other keys, through `Vim.mapCommand(keys, "action", "aceCommand", { name })` —
+ace's vim has exactly one way to reach an ace command, and this is what makes the diff commands (or any other editor
+command) mappable from a vimrc at all;
+the leader-alias drop applies to those lines too.
 `applyVimrcConfig(text)` (editor-swap.js) and `installVimExCommands()`'s vim-module-loaded callback both drive it,
 tracking `ssExt._vimrcApplied` (a counter, for test visibility) and `ssExt._vimrcLastText` (to skip a no-op reapply in
 `applyAceConfig`).
@@ -1123,6 +1128,7 @@ Pure-logic checks (no browser, no live instance): `npm run test:units` — cover
 `ssfEventKey`/`ssfPatchEnabled`, `mode-saslog.js`'s %INCLUDE folding, and `editor-swap.js`'s `_foldNav` row pickers plus
 `_vimMarks` (the zj/zk/[z/]z vim motions and the mark gutter decorations) `_dirtyGutter` (diff chunks -> unsaved-change
 gutter rows) and `_popupSizing` (the completion popup's width from its widest row, incl. both clamps) and
+the vimrc `<Cmd>` form (mapping a key to an ace command rather than to keys) and
 `tools-meta.js`'s `ssfBrowseFileAction` (extension lookup, incl. dotfiles and the
 SSF_BROWSE_FILE_ACTIONS/SSF_BROWSE_KEYS cross-check; `editor-swap.js` is a MAIN-world IIFE but touches nothing but
 `window` at load, so a `global.window = {}` stub is enough to require it).

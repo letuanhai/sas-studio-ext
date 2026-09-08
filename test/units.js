@@ -394,4 +394,24 @@ assert.equal(km.length, 4);
 // missing keymap (nothing loaded yet) must not throw
 applyVimrcLine({ map: () => {} }, "map <Space>d dd", null);
 
+// an <Cmd> rhs maps the key to an ACE command (vim's aceCommand action) instead of
+// to other keys - the only way to reach an editor command from a vimrc.
+km = stockKeymap();
+let mapped = [];
+const cmdVim = {
+  map: () => assert.fail("map must not be used for a <Cmd> rhs"),
+  noremap: () => assert.fail("noremap must not be used for a <Cmd> rhs"),
+  mapCommand: (...a) => mapped.push(a),
+};
+applyVimrcLine(cmdVim, "nmap <Space>d <Cmd>gotoNextDiff", km);
+assert.deepEqual(mapped, [
+  ["<Space>d", "action", "aceCommand", { name: "gotoNextDiff" }, { context: "normal" }],
+]);
+// the leader alias goes for these too, and the <CR> vim itself needs is optional
+assert.ok(!km.some((c) => c.keys === "<Space>"));
+mapped = [];
+applyVimrcLine(cmdVim, "map gn <Cmd>gotoNextDiff<CR>", stockKeymap());
+assert.deepEqual(mapped, [["gn", "action", "aceCommand", { name: "gotoNextDiff" }, {}]]);
+
 console.log("PASS  vimrc alias shadowing (space as leader)");
+console.log("PASS  vimrc <Cmd> maps a key to an ace command");

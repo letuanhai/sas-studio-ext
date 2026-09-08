@@ -3092,6 +3092,20 @@
     let m = trimmed.match(/^(n|i|v)?(nore)?map\s+(\S+)\s+(\S+)$/);
     if (m) {
       const ctx = m[1] ? VIMRC_CTX[m[1]] : undefined;
+      // rhs <Cmd>name (vim 8.2's own form, with the <CR> optional since nothing
+      // here is an ex command): map the key to an ACE command instead of to other
+      // keys - ace's vim has an "aceCommand" action for exactly this, and it is the
+      // only way to reach an editor command (the diff ones, say) from a vimrc.
+      const cmd = m[4].match(/^<Cmd>(\w+)(?:<CR>)?$/i);
+      if (cmd) {
+        try {
+          dropShadowingAlias(keymap, m[3], ctx);
+          Vim.mapCommand(m[3], "action", "aceCommand", { name: cmd[1] }, ctx ? { context: ctx } : {});
+        } catch (e) {
+          console.error("[SS Ext] vimrc: failed to map ace command:", trimmed, e);
+        }
+        return;
+      }
       try {
         dropShadowingAlias(keymap, m[3], ctx);
         if (m[2]) Vim.noremap(m[3], m[4], ctx);
