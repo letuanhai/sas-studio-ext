@@ -405,6 +405,19 @@ Consequences of that split: manifest entries and `chrome.scripting` `files:` lis
   A dragged prompt size is remembered in `promptSizes` (module-level, by box class name, page session only — every open
   builds a fresh popup element) and restored on the next open;
   a detached/hidden popup (`clientHeight`/`clientWidth` of 0) is skipped so closing a prompt can't save a junk size.
+  `installAutosizeCompletionPopup(ace)` (guarded by `ssExt._popupAutosizePatched`) then sizes the editor's completion
+  popup to its CONTENT: ace never does (`AcePopup` stubs the popup session's `$computeWidth` to 0), so a caption longer
+  than the sheet's 400px ellipsized with the rest of the screen empty beside it.
+  It wraps `Autocomplete.prototype.openPopup` — the one entry point the editor's popup goes through and the prompt
+  lists don't, so those keep sizing to their box — and defers `sizePopupToContent` to a one-shot
+  `renderer.once("afterRender")`, since at `openPopup` time the popup hasn't rendered and `characterWidth` is still 0.
+  The width is the widest row's `caption + meta + message` in characters, plus 2 columns for the meta's `0.9em` margin
+  and 10px for the scrollbar gutter `.ace_text-layer` reserves (`calc(100% - 8px)`) and the borders, clamped to
+  400…800px and the window;
+  an absent inline width counts as the 400px minimum, so a popup of short rows is left alone.
+  Only a changed width repositions the popup (and re-renders — the listener being one-shot is what stops that looping),
+  and a width the user dragged is overwritten on the next open (`ponytail:` comment on the spot).
+  `sizePopupToContent` is on `ssExt._popupSizing` and unit-tested in `test/units.js`.
 
 SAS language server (LSP): `ensureLsp()` lazily starts one shared ace-linters `LanguageProvider` for the whole page,
 memoized on `ssExt._lspStarting` (a failure sets `ssExt._lspFailed` so it's never retried until reload).
@@ -455,8 +468,10 @@ Giving those entries an explicit `range` over the typed sigil (which `Completion
 way — and ace re-filters rather than re-gathers while a popup is open, so the range stays in step with the provider's
 `initialPosition`.
 Table names run to 32 characters and ace's popup gives the meta `flex: 0 0 auto` (the CAPTION ellipsizes to make room
-for it, not the other way round), so `tableMeta()` caps ours at 12 characters and `loadNewAce()` widens the popup to
-400px with an `#ssExtCompletionPopup` sheet (`!important`, because `importCssString` PREPENDS to `<head>` and would
+for it, not the other way round), so `tableMeta()` used to cap ours at 12 characters — it doesn't anymore, since
+`installAutosizeCompletionPopup` grows the popup to fit caption and meta both, and a truncated table name was the one
+thing left cropped once it did.
+`loadNewAce()` widens the popup to a 400px MINIMUM with an `#ssExtCompletionPopup` sheet (`!important`, because `importCssString` PREPENDS to `<head>` and would
 otherwise lose the tie with ace's own 300px rule) - scoped away from `.ace_prompt_container`/`.ace_browse_ss_container`,
 whose lists size to their prompt box with an inline `width:100%` that an `!important` rule would otherwise beat, leaving
 the list narrower than the input above it.
@@ -1075,7 +1090,8 @@ tracking a SAS Studio CSS change).
 Pure-logic checks (no browser, no live instance): `npm run test:units` — covers `tools-meta.js`'s
 `ssfEventKey`/`ssfPatchEnabled`, `mode-saslog.js`'s %INCLUDE folding, and `editor-swap.js`'s `_foldNav` row pickers plus
 `_vimMarks` (the zj/zk/[z/]z vim motions and the mark gutter decorations) `_dirtyGutter` (diff chunks -> unsaved-change
-gutter rows) and `tools-meta.js`'s `ssfBrowseFileAction` (extension lookup, incl. dotfiles and the
+gutter rows) and `_popupSizing` (the completion popup's width from its widest row, incl. both clamps) and
+`tools-meta.js`'s `ssfBrowseFileAction` (extension lookup, incl. dotfiles and the
 SSF_BROWSE_FILE_ACTIONS/SSF_BROWSE_KEYS cross-check; `editor-swap.js` is a MAIN-world IIFE but touches nothing but
 `window` at load, so a `global.window = {}` stub is enough to require it).
 Smoke test: `npm run test:smoke` — launches headless Chromium with the unpacked extension against the live instance and

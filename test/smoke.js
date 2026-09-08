@@ -722,6 +722,47 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     );
   }
 
+  // -- The completion popup grows to its content ------------------------------------
+  // Ace sizes it to the stylesheet (400px) and ellipsizes anything longer, however
+  // much screen is free next to it - installAutosizeCompletionPopup wraps
+  // Autocomplete.openPopup to fix that. Detached adapter, own completer: no server.
+  const popupWidth = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_popup_width";
+    div.style.cssText = "position:fixed;left:0;top:0;width:700px;height:200px;z-index:99999";
+    document.body.appendChild(div);
+    const a = new window.__ssExt.AceEditorAdapter(div.id, "", "sas");
+    const ed = a.aceEditor;
+    const long = "zzqq_a_very_long_completion_caption_0123456789";
+    ed.completers = [
+      {
+        getCompletions: (e, s, p, prefix, cb) =>
+          cb(null, [{ caption: long, value: long, meta: "SASHELP.", score: 1000 }]),
+      },
+    ];
+    ed.focus();
+    ed.execCommand("startAutocomplete");
+    await new Promise((r) => setTimeout(r, 1000));
+    const popup = ed.completer && ed.completer.popup;
+    const caption = popup && popup.container.querySelector(".ace_line .ace_");
+    const state = {
+      width: popup ? Math.round(popup.container.getBoundingClientRect().width) : 0,
+      // The caption span ellipsizes when it is narrower than its own content.
+      captionShown: caption ? Math.round(caption.getBoundingClientRect().width) : 0,
+      captionFull: caption ? caption.scrollWidth : 0,
+    };
+    if (ed.completer) ed.completer.detach();
+    a.dispose();
+    div.remove();
+    return state;
+  });
+  check("the completion popup grows past 400px for a long caption", popupWidth.width > 400, popupWidth);
+  check(
+    "...so the caption is shown in full, not ellipsized",
+    popupWidth.captionFull > 0 && popupWidth.captionShown >= popupWidth.captionFull,
+    popupWidth,
+  );
+
   // -- Completion from the other open editors --------------------------------------
   // Words defined in one editor must be offered in another, and must follow edits.
   // A registers as a text viewer (what allAdapters() walks) so this needs no second
@@ -820,11 +861,11 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     parseState,
   );
   check(
-    "the step spans past the caret, ends at run;/quit;, and metas are capped",
+    "the step spans past the caret, ends at run;/quit;, and metas name the table in full",
     parseState.betweenSteps === "" &&
       /sashelp\.class/.test(parseState.lookahead) &&
       !/sashelp\.cars/.test(parseState.stopsAtNextStep) &&
-      JSON.stringify(parseState.meta) === '["CLASS.","A_VERY_LONG…."]',
+      JSON.stringify(parseState.meta) === '["CLASS.","A_VERY_LONG_TABLE_NAME."]',
     parseState,
   );
 

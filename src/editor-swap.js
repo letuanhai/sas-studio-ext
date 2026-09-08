@@ -569,6 +569,7 @@
     _foldNav: { nextFoldStart, prevFoldEnd, enclosingFold }, // pure, covered by test/units.js
     _vimMarks: { vimMarksOf, refreshVimMarkGutter }, // ditto
     _dirtyGutter: { dirtyRowsFromChunks, sameLines }, // ditto
+    _popupSizing: { sizePopupToContent }, // ditto
     _vimrc: { applyVimrcLine, dropShadowingAlias }, // ditto
   };
   window.__ssExt = ssExt;
@@ -918,6 +919,7 @@
 
     ace.require("ace/lib/dom").importCssString(RESIZABLE_CSS, "ssExtResizablePopups");
     installResizablePopups(ace);
+    installAutosizeCompletionPopup(ace);
 
     ace.require("ace/lib/dom").importCssString(OVERLAY_DARK_CSS, "ssExtDarkOverlays");
 
@@ -1119,11 +1121,12 @@
     return refs;
   }
 
-  // Table names run to 32 characters and ace lets the meta win the flex fight
-  // against the caption, so cap ours rather than ellipsize the column it labels.
+  // Table names run to 32 characters. They used to be capped at 12 here, because
+  // ace lets the meta win the flex fight against the caption and the popup was a
+  // fixed 400px - installAutosizeCompletionPopup grows it to fit both instead, so
+  // the name is shown whole.
   function tableMeta(name) {
-    const upper = name.toUpperCase();
-    return (upper.length > 12 ? upper.slice(0, 11) + "…" : upper) + ".";
+    return name.toUpperCase() + ".";
   }
 
   // Exposed for test/smoke.js (the parsing is checked without a live LSP).
@@ -2773,6 +2776,66 @@
     }
 
     return null;
+  }
+
+  // -- Completion popup sizing ---------------------------------------------------
+  // Ace never sizes the completion popup to its content - AcePopup stubs the
+  // session's $computeWidth to 0, so the box is whatever the stylesheet says (our
+  // 400px) and a long caption ellipsizes with the rest of the screen sitting empty
+  // beside it. Measure the widest row on every open and grow the box to fit.
+  // Only the editor's own popup goes through Autocomplete.openPopup; the prompt
+  // lists (command palette, browse_ss) build their AcePopup directly and keep
+  // sizing to their box.
+  const POPUP_MIN_WIDTH = 400; // ssExtCompletionPopup's width, i.e. never narrower
+  const POPUP_MAX_WIDTH = 800;
+
+  /** @return true if the width changed (the caller then has to reposition). */
+  function sizePopupToContent(popup) {
+    const data = popup.data || [];
+    const charWidth = popup.renderer.characterWidth;
+    if (!data.length || !charWidth) return false;
+    let cols = 0;
+    for (const item of data) {
+      const d = typeof item === "string" ? { caption: item } : item;
+      const caption = d.caption || d.value || d.name || "";
+      cols = Math.max(cols, caption.length + (d.meta || "").length + (d.message || "").length);
+    }
+    // +2 columns for the meta's 0.9em margin (a monospace char is ~0.6em, so two
+    // of them cover it at any font size), +10px for the 8px .ace_text-layer keeps
+    // free for the scrollbar and the popup's 1px borders.
+    const want = Math.ceil((cols + 2) * charWidth) + 10;
+    const width = Math.max(
+      POPUP_MIN_WIDTH,
+      Math.min(want, POPUP_MAX_WIDTH, window.innerWidth - 40),
+    );
+    // No inline width yet = the stylesheet's, i.e. the minimum - so a popup of
+    // short rows is left alone rather than written back at its own width.
+    const current = Math.round(parseFloat(popup.container.style.width)) || POPUP_MIN_WIDTH;
+    if (current === width) return false;
+    popup.container.style.width = width + "px";
+    popup.renderer.onResize(true);
+    return true;
+  }
+
+  function installAutosizeCompletionPopup(ace) {
+    if (ssExt._popupAutosizePatched) return;
+    ssExt._popupAutosizePatched = true;
+    const proto = ace.require("ace/autocomplete").Autocomplete.prototype;
+    const origOpenPopup = proto.openPopup;
+    proto.openPopup = function () {
+      origOpenPopup.apply(this, arguments);
+      const popup = this.popup;
+      // At openPopup time the popup hasn't rendered yet and characterWidth is
+      // still 0 (measured), so wait for the render ace has just scheduled. The
+      // listener is one-shot per open, so the re-render a width change causes
+      // can't loop.
+      // ponytail: this also overwrites a width the user dragged (resize: both,
+      // see installResizablePopups) on the next open. Remember the drag if that
+      // ever annoys - promptSizes is the pattern.
+      popup.renderer.once("afterRender", () => {
+        if (sizePopupToContent(popup)) this.$updatePopupPosition();
+      });
+    };
   }
 
   // -- Resizable popups ---------------------------------------------------------

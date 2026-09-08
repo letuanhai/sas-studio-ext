@@ -232,6 +232,49 @@ assert.deepEqual(dirtyRowsFromChunks([], 5), []);
 
 console.log("PASS  unsaved-change gutter");
 
+// --- completion popup: width from the widest row ----------------------------------
+const { sizePopupToContent } = global.window.__ssExt._popupSizing;
+global.window.innerWidth = 1600;
+
+const fakePopup = (data, width) => ({
+  data,
+  renderer: { characterWidth: 10, onResize() {} },
+  container: { style: { width } },
+});
+
+// Short captions leave the popup at its stylesheet width...
+let p = fakePopup([{ caption: "abc", meta: "tab" }], "");
+assert.equal(sizePopupToContent(p), false);
+assert.equal(p.container.style.width, "");
+// ...a long one grows it: (caption + meta + 2) * charWidth + 10.
+p = fakePopup([{ caption: "x".repeat(40), meta: "SASHELP." }, { caption: "y" }], "");
+assert.equal(sizePopupToContent(p), true);
+assert.equal(p.container.style.width, "510px");
+// Capped, and never wider than the window.
+p = fakePopup([{ caption: "x".repeat(200) }], "");
+sizePopupToContent(p);
+assert.equal(p.container.style.width, "800px");
+global.window.innerWidth = 600;
+p = fakePopup([{ caption: "x".repeat(200) }], "");
+sizePopupToContent(p);
+assert.equal(p.container.style.width, "560px");
+global.window.innerWidth = 1600;
+// Re-opening on the same width is not a change, so nothing gets repositioned.
+p = fakePopup([{ caption: "x".repeat(40), meta: "SASHELP." }], "510px");
+assert.equal(sizePopupToContent(p), false);
+// Nothing measurable yet (no rows, or a popup that hasn't rendered).
+assert.equal(sizePopupToContent(fakePopup([], "")), false);
+assert.equal(
+  sizePopupToContent({
+    data: [{ caption: "x".repeat(40) }],
+    renderer: { characterWidth: 0, onResize() {} },
+    container: { style: { width: "" } },
+  }),
+  false,
+);
+
+console.log("PASS  completion popup width");
+
 // --- browse prompt: per-extension Enter action -------------------------------------
 const { ssfBrowseFileAction, SSF_BROWSE_FILE_ACTIONS, SSF_BROWSE_KEYS } = global.window;
 const map = { sas: "open", lua: "text", zip: "reveal" };
