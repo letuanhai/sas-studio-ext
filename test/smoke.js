@@ -2717,20 +2717,46 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   check("...and editable", !logTab.readOnly, logTab);
 
   // Refresh (F5 / the viewer's own Refresh button, both via appDMS.onTextRefresh)
-  // re-reads the source tab's Log pane - here stood in for by a direct write to it,
-  // which is what a second run would leave behind.
+  // re-reads the source tab's log. The source is editor.logURL - the pane stops
+  // being fed once a log gets big - so the marker goes behind a blob: URL standing
+  // in for the log endpoint (same HTML shape), then the pane, with logURL cleared,
+  // stands in for the fallback.
   const refreshed = await page.evaluate(async (runTab) => {
     const tabs = window.appDMS.tabs;
     const src = tabs.getAllTabObjects().find((t) => t.title === runTab);
-    src.editor.logAreaContentPane.set("content", "<pre>SSEXT REFRESH MARKER</pre>");
+    const realLogURL = src.editor.logURL;
+    const read = async () => {
+      window.__ssf.run("reloadCurrentFile");
+      await new Promise((r) => setTimeout(r, 700));
+      const tab = tabs.getFocusedTab();
+      const entry = window.__ssExt._textViewers.find((e) => e.tabHolder === tab.tab.tabHolder);
+      return { text: entry.adapter.getText(), stillFocused: tab.title };
+    };
+    src.editor.logURL = URL.createObjectURL(
+      new Blob(["<html><head><style>.sasError{color:red}</style></head><body><pre>SSEXT URL MARKER\nsecond line</pre></body></html>"], {
+        type: "text/html",
+      }),
+    );
+    src.editor.logAreaContentPane.set("content", "<pre>SSEXT PANE MARKER</pre>");
     await new Promise((r) => setTimeout(r, 300));
-    window.__ssf.run("reloadCurrentFile");
-    await new Promise((r) => setTimeout(r, 500));
-    const tab = tabs.getFocusedTab();
-    const entry = window.__ssExt._textViewers.find((e) => e.tabHolder === tab.tab.tabHolder);
-    return { text: entry.adapter.getText(), stillFocused: tab.title };
+    const fromUrl = await read();
+    URL.revokeObjectURL(src.editor.logURL);
+    src.editor.logURL = null;
+    const fromPane = await read();
+    src.editor.logURL = realLogURL;
+    return { fromUrl, fromPane };
   }, runTabTitle);
-  check("F5 on the log tab re-reads the log from the tab it came from", /SSEXT REFRESH MARKER/.test(refreshed.text), refreshed);
+  check(
+    "F5 on the log tab re-reads the log from the endpoint, not the pane",
+    /SSEXT URL MARKER\nsecond line/.test(refreshed.fromUrl.text) && !/PANE MARKER/.test(refreshed.fromUrl.text),
+    refreshed.fromUrl,
+  );
+  check("...without the log document's stylesheet as text", !/sasError\s*\{/.test(refreshed.fromUrl.text), refreshed.fromUrl);
+  check(
+    "...falling back to the Log pane when there is no log URL",
+    /SSEXT PANE MARKER/.test(refreshed.fromPane.text),
+    refreshed.fromPane,
+  );
 
   await page.evaluate((lp) => window.__ssExt.toggle(lp), libPath);
   await page.waitForTimeout(1000);

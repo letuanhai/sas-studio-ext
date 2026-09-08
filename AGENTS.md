@@ -611,10 +611,22 @@ for a diff, only for whatever the current text still asks to unmap.
   editor): `tabs._newTab(item)` + `appDMS.createFileView(item, item.tab, text, paneId)` are the same two calls AppDMS
   makes for a real text view, so with the Ace replacement on it lands in the Ace overlay `editor-swap.js`'s
   `createFileView` wrapper builds.
-  Details that are each load-bearing: the log endpoint serves HTML (it's what the Log pane loads through
-  `set("href", logURL)`), so the text comes from `renderedText(logAreaContentPane.domNode)` — an offscreen-rendered
-  CLONE, because `innerText` on the `display:none` pane of an unselected tab degrades to `textContent`, which loses
-  every line break and drags the log document's `<style>` block in as text.
+  Details that are each load-bearing: the text comes from the log ENDPOINT (`editor.logURL`, fetched and parsed by
+  `fetchLogText`), not from the Log pane, because the pane is not the whole log — past a server-side size limit SAS
+  Studio stops streaming chunks into it and sends a link instead (AppDMS's `LogChunk` branch substitutes `{logurl}`
+  with that same URL), so a big run showed a stump.
+  Preferring the URL is what SAS's own "open log in a browser tab" does, with the same one exception: with the
+  append-log preference on the pane holds every submission so far and the URL only the last
+  (`DMSEditor.onLogTabOpen`), so that case — and a failed fetch — still falls back to the pane.
+  Either way the source is HTML (`set("href", logURL)` is how the pane loads it), so it needs rendering to text: the
+  pane through `renderedText(logAreaContentPane.domNode)`, an offscreen-rendered CLONE, because `innerText` on the
+  `display:none` pane of an unselected tab degrades to `textContent`, which loses every line break and drags the log
+  document's `<style>` block in as text;
+  the fetched document the same way, after `DOMParser` (which loads and runs nothing) has given us a DETACHED copy to
+  strip its `<style>`/`<link>`/`<script>` out of, so rendering it in the page can't restyle SAS Studio.
+  `textContent` is not enough for either: the log's line breaks come from its markup, one element per line, so it
+  returns the whole log on a single line — measured, it is what the smoke test caught.
+  `logTextOfTab` is therefore async, and so are `openLogInTextTab`/`refreshLogTab` (neither caller uses the result).
   `fileType: "LOG"` is what makes `createFileView` build the Refresh toolbar;
   the item's `type` is a made-up `"ssextlog"`, which `_newTab`'s switch treats as default (just uniquify the title) and
   `loadPersistedTabs`' switch ignores, so a restored session doesn't try to reopen a log that exists nowhere.
@@ -1118,13 +1130,18 @@ mutates the tab layout), the pane-group actions plus `runFocus`/`openLogInTextTa
 one-line `proc print` against `sashelp` run once per `runFocus` mode that changes anything, the only tests that actually
 run SAS: the `"log"` start-jump, `"none"` moving neither pane nor keyboard, the live mode push from storage, Results AND
 the new Output data pane being outlined while the Log never is, the marks being cleared by both a hotkey and a real chip
-click, and the log tab's mode/editability/F5 refresh), and dark mode (live apply without a reload, survives a reload,
+click, and the log tab's mode/editability plus its F5 refresh reading the log ENDPOINT rather than the pane — a `blob:`
+URL stands in for the endpoint, and clearing `logURL` covers the pane fallback), the completion popup growing past its
+400px stylesheet width for a long caption (detached adapter with its own completer, so no server), and dark mode (live
+apply without a reload, survives a reload,
 icons still render with no 404s, icon-button labels stay hidden — i.e. `dijit.css` is intact, which is the exact symptom
 a runtime dark-mode extension kept producing — the stylesheet is a page-owned `<link>` rather than extension-injected
 CSS, Ace forced onto its dark theme by `"on"` and back off with it, follow-system gated by the link's media attribute,
 and clean removal both live and after a reload);
 see the file header for `SS_URL`/`CHROME_BIN` env vars and the playwright requirement.
-**Run it single-threaded** — the live instance is rate-limited (see top of file), so never launch two runs at once.
+**Run it single-threaded** — not because the instance is rate-limited (it isn't, see top of file) but because it runs
+on a 995 MB box: each run holds a handful of workspace sessions at ~28 MB while it works, so two at once is a memory
+problem, not a throttling one.
 Setup is `npm i && npx playwright install chromium` — with playwright in `node_modules` it finds its own matching
 Chromium, so no `NODE_PATH`/`CHROME_BIN` is needed (`CHROME_BIN` remains an override; the file header explains why a
 real `google-chrome` won't load the extension headless).

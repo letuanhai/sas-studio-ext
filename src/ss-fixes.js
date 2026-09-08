@@ -245,11 +245,42 @@
 
   // -- The submission log as a text tab --------------------------------------------
   // The log endpoint serves HTML (it's what the Log pane loads through
-  // set("href", logURL)), so the text comes off the pane that already rendered it
-  // rather than being fetched and parsed a second time.
+  // set("href", logURL)), so either source needs rendering to text.
+  //
+  // The PANE is not the whole log: past a server-side size limit SAS Studio stops
+  // streaming chunks into it and sends a link instead (AppDMS's LogChunk branch
+  // substitutes {logurl} with the submission's log URL), so a big run shows a
+  // stump. editor.logURL always has all of it - and picking it over the pane is
+  // what SAS's own "open log in a browser tab" does, with the same exception:
+  // with the append-log preference on, the pane holds every submission so far and
+  // the URL only the last (DMSEditor.onLogTabOpen).
+  async function logTextOfTab(tabObject) {
+    const editor = tabObject && tabObject.editor;
+    if (!editor) return "";
+    if (editor.logURL && !window.appDMS.optionPreferencesEditor?.appendLog) {
+      const text = await fetchLogText(editor.logURL);
+      if (text.trim()) return text;
+    }
+    return renderedText(editor.logAreaContentPane?.domNode);
+  }
 
-  function logTextOfTab(tabObject) {
-    return renderedText(tabObject && tabObject.editor && tabObject.editor.logAreaContentPane?.domNode);
+  // Rendered, not textContent: the log's line breaks come from its markup (one
+  // element per line), so textContent runs the whole log together on one line -
+  // measured. renderedText needs the node in the page, and DOMParser gives us a
+  // detached document to strip first, so the log's own <style> can't reach SAS
+  // Studio (nothing in it is fetched or run either way - a parsed document
+  // doesn't load anything).
+  async function fetchLogText(url) {
+    try {
+      const res = await fetch(url, { credentials: "same-origin" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+      doc.querySelectorAll("style, link, script").forEach((n) => n.remove());
+      return renderedText(doc.body);
+    } catch (e) {
+      console.warn("[SS Ext] could not fetch the full log, falling back to the log pane", e);
+      return "";
+    }
   }
 
   // Tab objects have no stable id of their own (a new program has none at all), but
@@ -257,11 +288,11 @@
   // objects are JSON-stringified into the user's tab preferences on every change,
   // so holding the source TAB here would make that throw on the circular reference
   // and silently stop persisting tabs.
-  function refreshLogTab(item) {
+  async function refreshLogTab(item) {
     const source = (window.appDMS.tabs.getAllTabObjects() || []).find(
       (t) => t.tab && t.tab.id === item.__ssfLogSourceTabId,
     );
-    const text = logTextOfTab(source);
+    const text = await logTextOfTab(source);
     if (!text.trim()) {
       showNotification({
         message: source ? "That tab has no log yet" : "The tab this log came from is closed",
@@ -275,9 +306,9 @@
     item.tab?.tabHolder?.simpleTextArea?.set("value", text);
   }
 
-  function openLogInTextTab() {
+  async function openLogInTextTab() {
     const source = window.appDMS.tabs.getFocusedTab();
-    const text = logTextOfTab(source);
+    const text = await logTextOfTab(source);
     if (!text.trim()) {
       showNotification({ message: "No log to open - run a program first", isError: true });
       return;
@@ -456,7 +487,7 @@
   function reloadCurrentFile() {
     const currentTab = window.appDMS.tabs.getFocusedTab();
 
-    // Our own log tab: no file behind it, so re-read the source tab's Log pane.
+    // Our own log tab: no file behind it, so re-read the source tab's log.
     // Checked before the text-viewer branch below, which only knows about viewers
     // that have an Ace overlay (i.e. only while the Ace replacement is on).
     if (currentTab && currentTab.__ssfLogSourceTabId) {
