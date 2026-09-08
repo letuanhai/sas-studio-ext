@@ -160,14 +160,24 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // keyLayout: the navigator.keyboard.getLayoutMap() result captured by the
     // options page - that API is secure-context only, so the (http) SAS Studio
     // page can't resolve it itself. Absent -> ss-fixes falls back to US layout.
-    const { fixes, hotkeys, keyLayout, browsePaths, browseKeys, browseFileActions, darkMode, runFocus } =
-      await chrome.storage.local.get([
+    const {
+      fixes,
+      hotkeys,
+      keyLayout,
+      browsePaths,
+      browseKeys,
+      browseFileActions,
+      darkMode,
+      runFocus,
+      diffPrefs,
+    } = await chrome.storage.local.get([
         "fixes",
         "hotkeys",
         "keyLayout",
         "browsePaths",
         "browseKeys",
         "browseFileActions",
+        "diffPrefs",
         "darkMode",
         "runFocus",
       ]);
@@ -198,7 +208,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     });
     await chrome.scripting.executeScript({
       target: { tabId },
-      func: (path, snippets, config, paths, keys, fileActions, dark) => {
+      func: (path, snippets, config, paths, keys, fileActions, dark, diff) => {
         // Unconditional: libPath is always this same constant, and userSnippets/
         // aceConfig just mirror current storage - re-setting any of them to the
         // same value on repeat onUpdated firings is harmless (ace/toggle() aren't
@@ -219,6 +229,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         // Read by prefersDarkTheme(): with dark mode forced on, Ace has to use
         // its dark theme too, whatever the OS says.
         window.__ssExt.darkMode = dark;
+        // Diff view shape/layout, written back by the diff editor commands
+        // themselves (via relay.js). No live-apply listener for it: only the page
+        // writes it, and another tab picks it up on its own next load.
+        window.__ssExt.diffPrefs = diff;
       },
       // Root paths name folders on one specific server, so they're stored per
       // host (like the browse history/bookmarks) and only this host's are seeded.
@@ -231,6 +245,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         // Stored map replaces the default outright, so an entry can be removed.
         browseFileActions || DEFAULT_BROWSE_FILE_ACTIONS,
         darkMode || DEFAULT_DARK_MODE,
+        Object.assign({}, DEFAULT_DIFF_PREFS, diffPrefs || {}),
       ],
       world: "MAIN",
     });

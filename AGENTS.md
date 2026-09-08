@@ -349,6 +349,80 @@ Consequences of that split: manifest entries and `chrome.scripting` `files:` lis
   that would mean replacing `renderer.$scrollDecorator` with `ScrollDiffDecorator`, and `ace-patches.js` already has its
   own stake in the decorator layer;
   and a toggle mid-edit re-baselines the DIRTY text, so the marks don't survive one (neither does the undo history).
+  **The same baseline backs a full diff view**: `toggleDiffSaved` opens ace's own diff view INSIDE the focused tab —
+  not in an overlay, so the tab keeps its caret, LSP registration and vim handler.
+  It serializes through the usual `_pending` chain and finds the focused adapter (`focusedAdapter()`,
+  `focusedAceEditor()` mapped back through `allAdapters()`).
+  Two shapes, flipped by `toggleDiffMode` and remembered: `"split"` puts a read-only editor for the other side beside
+  the live one, `"inline"` (`createDiffView`'s `inline: "b"`) draws that side into the live editor's own layers,
+  leaving one pane.
+  `splitTabPane()` is what makes room for the split: `ace.edit()` was handed the tab's own pane node, so the editor IS
+  that element and there is nowhere inside it for a second one — the new editor goes in beside it and the parent is
+  flexed, with every touched inline style recorded for `restore()`.
+  `flex-direction` is then the whole of the layout: `rotateDiffLayout` cycles `row` → `column` → `row-reverse` →
+  `column-reverse` (a quarter turn each time, other side first) and persists the index.
+  Both prefs live in **`chrome.storage.local`'s own `diffPrefs` key** (`{ mode, layout }`, `DEFAULT_DIFF_PREFS` in
+  `defaults.js`), written through `persistDiffPrefs()` → `window.postMessage({ __ssextDiffPrefs })` → `relay.js` and
+  seeded back onto `ssExt.diffPrefs` by `sw.js`'s `tabs.onUpdated` block;
+  no live-apply listener, since only the page writes them and another tab picks them up on its own next load.
+  Deliberately NOT a corner of `aceConfig`, which is where they started: that object is rebuilt from a fixed key
+  WHITELIST by both `sw.js`'s and `options.js`'s `mergeAceConfig`, so anything not named there is dropped on the round
+  trip and pushed back into the page stale.
+  Measured, and all three of the symptoms it produced were the same bug: flipping inline → split took two runs (the
+  first read the clobbered mode and flipped it back), the rotation always restarted from `row` and skipped steps, and
+  neither survived a reload.
+  `diffAgainstFile` is the same diff against ANOTHER file: `browse_ss.pick_file(cb)` is the file browser with its
+  `openItem` swapped for a callback (and `fileActions` off, so a plain Enter accepts instead of consulting the
+  per-extension action map; `onClose` — added to the prompt's `done()` — answers `null` for a dismissal, and since the
+  first call is the answer the caller can treat both as one promise), then `fetchWorkspaceFile(uri)` GETs the same
+  workspace URL `saveTextViewer` POSTs to.
+  Like every session-bound request it queues behind a running program, which ss-fixes' busy notice already explains,
+  so it carries no timeout of its own.
+  The prompt is deliberately NOT awaited inside the `_pending` chain — it waits for a person, and that chain serializes
+  every other ssExt action, so awaiting it froze the toggle, browse and the palette for as long as the prompt stood
+  open (and, in the smoke test, hung a `page.evaluate` outright — the unbounded-close trap in reverse).
+  `doDiffAgainstFile` hands the callback off and returns, the way `browse()` already does;
+  `openPickedFileDiff` re-checks that the tab is still there and has no diff before and after the fetch.
+  Either source ends in `openDiff(adapter, text, label)`, which keeps both on the adapter (`_diffOther`/`_diffLabelText`)
+  so a mode flip can rebuild the view without reading the file again.
+  The label — `last saved`, or the picked path — is shown for as long as the diff is, by `showDiffLabel()`: a second
+  element on the status LINE, pinned bottom-right of whichever pane holds the other side (the split's read-only editor,
+  which has no status bar of its own, so there the label IS the status line;
+  the live one inline, where it sits a line above the real status bar rather than on top of it), styled like
+  `ssf-ace-statusbar` and ellipsized.
+  Not inside the status bar itself: ace's `StatusBar.updateStatus` (the fork's version, in `ace-patches.js`) rewrites
+  that element's whole `textContent` on every render.
+  A toast said the path once and was gone, which is no use to somebody who left the diff open and came back — so the
+  file diff no longer raises one at all (failures still do).
+  `closeDiff()` detaches the view, destroys the second editor and restores the pane, and `dispose()` calls it for a tab
+  closed with a diff open.
+  `openDiff` ends by focusing the LIVE editor (after a pick the focus is wherever the prompt left it), and
+  `diffTarget()` falls back to whichever adapter has a diff open when nothing is focused — otherwise a split opened
+  from the prompt, or clicked into on the read-only side, could not be closed again.
+  Two things the diff module makes you do yourself, both measured as "the diff is simply empty": it is built through
+  `createDiffView`, since the `SplitDiffView`/`InlineDiffView` constructors leave the module's dummy provider in place
+  and every diff comes back with no chunks, and `view.onInput()` is called once at attach, since nothing computes a
+  first diff until an edit (or a fold/wrap realign) reaches `onInput`.
+  **Seven EDITOR commands**, not `SSF_TOOLS` actions — every one of them needs an editor to mean anything — registered
+  on every adapter's editor (and on the split's read-only editor, which has a command set of its own) and left there
+  for the editor's whole life: the three toggles (`toggleDiffSaved`, `diffAgainstFile`, `toggleDiffMode`), the nav pair
+  `gotoNextDiff` / `gotoPreviousDiff` (`Alt+Down`/`Alt+Up`), `switchDiffPane` and `rotateDiffLayout`.
+  So they appear in the command palette's per-editor list rather than as `SS-Ext:` rows, and carry no `SSF_TOOLS`
+  hotkey.
+  Being commands is what makes them bindable from ace's stock settings menu and mappable from a vimrc — `applyVimrcLine`
+  takes an `<Cmd>name` right-hand side (vim 8.2's own form, `<CR>` optional) and turns it into
+  `Vim.mapCommand(keys, "action", "aceCommand", { name })`, ace's vim having exactly one way to reach an ace command;
+  every other rhs stays a key-to-key `Vim.map`.
+  They stay registered ALWAYS and decline through `isAvailable` while no diff is open, which is what lets the nav pair
+  hold `Alt+Down`/`Alt+Up` without stealing them: ace keeps several commands per key and `CommandManager.exec` walks
+  them newest-first until one runs, so with no diff those keys still reach ace's own `movelinesdown`/`movelinesup`.
+  Taking the binding at attach and giving it back at detach was the alternative and is a trap — `removeCommand` deletes
+  the binding outright rather than restoring what it displaced, so move-lines would have been dead after the first diff.
+  `gotoNextDiff` deliberately does not call the view's own `gotoNext()`: that one drives `editorA`, i.e. the other side,
+  and reads the chunk's `old` range, so it moved the wrong editor's selection by the wrong row numbers.
+  `gotoDiffChunk()` walks the chunks' new-side start rows on the live editor instead, with no wrap at either end.
+  ponytail: no in-editor way to APPLY a chunk from one side to the other — ace has no such command either, it would be
+  ours to write.
   `activate()` also calls `swapTextViewersToAce()`, which converts text viewers that ALREADY exist — the
   `createFileView` wrapper only sees viewers created while active, and tabs restored from the last session are built by
   `SASStudioTabs.loadPersistedTabs` during app startup, long before injection, so a restored `.log`/`.txt`/`.lua` tab
@@ -1138,6 +1212,13 @@ reopen, the native-mouse toggle, Ace activation/deactivation, the text viewer (m
 palette (focused/unfocused/global hotkey), LSP completion (library/table names from `sas/getLibList`, ranking, cache
 invalidation, meta labels), cross-editor word completion and the SAS context completer (PROC SQL tables, columns), the
 unsaved-change gutter (marks on edited/deleted lines, cleared by a save — on a detached adapter, so it needs no tab),
+the diff view inside the tab (on the real code tab, since the commands work off the FOCUSED editor and split that
+tab's own pane: two side-by-side editors in it, the other one read-only and holding the saved text, the changes found,
+the nav keys moving the LIVE caret with no wrap while declining when no diff is open so move-lines still works, the
+layout rotating a quarter turn at a time, focus switching between the panes, the inline mode holding the same diff in
+one editor, and toggling off restoring the pane width and dropping the second editor), and the same against a file
+picked in the browse prompt (the prompt's first row is the tab's own file, so the fetched text can be checked against
+what the server holds),
 the browse prompt's per-extension Enter action, the blanket reveal fallback for unlisted extensions, Ctrl+Shift+Enter
 ("Let SAS Studio decide") and Alt+Enter ("Download item") (against a synthetic popup row with `appDMS.handleWebOneEvent`
 stubbed, so nothing is really opened or downloaded and no file of a given extension has to exist), the aceConfig flow

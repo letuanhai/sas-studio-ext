@@ -4,6 +4,13 @@
  * via window.postMessage and this relay forwards to the privileged side:
  * - `__ssextAceConfig`: persisted to chrome.storage.local (sw.js's
  *   storage.onChanged then pushes it to every open SASStudio tab).
+ * - `__ssextDiffPrefs`: the diff view's own shape/layout, persisted to
+ *   chrome.storage.local. A key of its own rather than a corner of `aceConfig`:
+ *   that object is rebuilt from a fixed key whitelist on both sides (sw.js's and
+ *   options.js's mergeAceConfig), so anything not in those lists is silently
+ *   dropped on the round trip - which is exactly what happened, and left the
+ *   diff toggle reading a stale mode and the layout rotation always starting
+ *   from 0.
  * - `__ssextBadge`: sent to sw.js, which sets the per-tab ON/OFF toolbar badge
  *   (content scripts can't call chrome.action themselves).
  * - `__ssextBrowseSet`: browse_ss history/bookmarks persisted to
@@ -21,6 +28,8 @@ window.addEventListener("message", (event) => {
   if (event.source !== window || !event.data) return;
   if (event.data.__ssextAceConfig !== undefined) {
     chrome.storage.local.set({ aceConfig: event.data.__ssextAceConfig });
+  } else if (event.data.__ssextDiffPrefs !== undefined) {
+    chrome.storage.local.set({ diffPrefs: event.data.__ssextDiffPrefs });
   } else if (event.data.__ssextBadge !== undefined) {
     chrome.runtime.sendMessage({ ssextBadge: !!event.data.__ssextBadge });
   } else if (event.data.__ssextBrowseSet) {

@@ -118,6 +118,7 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
      * @property {String=} historyKey                 Key to store history items in chrome.storage (relayed), disable history if blank or null
      * @property {(() => Partial<DataItem>|null)=} currentItem  Item for the currently focused tab, listed first in the empty prompt
      * @property {(item: DataItem, ...options: any[]) => void} openItem  Function to open the selected item
+     * @property {(() => void)=} onClose             Called when the prompt closes, accepted or dismissed
      * @property {Boolean=} fileActions               Whether a plain Enter honours the per-extension action map (files browser only)
      * @property {(itemPath: String) => Promise<Partial<DataItem>>} queryItemPath Function to query item path for DataItem
      * @property {Function} scrollTreeToItem          Function to scroll the tree to the selected item
@@ -691,6 +692,9 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             lastPaths[lastPathKey] = { path: cmdLine.getValue(), root: options.startPath };
             overlay.close();
             openPrompt = null;
+            // Runs on an accept too (accept() calls done() in its finally), so a
+            // caller waiting for a pick has to treat the first call as the answer.
+            options.onClose?.();
         }
     }
 
@@ -761,6 +765,25 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             openItem: SsFiles.openFile,
             // Enter honours the per-extension action map here only - see accept()
             fileActions: true,
+            queryItemPath: SsFiles.getFileDataItem,
+            scrollTreeToItem: Utils.focusItemOnTree,
+        });
+    }
+
+    // The file browser as a PICKER: the accepted item goes to the callback instead
+    // of being opened. Same navigation, history and bookmarks; no fileActions, so a
+    // plain Enter accepts rather than looking the extension up in the action map.
+    // The callback is also called with null if the prompt is dismissed - the first
+    // call is the answer either way.
+    browse_ss.pick_file = function (onPick, placeholder) {
+        browse_ss({
+            startPath: SsFiles.getStartPath(),
+            historyKey: SsFiles.historyKey,
+            currentItem: SsFiles.getCurrentItem,
+            placeholder: placeholder ?? SsFiles.placeholder,
+            maxHistory: SsFiles.maxHistory,
+            openItem: (item) => onPick(item.uri),
+            onClose: () => onPick(null),
             queryItemPath: SsFiles.getFileDataItem,
             scrollTreeToItem: Utils.focusItemOnTree,
         });

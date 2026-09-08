@@ -109,6 +109,17 @@ var DEFAULT_ACE_CONFIG = {
 };
 
 /**
+ * The diff view's own prefs (editor-swap.js's toggleDiffSaved/diffAgainstFile):
+ * side-by-side or one editor with the other side drawn into it, and which way
+ * round the split is (0-3, rotated a quarter turn at a time by the
+ * rotateDiffLayout editor command). Written by those editor commands themselves,
+ * never by a settings page - hence a storage key of its own rather than a corner
+ * of aceConfig, whose two mergeAceConfig copies whitelist the keys they carry and
+ * would drop these on every round trip.
+ */
+var DEFAULT_DIFF_PREFS = { mode: "split", layout: 0 };
+
+/**
  * What Enter does in the browse prompt (ext-browse_ss.js) for a given file
  * EXTENSION, when it should differ from SAS Studio's own idea of the file type
  * (chrome.storage.local's `browseFileActions`, seeded onto __ssExt by sw.js).

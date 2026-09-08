@@ -520,6 +520,351 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     dirtyGutter,
   );
 
+  // -- Split diff inside the tab ---------------------------------------------------
+  // Needs a REAL code tab, not a detached adapter: the action works off the focused
+  // editor, which is found through the text-viewer registry and the tab objects, and
+  // the second editor is put into that tab's own pane. The baseline is the same
+  // _savedLines the gutter above uses, so the edits made here are what it has to
+  // find - and toggling off has to give the pane and the editor back.
+  const splitDiff = await page.evaluate(async () => {
+    const tab = window.appDMS.tabs.getFocusedTab();
+    const adapter = tab && tab.editor && tab.editor.editor;
+    if (!adapter || !adapter._isAceEditorAdapter) return { found: false };
+    const ed = adapter.aceEditor;
+    ed.focus();
+    // The fixture is just "the first .sas file in the tree" and can be a single
+    // line, which leaves no unchanged row to separate two changes - so pad it and
+    // make THAT the baseline (setText at the end puts the file's own text back and
+    // re-baselines with it).
+    const original = adapter.getText();
+    const paneWidth = ed.container.getBoundingClientRect().width;
+    ed.session.doc.insertFullLines(0, new Array(10).fill("* ssext smoke diff pad;"));
+    adapter.markSaved();
+    const baseline = adapter.getText();
+    ed.session.doc.insert({ row: 1, column: 0 }, "* ssext smoke diff head;\n");
+    ed.session.doc.insert({ row: 8, column: 0 }, "* ssext smoke diff tail;\n");
+
+    // EDITOR commands, not ss-ext actions - they need an editor to mean anything,
+    // and being commands is what makes them bindable/mappable. execCommand doesn't
+    // hand back the promise, so wait on the shared chain they serialize through
+    // (the same one toggle()/browse() use).
+    const commands = ["toggleDiffSaved", "diffAgainstFile", "toggleDiffMode"].filter(
+      (n) => ed.commands.commands[n],
+    ).length;
+    ed.execCommand("toggleDiffSaved");
+    await window.__ssExt._pending;
+    const view = adapter._diffView;
+    const rect = (el) => {
+      const r = el.getBoundingClientRect();
+      return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) };
+    };
+    const state = {
+      found: true,
+      commands,
+      attached: !!view,
+      chunks: view ? view.chunks.length : 0,
+      chunkRows: view ? view.chunks.map((c) => `${c.new.start.row}-${c.new.end.row}`) : [],
+      // Two real editors, side by side in the tab's own pane - not an overlay.
+      twoEditors: !!view && view.editorA !== view.editorB && view.editorB === ed,
+      otherText: view && view.editorA.getValue(),
+      otherIsBaseline: !!view && view.editorA.getValue() === baseline,
+      otherReadOnly: !!view && view.editorA.getOption("readOnly"),
+      otherMode: view && view.editorA.session.$modeId,
+      liveMode: ed.session.$modeId,
+      otherInPane: !!view && view.editorA.container.parentNode === ed.container.parentNode,
+      // Which file the other side is, kept on screen (it used to be a toast).
+      label: adapter._diffLabel && adapter._diffLabel.textContent,
+      labelOnOtherPane: !!adapter._diffLabel && adapter._diffLabel.parentNode === adapter._diffPane.side,
+      sideBySide: null,
+      // The commands are always registered (so they stay bindable/mappable) and
+      // share Alt-Down with ace's own movelinesdown, declining while no diff is
+      // open - ace walks the key's commands newest-first until one runs.
+      navBound: []
+        .concat(ed.commands.commandKeyBinding["alt-down"] || [])
+        .map((c) => c.name)
+        .join(),
+      navAvailable: ed.commands.canExecute(ed.commands.commands.gotoNextDiff, ed),
+    };
+    if (view) {
+      const a = rect(view.editorA.container);
+      const b = rect(ed.container);
+      // Neither is collapsed, and they don't overlap.
+      state.sideBySide = a.width > 50 && b.width > 50 && a.right <= b.left + 1;
+      state.rects = { a, b, paneWidth };
+    }
+
+    // Stepping must move the caret in the LIVE editor: ace's own gotoNext drives
+    // editorA - the other side - and reads that side's row numbers.
+    ed.gotoLine(1, 0);
+    state.cursorBefore = ed.getCursorPosition().row;
+    ed.execCommand("gotoNextDiff");
+    state.cursorAfterNext = ed.getCursorPosition().row;
+    ed.execCommand("gotoNextDiff");
+    state.cursorAfterNext2 = ed.getCursorPosition().row;
+    ed.execCommand("gotoPreviousDiff");
+    state.cursorAfterPrev = ed.getCursorPosition().row;
+    // Past the last change it stays put rather than wrapping or throwing.
+    ed.execCommand("gotoNextDiff");
+    ed.execCommand("gotoNextDiff");
+    state.cursorAtEnd = ed.getCursorPosition().row;
+
+    // Rotate: a quarter turn at a time, other side first, and the choice is
+    // persisted. Layout 0 is left|right, so 1 must be top|bottom.
+    const pane = () => adapter._diffPane.parent.style.flexDirection;
+    state.layout0 = pane();
+    ed.execCommand("rotateDiffLayout");
+    state.layout1 = pane();
+    const rects1 = [adapter._diffView.editorA.container, ed.container].map((el) =>
+      el.getBoundingClientRect(),
+    );
+    state.stacked = rects1[0].bottom <= rects1[1].top + 1 && rects1[0].height > 20;
+    ed.execCommand("rotateDiffLayout");
+    state.layout2 = pane();
+    ed.execCommand("rotateDiffLayout");
+    ed.execCommand("rotateDiffLayout");
+    state.layout4 = pane(); // all the way round
+    state.layoutSaved = window.__ssExt.diffPrefs.layout;
+
+    // Switch pane: the other editor takes the focus, and gives it back.
+    ed.execCommand("switchDiffPane");
+    state.otherFocused = adapter._diffView.editorA.isFocused();
+    adapter._diffView.editorA.execCommand("switchDiffPane"); // its own command set
+    state.liveFocusedAgain = ed.isFocused();
+
+    // Inline: same diff, one editor, no second pane - and the mode is remembered.
+    ed.execCommand("toggleDiffMode");
+    await window.__ssExt._pending;
+    const inline = adapter._diffView;
+    state.inline = {
+      mode: window.__ssExt.diffPrefs.mode,
+      attached: !!inline,
+      isInline: !!inline && !!inline.inlineDiffEditor,
+      onLiveEditor: !!inline && inline.activeEditor === ed,
+      chunks: inline ? inline.chunks.length : 0,
+      noSecondPane: !adapter._diffPane && !document.querySelector(".ssext-diff-side"),
+      label: adapter._diffLabel && adapter._diffLabel.textContent,
+      labelOnLiveEditor: !!adapter._diffLabel && adapter._diffLabel.parentNode === ed.container,
+      // Inline shares the live editor's bottom-right corner with the real status
+      // bar, so the two must not sit on top of each other.
+      labelClearsStatusBar: (() => {
+        const a = adapter._diffLabel && adapter._diffLabel.getBoundingClientRect();
+        const b = adapter._statusEl && adapter._statusEl.getBoundingClientRect();
+        return !!a && !!b && a.bottom <= b.top + 1;
+      })(),
+      fullWidth: Math.abs(ed.container.getBoundingClientRect().width - paneWidth) < 2,
+    };
+    // One run per flip, both ways: the prefs used to round-trip through aceConfig,
+    // whose mergeAceConfig whitelist dropped them, so the value read here was stale
+    // and inline -> split took two runs.
+    ed.execCommand("toggleDiffMode"); // back to split, which is where the rest is
+    await window.__ssExt._pending;
+    state.backToSplit = !!adapter._diffPane && window.__ssExt.diffPrefs.mode === "split";
+
+    ed.execCommand("toggleDiffSaved");
+    await window.__ssExt._pending;
+    state.detached = !adapter._diffView;
+    state.navStillRegistered = !!ed.commands.commands.gotoNextDiff;
+    // ...and with no diff open they decline, so Alt-Down is move-lines again.
+    state.navUnavailable = !ed.commands.canExecute(ed.commands.commands.gotoNextDiff, ed);
+    state.otherGone = !document.querySelector(".ssext-diff-side");
+    state.labelGone = !document.querySelector(".ssf-diff-label");
+    state.paneRestored = Math.abs(ed.container.getBoundingClientRect().width - paneWidth) < 2;
+
+    // Leave the tab as it was found: the file's own text, and that as the baseline.
+    adapter.setText(original);
+    adapter._refreshDirtyGutter();
+    state.dirtyAfter = (adapter._dirtyRows || []).length;
+    state.textRestored = adapter.getText() === original;
+    return state;
+  });
+  check(
+    "split diff: the tab splits in two, the other side holding the saved text",
+    splitDiff.found &&
+      splitDiff.commands === 3 && // the toggles are editor-scoped commands
+      splitDiff.attached &&
+      splitDiff.twoEditors &&
+      splitDiff.otherInPane &&
+      splitDiff.sideBySide &&
+      splitDiff.otherIsBaseline &&
+      splitDiff.otherReadOnly &&
+      splitDiff.otherMode === splitDiff.liveMode &&
+      /last saved/.test(splitDiff.label || "") &&
+      splitDiff.labelOnOtherPane,
+    splitDiff,
+  );
+  check(
+    "split diff: the changes are found",
+    splitDiff.found &&
+      splitDiff.chunks === 2 &&
+      splitDiff.navAvailable &&
+      // both commands on the key, ours last (ace tries them newest-first)
+      splitDiff.navBound === "movelinesdown,gotoNextDiff",
+    splitDiff,
+  );
+  check(
+    "split diff: Alt+Down/Alt+Up move the caret in the live editor",
+    splitDiff.found &&
+      splitDiff.cursorBefore === 0 &&
+      // The chunk rows, in order, then back again - and no wrap past the last.
+      splitDiff.cursorAfterNext === 1 &&
+      splitDiff.cursorAfterNext2 === 8 &&
+      splitDiff.cursorAfterPrev === 1 &&
+      splitDiff.cursorAtEnd === 8,
+    splitDiff,
+  );
+  // Written through relay.js under its own storage key: aceConfig is rebuilt from a
+  // key whitelist on the way back in, which silently dropped these.
+  for (let i = 0; i < 20 && splitDiff.layoutStored === undefined; i++) {
+    // postMessage -> relay.js -> storage.set is a couple of hops; poll rather than
+    // race it.
+    splitDiff.layoutStored = await sw.evaluate(() =>
+      chrome.storage.local.get("diffPrefs").then((r) => (r.diffPrefs ? r.diffPrefs.layout : undefined)),
+    );
+    if (splitDiff.layoutStored === undefined) await page.waitForTimeout(200);
+  }
+  check(
+    "split diff: the layout rotates a quarter turn at a time, and is remembered",
+    splitDiff.found &&
+      splitDiff.layout0 === "row" &&
+      splitDiff.layout1 === "column" &&
+      splitDiff.stacked &&
+      splitDiff.layout2 === "row-reverse" &&
+      splitDiff.layout4 === "row" &&
+      splitDiff.layoutSaved === 0 && // four quarter turns, back where it started
+      splitDiff.layoutStored === 0, // ...and it reached chrome.storage, not aceConfig
+    splitDiff,
+  );
+  check(
+    "split diff: focus switches between the two panes",
+    splitDiff.found && splitDiff.otherFocused && splitDiff.liveFocusedAgain,
+    splitDiff,
+  );
+  check(
+    "diff mode: toggling to inline keeps the diff in one editor, and is remembered",
+    splitDiff.found &&
+      splitDiff.inline &&
+      splitDiff.inline.mode === "inline" &&
+      splitDiff.inline.attached &&
+      splitDiff.inline.isInline &&
+      splitDiff.inline.onLiveEditor &&
+      splitDiff.inline.chunks === 2 &&
+      splitDiff.inline.noSecondPane &&
+      splitDiff.inline.fullWidth &&
+      /last saved/.test(splitDiff.inline.label || "") &&
+      splitDiff.inline.labelOnLiveEditor &&
+      splitDiff.inline.labelClearsStatusBar &&
+      splitDiff.backToSplit,
+    splitDiff,
+  );
+  check(
+    "split diff: toggling it off restores the pane and the editor",
+    splitDiff.found &&
+      splitDiff.detached &&
+      splitDiff.navStillRegistered &&
+      splitDiff.navUnavailable &&
+      splitDiff.otherGone &&
+      splitDiff.labelGone &&
+      splitDiff.paneRestored &&
+      splitDiff.dirtyAfter === 0 &&
+      splitDiff.textRestored,
+    splitDiff,
+  );
+
+  // -- ...and against another file, picked in the browse prompt ---------------------
+  // The picker is the file browser with its openItem swapped for a callback, so the
+  // whole path is exercised: prompt -> uri -> GET on the workspace endpoint -> the
+  // fetched text as the other side. It picks the current tab's own file (row one of
+  // the empty prompt, "Current tab"), which with a local edit in the editor is a
+  // real diff and lets the fetched text be checked against what the file holds.
+  const fileTabUri = await page.evaluate(() => {
+    const tab = window.appDMS.tabs.getFocusedTab();
+    const adapter = tab && tab.editor && tab.editor.editor;
+    if (!adapter || !adapter._isAceEditorAdapter) return null;
+    adapter.aceEditor.focus();
+    adapter.aceEditor.session.doc.insert({ row: 0, column: 0 }, "* ssext smoke file diff;\n");
+    adapter.aceEditor.execCommand("diffAgainstFile");
+    return tab.uri;
+  });
+  if (!fileTabUri) {
+    check("file diff: no code tab to run it from", false, { fileTabUri });
+  } else {
+    const promptOpen = await page
+      .waitForFunction(() => window._browseSsLastPrompt?.popup?.data?.length > 0, null, { timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
+    // Type the tab's own path: the prompt reopens wherever it was last left, and an
+    // exact name match ranks first, so row one is that file. Deliberately not an
+    // emptied box - done() remembers whatever is typed as the path to reopen at,
+    // and "" would leave every later browse prompt on the saved list.
+    if (promptOpen) {
+      await page.evaluate((uri) => window._browseSsLastPrompt.cmdLine.setValue(uri, 1), fileTabUri);
+      await page
+        .waitForFunction(
+          (uri) => window._browseSsLastPrompt?.popup?.data?.[0]?.uri === uri,
+          fileTabUri,
+          { timeout: 10000 },
+        )
+        .catch(() => {});
+    }
+    const pickRow = await page.evaluate(() => {
+      const p = window._browseSsLastPrompt;
+      if (!p || !p.popup.data?.length) return null;
+      if (p.popup.getRow() < 0) p.popup.setRow(0);
+      const d = p.popup.getData(p.popup.getRow());
+      return d && { uri: d.uri, meta: d.meta };
+    });
+    if (pickRow) await page.keyboard.press("Enter");
+    const opened = await page
+      .waitForFunction(() => !!window.appDMS.tabs.getFocusedTab().editor.editor._diffView, null, {
+        timeout: 20000,
+      })
+      .then(() => true)
+      .catch(() => false);
+    const fileDiff = await page.evaluate(async (opened) => {
+      const adapter = window.appDMS.tabs.getFocusedTab().editor.editor;
+      const view = adapter._diffView;
+      const state = {
+        attached: !!view,
+        chunks: view ? view.chunks.length : 0,
+        // The other side is the file as the SERVER has it, not the edited buffer.
+        otherIsFile: !!view && view.editorA.getValue() === (adapter._savedLines || []).join("\n"),
+        readOnly: !!view && view.editorA.getOption("readOnly"),
+        // The path, on the status line rather than in a toast that scrolls away.
+        label: adapter._diffLabel && adapter._diffLabel.textContent,
+      };
+      if (opened) {
+        adapter.aceEditor.execCommand("diffAgainstFile"); // the same command closes it
+        await window.__ssExt._pending;
+      }
+      state.closed = !adapter._diffView && !document.querySelector(".ssext-diff-side");
+      adapter.aceEditor.undo();
+      adapter._refreshDirtyGutter();
+      state.dirtyAfter = (adapter._dirtyRows || []).length;
+      return state;
+    }, opened);
+    // Whatever happened, don't leave a prompt standing for the blocks below.
+    if (await page.evaluate(() => !!document.querySelector(".ace_browse_ss_container"))) {
+      await page.keyboard.press("Escape");
+    }
+    check(
+      "file diff: the picked file is fetched and shown as the other side",
+      promptOpen &&
+        pickRow &&
+        pickRow.uri === fileTabUri &&
+        fileDiff.attached &&
+        fileDiff.chunks === 1 &&
+        fileDiff.otherIsFile &&
+        fileDiff.readOnly &&
+        (fileDiff.label || "").includes(fileTabUri),
+      { promptOpen, pickRow, fileTabUri, ...fileDiff },
+    );
+    check(
+      "file diff: running the action again closes it",
+      fileDiff.closed && fileDiff.dirtyAfter === 0,
+      fileDiff,
+    );
+  }
+
   // -- SAS language server (LSP) ---------------------------------------------------
   // Activation above already swapped any open SAS tabs to Ace (ace/mode/sas
   // triggers ensureLsp() from the adapter constructor) - poll for the worker/

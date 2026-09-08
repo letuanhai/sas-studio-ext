@@ -119,6 +119,12 @@
         },
         readOnly: true,
       });
+      // Diff commands: registered on every editor, whether or not a diff is open,
+      // so they can be bound from ace's settings menu or mapped from a vimrc. They
+      // decline (isAvailable) while there is no diff, which is what leaves their
+      // Alt-Up/Alt-Down keys doing what they did before.
+      this.aceEditor.commands.addCommands(diffEditorCommands(this));
+
       // Let SAS Studio handle F3/F4 instead of Ace's find-next/find-prev.
       this.aceEditor.commands.bindKey("F3", null);
       this.aceEditor.commands.bindKey("F4", null);
@@ -403,6 +409,8 @@
     dispose() {
       this._disposed = true;
       clearTimeout(this._dirtyTimer);
+      // An attached diff view holds layers of its own inside this editor.
+      if (this._diffView) closeDiff(this);
       if (this._lspRegistered && ssExt._lspProvider) {
         // ace-linters' unregisterEditor(editor, cleanupSession) closes the
         // document server-side - must run before aceEditor.destroy() below.
@@ -556,6 +564,7 @@
     libPath: null, // stashed by loadNewAce() so the palette's editor-toggle command can call toggle(ssExt.libPath)
     aceConfig: null, // seeded by sw.js (tabs.onUpdated) and refreshed by applyAceConfig()
     darkMode: "off", // "off" | "on" | "system", seeded by sw.js - see prefersDarkTheme()
+    diffPrefs: null, // { mode, layout } for the diff view, seeded by sw.js, written by its editor commands
     activate,
     deactivate,
     toggle,
@@ -563,6 +572,9 @@
     browse,
     commandPalette,
     showVimMappings,
+    toggleDiffSaved,
+    diffAgainstFile,
+    toggleDiffMode,
     applySnippets,
     applyAceConfig,
     AceEditorAdapter, // exposed mainly for test/debug (smoke.js probes config seeding directly)
@@ -2777,6 +2789,364 @@
     }
 
     return null;
+  }
+
+  /** The adapter owning the focused Ace editor, if any (see focusedAceEditor). */
+  function focusedAdapter() {
+    const editor = focusedAceEditor();
+    return (editor && allAdapters().find((a) => a.aceEditor === editor)) || null;
+  }
+
+  // -- Diff in the current tab -----------------------------------------------------
+  // ace's own diff views, INSIDE the focused tab rather than in an overlay, so the
+  // tab keeps its caret, LSP registration and vim handler either way. Two shapes:
+  // "split" puts a read-only editor for the other side beside the live one (the
+  // pane is flexed and can be rotated a quarter turn at a time), "inline" draws the
+  // other side into the live editor's own layers. Two sources: the last-saved text
+  // (_savedLines, the baseline the unsaved-change gutter already keeps, so nothing
+  // is re-read from the workspace) and any other file, picked in the browse prompt
+  // and read from the workspace endpoint. Both prefs are persisted, so the diff
+  // opens the way it was last left.
+  // Quarter turns of the split, other side first: left|right -> top|bottom -> the
+  // two mirrored. flex-direction is the whole implementation.
+  const DIFF_LAYOUTS = ["row", "column", "row-reverse", "column-reverse"];
+
+  // ssExt.diffPrefs is seeded by sw.js from chrome.storage.local's own `diffPrefs`
+  // key. Deliberately NOT a corner of aceConfig: that object is rebuilt from a
+  // fixed key whitelist by sw.js's and options.js's mergeAceConfig, so these two
+  // were dropped on every round trip and pushed back into the page stale - which
+  // is what made the mode toggle need two runs from inline and the layout rotation
+  // start from 0 every time (and never persist).
+  const diffPrefs = () => (ssExt.diffPrefs = Object.assign({ mode: "split", layout: 0 }, ssExt.diffPrefs));
+  const diffMode = () => (diffPrefs().mode === "inline" ? "inline" : "split");
+  const diffLayout = () => {
+    const n = diffPrefs().layout;
+    return typeof n === "number" ? ((n % DIFF_LAYOUTS.length) + DIFF_LAYOUTS.length) % DIFF_LAYOUTS.length : 0;
+  };
+
+  // relay.js is the only way from the MAIN world into chrome.storage. Nothing
+  // pushes this back at us, so the in-page object stays authoritative.
+  function persistDiffPrefs(changes) {
+    const prefs = Object.assign(diffPrefs(), changes);
+    window.postMessage({ __ssextDiffPrefs: prefs }, "*");
+  }
+
+  // Not the view's own gotoNext(): that one drives editorA - the OTHER side - and
+  // reads the chunk's old range, i.e. that side's row numbers, so it repainted the
+  // baseline's highlight and left the live caret where it was. Chunk starts in the
+  // NEW range, on the live editor, are the whole job.
+  function gotoDiffChunk(view, dir) {
+    const editor = view.activeEditor || view.editorB;
+    const rows = (view.chunks || []).map((c) => c.new.start.row);
+    const row = editor.selection.lead.row;
+    const target = dir > 0 ? rows.find((r) => r > row) : rows.filter((r) => r < row).pop();
+    if (target === undefined) return;
+    editor.gotoLine(target + 1, 0); // 1-based, and it scrolls the caret into view
+  }
+
+  // The four diff commands are EDITOR commands, registered once per editor and left
+  // there: a command that comes and goes with the view could not be bound from ace's
+  // settings menu or mapped from a vimrc (`nmap ]d <Cmd>gotoNextDiff`), which is the
+  // point of them being commands rather than SSF_TOOLS actions.
+  // `isAvailable` is what lets the nav pair keep Alt-Up/Alt-Down without stealing
+  // them: ace holds several commands per key and `CommandManager.exec` walks them
+  // newest-first until one runs, so with no diff open these decline and the keys go
+  // on doing what they did before (ace's own movelinesup/down). Taking the binding
+  // and giving it back by hand was the alternative, and removeCommand deletes a
+  // binding outright rather than restoring what it displaced.
+  function diffEditorCommands(adapter) {
+    const view = () => adapter._diffView;
+    const live = () => adapter.aceEditor;
+    return [
+      {
+        name: "gotoNextDiff",
+        description: "Goto next diff",
+        bindKey: { win: "Alt-Down", mac: "Option-Down" },
+        isAvailable: () => !!view(),
+        exec: () => gotoDiffChunk(view(), 1),
+        readOnly: true,
+      },
+      {
+        name: "gotoPreviousDiff",
+        description: "Goto previous diff",
+        bindKey: { win: "Alt-Up", mac: "Option-Up" },
+        isAvailable: () => !!view(),
+        exec: () => gotoDiffChunk(view(), -1),
+        readOnly: true,
+      },
+      {
+        name: "toggleDiffSaved",
+        description: "Toggle diff against last saved",
+        exec: toggleDiffSaved,
+        readOnly: true,
+      },
+      {
+        name: "diffAgainstFile",
+        description: "Toggle diff against another file…",
+        exec: diffAgainstFile,
+        readOnly: true,
+      },
+      {
+        name: "toggleDiffMode",
+        description: "Toggle diff split/inline",
+        exec: toggleDiffMode,
+        readOnly: true,
+      },
+      {
+        name: "switchDiffPane",
+        description: "Switch focus to other diff pane",
+        // The inline view has one pane, so there is nothing to switch to.
+        isAvailable: () => !!adapter._diffPane,
+        exec: () => (live().isFocused() ? view().editorA : live()).focus(),
+        readOnly: true,
+      },
+      {
+        name: "rotateDiffLayout",
+        description: "Rotate split diff layout",
+        isAvailable: () => !!adapter._diffPane,
+        exec: () => {
+          persistDiffPrefs({ layout: (diffLayout() + 1) % DIFF_LAYOUTS.length });
+          applyDiffLayout(adapter);
+        },
+        readOnly: true,
+      },
+    ];
+  }
+
+  // ace.edit() was given the tab's own pane node, so the editor IS that element and
+  // there is nowhere inside it to put a second one: the second editor goes in beside
+  // it and the parent is flexed. Everything touched is an inline style, recorded
+  // here and put back by restore().
+  function splitTabPane(adapter) {
+    const live = adapter.aceEditor.container;
+    const parent = live.parentNode;
+    const saved = {
+      display: parent.style.display,
+      direction: parent.style.flexDirection,
+      width: live.style.width,
+      height: live.style.height,
+    };
+    const side = document.createElement("div");
+    side.className = "ssext-diff-side";
+    parent.style.display = "flex";
+    parent.insertBefore(side, live); // the other side is pane one, see DIFF_LAYOUTS
+    return {
+      side,
+      parent,
+      restore() {
+        side.remove();
+        parent.style.display = saved.display;
+        parent.style.flexDirection = saved.direction;
+        live.style.width = saved.width;
+        live.style.height = saved.height;
+      },
+    };
+  }
+
+  function applyDiffLayout(adapter) {
+    const pane = adapter._diffPane;
+    if (!pane) return;
+    const direction = DIFF_LAYOUTS[diffLayout()];
+    pane.parent.style.flexDirection = direction;
+    const sideways = direction.indexOf("row") === 0;
+    [pane.side, adapter.aceEditor.container].forEach((el) => {
+      el.style.width = sideways ? "50%" : "100%";
+      el.style.height = sideways ? "100%" : "50%";
+    });
+    adapter._diffView.editorA.resize(true);
+    adapter.aceEditor.resize(true);
+  }
+
+  // Which file the other side is, kept on screen for as long as the diff is - a
+  // toast said it once and was gone. The stock status bar rewrites its element's
+  // textContent on every render (ace-patches.js's updateStatus), so this is a
+  // second element on the same status line, pinned bottom-LEFT of whichever pane
+  // holds the other side: the split's read-only editor, or the live one inline.
+  function showDiffLabel(adapter, text) {
+    const host = adapter._diffPane ? adapter._diffPane.side : adapter.aceEditor.container;
+    const el = document.createElement("div");
+    el.className = "ssf-ace-statusbar ssf-diff-label";
+    // Bottom-right, like the status bar - and the split's read-only pane has no
+    // status bar of its own, so there it IS the status line. Inline shares the
+    // live editor's corner with the real one, so it sits a line above instead of
+    // on top of it.
+    el.style.cssText =
+      "position:absolute;right:6px;z-index:9;opacity:0.65;pointer-events:none;" +
+      "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:calc(100% - 12px);" +
+      (adapter._diffPane ? "bottom:2px" : "bottom:calc(2px + 1.4em)");
+    el.style.fontSize = cssFontSize(getAceConfig().options && getAceConfig().options.fontSize);
+    el.textContent = "◧ " + text;
+    host.appendChild(el);
+    adapter._diffLabel = el;
+  }
+
+  function closeDiff(adapter) {
+    try {
+      adapter._diffView.detach();
+    } catch (e) {
+      console.error("[SS Ext] diff view detach failed:", e);
+    }
+    adapter._diffView = null;
+    if (adapter._diffLabel) adapter._diffLabel.remove();
+    if (adapter._diffTeardown) adapter._diffTeardown();
+    adapter._diffLabel = adapter._diffTeardown = adapter._diffPane = null;
+    adapter.aceEditor.resize(true);
+  }
+
+  /**
+   * Show `text` as the other side of a diff on the adapter's editor. `label` names
+   * where it came from and stays on screen with it.
+   */
+  function openDiff(adapter, text, label) {
+    const live = adapter.aceEditor;
+    const diff = ace.require("ace/ext/diff");
+    // createDiffView rather than `new SplitDiffView`/`new InlineDiffView`: the
+    // constructors leave the module's dummy provider in place, which answers every
+    // diff with no chunks at all - the factory is the only thing that installs the
+    // real one.
+    let view;
+    if (diffMode() === "inline") {
+      // inline "b": the live, still-editable text stays the active editor and only
+      // the other side's layers are drawn in.
+      view = diff.createDiffView({ editorB: live, inline: "b", valueA: text });
+      // That side's session is built bare (new EditSession(valueA)), so without this
+      // its rows render unhighlighted next to the live ones.
+      view.sessionA.setMode(live.session.$modeId);
+    } else {
+      const pane = splitTabPane(adapter);
+      const other = ace.edit(
+        pane.side,
+        Object.assign({}, getAceConfig().options, {
+          mode: live.session.$modeId, // the other side is the same file type
+          theme: live.getTheme(),
+          readOnly: true, // it is a reference, not a second buffer to lose edits in
+          value: text,
+        }),
+      );
+      view = diff.createDiffView({ editorA: other, editorB: live });
+      // The same commands on the read-only side, so switching back (and stepping
+      // the diff) works from there too - it is an editor of its own, with its own
+      // command set.
+      other.commands.addCommands(diffEditorCommands(adapter));
+      adapter._diffPane = pane;
+      adapter._diffTeardown = () => {
+        other.destroy();
+        pane.restore();
+      };
+    }
+    // Nothing in the view computes a first diff - onInput is only reached from an
+    // edit (or a fold/wrap realign), so without this the freshly opened diff shows
+    // no chunks at all until the next keystroke.
+    view.onInput();
+    adapter._diffView = view;
+    adapter._diffOther = text; // kept so a mode flip can rebuild without re-reading
+    adapter._diffLabelText = label || adapter._diffLabelText;
+    if (adapter._diffPane) applyDiffLayout(adapter);
+    showDiffLabel(adapter, adapter._diffLabelText);
+    // The caret belongs in the live editor - after a pick in the browse prompt the
+    // focus is wherever the prompt left it, and the nav keys are bound HERE.
+    live.focus();
+    return view;
+  }
+
+  /** The focused adapter, with the ace lib loaded - or null, having said why. */
+  async function diffTarget() {
+    if (!ssExt.libPath) {
+      console.error("[SS Ext] diff: no libPath known yet - can't load the Ace library");
+      return null;
+    }
+    await loadNewAce(ssExt.libPath); // ext-diff.js comes with it (the differ is already used)
+    // An open diff can always be reached, even from the read-only side or with the
+    // focus lost entirely - otherwise the split would be stuck open.
+    const adapter = focusedAdapter() || allAdapters().find((a) => a._diffView);
+    if (!adapter) {
+      // Nothing focused, or the Ace replacement is off - either way there is no
+      // adapter, and so no editor to split and no baseline to diff against.
+      window.__ssf?.showNotification?.({ message: "Diff: focus an Ace editor first", isError: true });
+    }
+    return adapter;
+  }
+
+  async function doToggleDiffSaved() {
+    const adapter = await diffTarget();
+    if (!adapter) return;
+    if (adapter._diffView) return closeDiff(adapter);
+    openDiff(adapter, (adapter._savedLines || []).join("\n"), "last saved");
+  }
+
+  async function doDiffAgainstFile() {
+    const adapter = await diffTarget();
+    if (!adapter) return;
+    if (adapter._diffView) return closeDiff(adapter);
+
+    // Deliberately NOT awaited: the prompt waits for a person, and the _pending
+    // chain this runs in serializes every other ssExt action (toggle, browse, the
+    // palette), so awaiting it here would leave them all blocked for as long as the
+    // prompt stands open. browse() hands off the same way.
+    ssExt.newLib.ace
+      .require("ace/ext/browse_ss")
+      .browse_ss.pick_file(
+        (uri) => uri && openPickedFileDiff(adapter, uri),
+        "Select the file to diff the current one against",
+      );
+  }
+
+  async function openPickedFileDiff(adapter, uri) {
+    // The tab may have been closed, or another diff opened, while the prompt was up.
+    if (adapter._disposed || adapter._diffView) return;
+    let text;
+    try {
+      text = await fetchWorkspaceFile(uri);
+    } catch (e) {
+      console.error("[SS Ext] diff: could not read", uri, e);
+      window.__ssf?.showNotification?.({ message: `Diff: could not read ${uri}`, isError: true });
+      return;
+    }
+    if (adapter._disposed || adapter._diffView) return; // ...or while it was fetched
+    openDiff(adapter, text, uri);
+  }
+
+  // Flips the persisted shape, and rebuilds an open diff in it - from the text kept
+  // on the adapter, so the other file isn't fetched again.
+  async function doToggleDiffMode() {
+    persistDiffPrefs({ mode: diffMode() === "inline" ? "split" : "inline" });
+    const adapter = ssExt.newAceLoaded && (focusedAdapter() || allAdapters().find((a) => a._diffView));
+    if (!adapter || !adapter._diffView) return;
+    const text = adapter._diffOther;
+    const label = adapter._diffLabelText;
+    closeDiff(adapter);
+    openDiff(adapter, text, label);
+  }
+
+  // GET of the same workspace URL saveTextViewer POSTs to. Like every other
+  // session-bound request it queues behind a running program (ss-fixes' busy notice
+  // says so), which is why nothing here has its own timeout.
+  function fetchWorkspaceFile(uri) {
+    const url =
+      appDMS.baseURL +
+      "/sasexec/sessions/" +
+      appDMS.sessionId +
+      "/workspace/" +
+      encodeValue(uri, false, "/", false);
+    return new Promise((resolve, reject) =>
+      dojo.xhrGet({ url, handleAs: "text", preventCache: true, load: resolve, error: reject }),
+    );
+  }
+
+  // All three serialized through the same _pending chain as toggle()/browse()/commandPalette().
+  function toggleDiffSaved() {
+    ssExt._pending = (ssExt._pending || Promise.resolve()).then(doToggleDiffSaved, doToggleDiffSaved);
+    return ssExt._pending;
+  }
+
+  function diffAgainstFile() {
+    ssExt._pending = (ssExt._pending || Promise.resolve()).then(doDiffAgainstFile, doDiffAgainstFile);
+    return ssExt._pending;
+  }
+
+  function toggleDiffMode() {
+    ssExt._pending = (ssExt._pending || Promise.resolve()).then(doToggleDiffMode, doToggleDiffMode);
+    return ssExt._pending;
   }
 
   // -- Completion popup sizing ---------------------------------------------------

@@ -2356,5 +2356,13 @@ Add a prefix to the path for different option:
   }
 
   // runFocus: "app" | "log" | "none", live-assignable (see runFocusMode above).
-  window.__ssf = { init, run, saveFocusedFileAtPath, copyText, copyTextWithNotice, runFocus: "log" };
+  window.__ssf = {
+    init,
+    run,
+    saveFocusedFileAtPath,
+    copyText,
+    copyTextWithNotice,
+    showNotification, // editor-swap.js has no notifier of its own
+    runFocus: "log",
+  };
 })();
