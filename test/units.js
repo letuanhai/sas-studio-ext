@@ -472,6 +472,40 @@ assert.equal(semanticScope(undefined), "");
 
 console.log("PASS  semantic token scopes map onto themed ace scopes");
 
+// ...and the per-theme fallback for the scopes a theme still paints nothing for
+// (ace-chrome, for one, has no working .ace_support.ace_class rule).
+const semanticFallback = global.window.__ssExt._semanticFallback;
+
+{
+  // A theme that paints "support" and "variable" but nothing more specific:
+  // every unpainted scope borrows from its nearest painted ancestor.
+  const palette = { support: "#111", variable: "#222" };
+  const rules = semanticFallback.rules("ace-x", (s) => palette[s] || null);
+  const ruleFor = (scope) =>
+    rules.find((r) => r.includes(`:where(.ace_${scope.split(".").join(".ace_")})`));
+  assert.ok(ruleFor("support.class").endsWith("{ color: #111; }"));
+  // ...but a theme that paints constant.library (what ace's lua mode gives `os`)
+  // lends that to support.class ahead of the ancestor, so `sas` matches `os`.
+  const green = semanticFallback.rules("ace-x", (s) =>
+    s === "constant.library" ? "#0f0" : palette[s] || null,
+  );
+  assert.ok(
+    green
+      .find((r) => r.includes(":where(.ace_support.ace_class)"))
+      .endsWith("{ color: #0f0; }"),
+  );
+  assert.ok(ruleFor("variable.other.property").endsWith("{ color: #222; }"));
+  // No ancestor painted at all -> the generic donor, here "variable".
+  assert.ok(ruleFor("typeParameter").endsWith("{ color: #222; }"));
+  // Scopes the theme does paint get no rule, so the theme keeps winning.
+  assert.equal(ruleFor("variable"), undefined);
+  assert.match(rules[0], /^:where\(\.ace-x\) :where\(\./);
+}
+// A theme that paints nothing we can borrow from emits nothing at all.
+assert.deepEqual(semanticFallback.rules("ace-y", () => null), []);
+
+console.log("PASS  semantic token fallback colours per theme");
+
 // ---------------------------------------------------------------------------
 // src/emmylua-worker.js - message ordering into the Lua language server. A
 // client may send a document's text as a didChange BEFORE its own didOpen (that

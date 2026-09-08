@@ -1401,6 +1401,7 @@
     const origSet = proto.setSemanticTokenMarkers;
     proto.setSemanticTokenMarkers = function (tokens) {
       const renderer = this.editor && this.editor.renderer;
+      ensureSemanticFallback(this.editor);
       if (tokens && tokens.tokens && renderer) {
         const first = renderer.getFirstVisibleRow() - SEMANTIC_TOKEN_MARGIN;
         const last = renderer.getLastVisibleRow() + SEMANTIC_TOKEN_MARGIN;
@@ -1473,6 +1474,101 @@
     return type;
   }
   ssExt._semanticScope = themedSemanticScope; // test/units.js
+
+  // ...which only helps for the scopes a theme happens to style, and that varies
+  // per theme: ace-chrome has no .ace_support.ace_class rule at all, so `sas` in
+  // a .lua file stayed plain-identifier black while `os` looked highlighted only
+  // because ace's lua mode hardcodes it as constant.library. So probe the live
+  // theme once and give every scope it leaves unpainted a fallback colour taken
+  // from the nearest ancestor scope it DOES paint (support.class -> support,
+  // variable.other.property -> variable), or from a generic donor when it paints
+  // none of them. :where() keeps the rule at zero specificity, so a theme that
+  // does style the scope always wins.
+  const SEMANTIC_FALLBACK_SCOPES = [
+    "support.class",
+    "support.class.namespace",
+    "support.type",
+    "support.type.enum",
+    "support.type.interface",
+    "support.function",
+    "support.function.member",
+    "support.function.decorator",
+    "storage.type.struct",
+    "storage.modifier",
+    "variable",
+    "variable.parameter",
+    "variable.other.property",
+    "variable.other.event",
+    "constant.language.enummember",
+    "constant.language.macro",
+    "constant.numeric",
+    "keyword.operator",
+    "string.regexp",
+    "typeParameter",
+  ];
+  const SEMANTIC_DONOR_SCOPES = ["support.function", "variable", "keyword", "constant"];
+  // Tried ahead of the ancestor walk, for the scopes where a different family is
+  // the better match: a library table is what `constant.library` is for, and it
+  // is what ace's own lua mode paints `os` with - so borrowing it is what puts
+  // `sas` and `os` in the same colour instead of merely both in A colour.
+  const SEMANTIC_SCOPE_DONORS = {
+    "support.class": ["constant.library"],
+    "support.class.namespace": ["constant.library"],
+  };
+  const semanticFallbackThemes = new Set();
+
+  const scopeSelector = (scope) => scope.split(".").map((s) => ".ace_" + s).join("");
+
+  // painted(scope) -> the colour the theme gives that scope, or null. Pure, so
+  // test/units.js can drive it with a fake theme.
+  function semanticFallbackRules(cls, painted) {
+    const donor = SEMANTIC_DONOR_SCOPES.map(painted).find(Boolean);
+    const rules = [];
+    for (const scope of SEMANTIC_FALLBACK_SCOPES) {
+      if (painted(scope)) continue;
+      const parts = scope.split(".");
+      let color = (SEMANTIC_SCOPE_DONORS[scope] || []).map(painted).find(Boolean) || null;
+      for (let n = parts.length - 1; n > 0 && !color; n--) color = painted(parts.slice(0, n).join("."));
+      color = color || donor;
+      if (color) rules.push(`:where(.${cls}) :where(${scopeSelector(scope)}) { color: ${color}; }`);
+    }
+    return rules;
+  }
+
+  function ensureSemanticFallback(editor) {
+    const theme = editor && editor.renderer && editor.renderer.theme;
+    const cls = theme && theme.cssClass;
+    if (!cls || !document.body || semanticFallbackThemes.has(cls)) return;
+    semanticFallbackThemes.add(cls);
+    const host = document.createElement("div");
+    host.className = "ace_editor " + cls;
+    host.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden";
+    document.body.appendChild(host);
+    const colorOf = (scope) => {
+      const span = document.createElement("span");
+      if (scope) span.className = scopeSelector(scope).replace(/\./g, " ").trim();
+      host.appendChild(span);
+      const c = window.getComputedStyle(span).color;
+      span.remove();
+      return c;
+    };
+    try {
+      const base = colorOf("");
+      const rules = semanticFallbackRules(cls, (scope) => {
+        const c = colorOf(scope);
+        return c && c !== base ? c : null;
+      });
+      if (rules.length) {
+        ace.require("ace/lib/dom").importCssString(rules.join("\n"), "ssExtSemanticFallback-" + cls);
+      }
+    } catch (e) {
+      console.warn("[SS Ext] could not build the semantic-token fallback colours:", e);
+    } finally {
+      host.remove();
+    }
+  }
+  // test/units.js
+  ssExt._semanticFallback = { rules: semanticFallbackRules, scopes: SEMANTIC_FALLBACK_SCOPES };
 
   // -- Library/table names for LSP completion -------------------------------------
   // Answered from SAS Studio's own library tree model - the same source

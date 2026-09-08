@@ -632,6 +632,23 @@ hardcodes them as `constant.library`/`support.function`.
 unknown and already-styled scopes pass through.
 It applies to both servers, since the two providers share one `SessionLanguageProvider` prototype.
 `themedSemanticScope` is on `ssExt._semanticScope` and unit-tested.
+That alias table only helps for the scopes a theme happens to style, and which those are varies per theme — ace-chrome,
+for one, has a `.ace_support.ace_class` rule with a **missing comma**, so the selector degrades to a descendant
+combinator and `support.class` is painted by nothing at all, which is why `sas` stayed identifier-black.
+So the same wrapper also calls `ensureSemanticFallback(editor)`, which probes the LIVE theme once per `theme.cssClass`
+(a hidden `<div class="ace_editor ace-chrome">` with one throwaway `<span>` per scope, compared against the editor's
+plain text colour) and emits one `:where(.<theme>) :where(.ace_support.ace_class) { color: … }` rule per scope it finds
+unpainted, borrowing the colour of a scope it does paint: `SEMANTIC_SCOPE_DONORS` first where a different family is the
+better match, then that scope's nearest painted ANCESTOR (`support.type.enum` → `support.type` → `support`,
+`variable.other.property` → `variable`), then a generic donor (`support.function`/`variable`/`keyword`/`constant`).
+`:where()` keeps the rule at zero specificity, so a theme that does style the scope always wins and the probe never has
+to decide who is right.
+`SEMANTIC_SCOPE_DONORS` currently has one entry, and it is the whole point of the exercise: `support.class` (and
+`.namespace`) borrow `constant.library`, which is what ace's own lua mode paints `os` with — so `sas` comes out the same
+green rather than merely coming out SOME colour.
+It matters that it is the same one because the marker span is a CHILD of the mode's own token span and therefore wins
+over it: with any other donor, fixing `sas` would have recoloured `os` away from its mode green.
+The pure rule builder is on `ssExt._semanticFallback.rules` and unit-tested against a fake palette.
 `test/smoke.js` guards (1) and (2), the `sas/getLibList` answer shape / id round-trip / refresh invalidation, that LSP
 entries actually rank above the text completers with no leaked duplicate completers, that another editor's words are
 offered (and follow its edits) while the requesting editor's own are not, the SAS context completer (step parsing incl.
