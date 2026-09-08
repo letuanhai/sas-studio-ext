@@ -1381,8 +1381,43 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   check("command palette recent commands are deduped", paletteHistoryState.deduped, paletteHistoryState);
   check("command palette (no focus) hides editor commands from history", paletteHistoryState.noEditorCommand, paletteHistoryState);
   check("command palette last-run command renders first", paletteHistoryState.firstRowIsRecent, paletteHistoryState);
+  // Rendering the list must not REORDER the stored history: getCommandHistory used
+  // to hand back the cached array itself and the MRU pass reversed it in place, so
+  // simply opening the palette flipped the list and the next accepted command
+  // persisted it that way round. Everything but the newest entry came back wrong.
+  const historyAfterRender = await page.evaluate(() => window._browseSsStore.get("SsCmdPaletteHistory"));
+  check(
+    "opening the palette leaves the stored history order alone",
+    JSON.stringify(historyAfterRender) ===
+      JSON.stringify(["ssext:browseTabs", "gotoline", "ssext:browseFiles"]),
+    { historyAfterRender },
+  );
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
   await page.waitForTimeout(300);
+
+  // ...and accepting a row records it in front of the others, in MRU order. This
+  // is the path the seeding above skips: the recording side, not the render.
+  await page.evaluate((lp) => {
+    window._browseSsStore.set("SsCmdPaletteHistory", ["ssext:browseTabs", "ssext:browseFiles"]);
+    window.__ssExt.commandPalette(lp);
+  }, libPath);
+  await page.waitForSelector(".ace_prompt_container", { timeout: 10000 });
+  await page.waitForTimeout(400);
+  await page.keyboard.type("Copy current tab URI", { delay: 15 });
+  await page.waitForTimeout(400);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(600);
+  const historyAfterAccept = await page.evaluate(() => window._browseSsStore.get("SsCmdPaletteHistory"));
+  check(
+    "accepting a palette row records it first, keeping the rest in order",
+    JSON.stringify(historyAfterAccept) ===
+      JSON.stringify(["ssext:copyCurrentTabUri", "ssext:browseTabs", "ssext:browseFiles"]),
+    { historyAfterAccept },
+  );
+  if (await page.evaluate(() => !!document.querySelector(".ace_prompt_container, .ace_browse_ss_container"))) {
+    await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27 })));
+    await page.waitForTimeout(300);
+  }
 
   // browseFiles action opens the browse_ss prompt (its own container).
   await page.evaluate(() => window.__ssf.run("browseFiles"));

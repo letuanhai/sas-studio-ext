@@ -139,6 +139,13 @@ Consequences of that split: manifest entries and `chrome.scripting` `files:` lis
   matching recents stay on top while typing too.
   History only reorders entries present in the current list, so editor-only commands in the history never appear in the
   global (no-editor-focused) palette.
+  `getCommandHistory()` returns a COPY of the cached list: `_browseSsStore.get()` hands back the live array and the MRU
+  pass reverses what it gets, so reversing in place flipped the cache on every palette OPEN and the next accepted
+  command persisted it that way round — everything below the newest entry came back in the wrong order, and flipped
+  again on the next open.
+  Measured against the real prompt;
+  the smoke test had missed it by seeding the history object instead of ever accepting a row, which is why it now does
+  both.
   A global in-page hotkey (default Alt+Shift+P, rebindable like any other `ss-fixes.js` action — see the
   `commandPalette` entry in `SSF_TOOLS`) opens the palette even with Ace not activated and nothing focused: `sw.js`'s
   `tabs.onUpdated` handler pre-injects `editor-swap.js` and seeds `ssExt.libPath`/`ssExt.userSnippets` on every

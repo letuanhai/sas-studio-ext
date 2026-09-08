@@ -3206,9 +3206,15 @@
   // window._browseSsStore relay as browse_ss history) so it survives "clear
   // site data". The store is created by ext-browse_ss.js, which loadNewAce()
   // loads before the palette can open.
+  // A COPY, not the cached array itself: store.get() hands back the live object,
+  // and buildPaletteEntries reverses what it gets. Reversing in place flipped the
+  // MRU order of the cache on every palette OPEN, and the next accept persisted
+  // that - so everything below the newest entry came back in the wrong order (and
+  // flipped again on the next open). Measured against the real prompt; the smoke
+  // test missed it by seeding the history object instead of accepting a row.
   function getCommandHistory() {
     const store = window._browseSsStore;
-    return store ? store.get(CMD_HISTORY_KEY) || [] : [];
+    return store ? (store.get(CMD_HISTORY_KEY) || []).slice() : [];
   }
 
   function recordCommandUse(command) {
