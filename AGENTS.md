@@ -19,9 +19,12 @@ Everything works by reverse-engineered runtime patching — no build step or bun
 (`./tools/build_lib.sh` only generates the gitignored `lib/`), and `test/smoke.js` is the test suite.
 
 A live SAS Studio instance for testing runs at `http://sas-ue.lan/SASStudio/38/`.
-**It is rate-limited: run only ONE `test/smoke.js` (or ad-hoc playwright script) against it at a time.** Parallel or
-rapid-fire runs exhaust its sessions and it starts returning HTTP 503 (then 000 while it restarts) for minutes —
-serialize your runs and, if you hit 503, wait for it to recover rather than retrying in a loop.
+**It is NOT rate-limited.** The 503s (then 000 while it restarts) that made runs look throttled were LEAKED WORKSPACE
+SESSIONS — every page load created one and nothing released it, until the Studio JVM was OOM-killed on a 995 MB box
+(see the session-leak note further down, which is the actual mechanism and the fix).
+`test/smoke.js` releases its own sessions now, so a run alongside someone browsing the app is fine;
+what still holds is the memory, not a limit: don't fan out several runs at once, and if it does 503, recover it with
+`~/.claude/skills/sas-dev-server/repair.sh` rather than retrying in a loop.
 
 **Do not commit (or push) until the user explicitly asks.** Make and verify changes in the working tree and wait;
 the user decides when — and to which branch — anything gets committed.
@@ -1301,9 +1304,10 @@ it went 6 → 8 `sas_x`, with it 8 → 8).
 It is called before each `page.reload()` (that session is abandoned by the reload) and from `shutdown()`, which both the
 normal exit and the `.catch` harness-error path run — the error path used to `process.exit(1)` without even closing the
 browser, leaking the whole headless Chromium and, with its 10 s pings, a session the timeout could never reap.
-Two rules for anything else automating this server: **one browser client against sas-ue at a time**
-(`ssh root@sas-ue.lan 'pgrep -x sas_x | wc -l'` before and after a run — the count must match), and **only ever delete
-session ids your own run created**.
+Two rules for anything else automating this server: **one AUTOMATED client against sas-ue at a time**
+(`ssh root@sas-ue.lan 'pgrep -x sas_x | wc -l'` before and after a run — the count must match; a person with the app
+open in a browser is not a problem, and a run alongside one is fine), and **only ever delete session ids your own run
+created**.
 That endpoint accepts any id from any page, so enumerating and sweeping would kill a colleague's live session mid-edit.
 If it does 503, `~/.claude/skills/sas-dev-server/repair.sh` recovers it in ~10 s;
 don't reboot.
