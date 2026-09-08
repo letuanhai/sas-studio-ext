@@ -865,6 +865,80 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     );
   }
 
+  // -- Inline editor (ace kitchen-sink demo, ported) --------------------------------
+  // A second editor in a line widget at the cursor, on a CLONE of the session: same
+  // document (so edits and undo are shared), own scroll and caret. Resizable, which
+  // the demo's fixed 10 rows are not, and toggled by an editor command rather than
+  // the demo's F3 - that is SAS Studio's Run Program.
+  const inlineEditor = await page.evaluate(async () => {
+    const tab = window.appDMS.tabs.getFocusedTab();
+    const adapter = tab && tab.editor && tab.editor.editor;
+    if (!adapter || !adapter._isAceEditorAdapter) return { found: false };
+    const ed = adapter.aceEditor;
+    ed.focus();
+    ed.gotoLine(1, 0);
+    const before = adapter.getText();
+
+    ed.execCommand("toggleInlineEditor");
+    await new Promise((r) => setTimeout(r, 400));
+    const entry = adapter._inlineEditor;
+    const el = entry && entry.widget.el;
+    const inner = entry && entry.editor;
+    const state = {
+      found: true,
+      opened: !!entry,
+      inDom: !!el && !!el.parentNode,
+      // Another VIEW of the same document, not a copy of the text.
+      sameDocument: !!inner && inner.session.getDocument() === ed.session.getDocument(),
+      ownSession: !!inner && inner.session !== ed.session,
+      focused: !!inner && inner.isFocused(),
+      resizable: !!el && getComputedStyle(el).resize === "vertical",
+      rows0: entry && Math.round(entry.widget.rowCount),
+    };
+
+    // An edit in the inner editor lands in the tab's own text.
+    inner.insert("* ssext smoke inline;\n");
+    state.editShared = adapter.getText() !== before && adapter.getText().includes("ssext smoke inline");
+
+    // A drag is an inline height; ace re-measures only widgets it is told changed.
+    el.style.height = Math.round(el.getBoundingClientRect().height * 2) + "px";
+    await new Promise((r) => setTimeout(r, 500));
+    state.rows1 = Math.round(entry.widget.rowCount);
+    state.grew = state.rows1 > state.rows0;
+
+    // Closing from INSIDE: the inner editor has its own command set.
+    inner.execCommand("toggleInlineEditor");
+    await new Promise((r) => setTimeout(r, 300));
+    state.closed = !adapter._inlineEditor && !document.querySelector(".ssf-inline-editor");
+    state.liveFocused = ed.isFocused();
+
+    ed.undo(); // drop the edit made above
+    adapter._refreshDirtyGutter();
+    state.dirtyAfter = (adapter._dirtyRows || []).length;
+    return state;
+  });
+  check(
+    "inline editor: opens at the cursor as another view of the same document",
+    inlineEditor.found &&
+      inlineEditor.opened &&
+      inlineEditor.inDom &&
+      inlineEditor.sameDocument &&
+      inlineEditor.ownSession &&
+      inlineEditor.focused &&
+      inlineEditor.editShared,
+    inlineEditor,
+  );
+  check(
+    "inline editor: the widget is resizable and ace re-measures the dragged height",
+    inlineEditor.found && inlineEditor.resizable && inlineEditor.grew,
+    inlineEditor,
+  );
+  check(
+    "inline editor: the command closes it from inside, and the tab gets the focus back",
+    inlineEditor.found && inlineEditor.closed && inlineEditor.liveFocused && inlineEditor.dirtyAfter === 0,
+    inlineEditor,
+  );
+
   // -- SAS language server (LSP) ---------------------------------------------------
   // Activation above already swapped any open SAS tabs to Ace (ace/mode/sas
   // triggers ensureLsp() from the adapter constructor) - poll for the worker/

@@ -124,6 +124,7 @@
       // decline (isAvailable) while there is no diff, which is what leaves their
       // Alt-Up/Alt-Down keys doing what they did before.
       this.aceEditor.commands.addCommands(diffEditorCommands(this));
+      this.aceEditor.commands.addCommands(inlineEditorCommands(this));
 
       // Let SAS Studio handle F3/F4 instead of Ace's find-next/find-prev.
       this.aceEditor.commands.bindKey("F3", null);
@@ -409,8 +410,10 @@
     dispose() {
       this._disposed = true;
       clearTimeout(this._dirtyTimer);
-      // An attached diff view holds layers of its own inside this editor.
+      // An attached diff view holds layers of its own inside this editor, and an
+      // inline editor is a whole second editor parked in a line widget.
       if (this._diffView) closeDiff(this);
+      if (this._inlineEditor) closeInlineEditor(this);
       if (this._lspRegistered && ssExt._lspProvider) {
         // ace-linters' unregisterEditor(editor, cleanupSession) closes the
         // document server-side - must run before aceEditor.destroy() below.
@@ -2795,6 +2798,111 @@
   function focusedAdapter() {
     const editor = focusedAceEditor();
     return (editor && allAdapters().find((a) => a.aceEditor === editor)) || null;
+  }
+
+  // -- Inline editor ---------------------------------------------------------------
+  // Ported from ace's kitchen-sink demo (demo/kitchen-sink/inline_editor.js - demo
+  // code, no ext ships it): a second editor embedded as a LINE WIDGET at the cursor
+  // row, on a clone of the same session, so it is another view of the same document
+  // (edits and undo are shared) with its own scroll, folds and caret - handy for
+  // keeping a macro definition in sight while editing its call site.
+  // Changes from the demo, each asked for: the widget is resizable (the demo's
+  // height is a fixed 10 rows), and it is an editor COMMAND with no F3 binding -
+  // F3 is SAS Studio's Run Program, which the adapter unbinds from ace anyway.
+  const INLINE_EDITOR_ROWS = 10;
+
+  // ext-split's $cloneSession, which is an instance method there (so not reachable
+  // off the prototype) and the only thing that file would be loaded for: same
+  // Document, own everything else.
+  function cloneSession(session) {
+    const EditSession = ace.require("ace/edit_session").EditSession;
+    const clone = new EditSession(session.getDocument(), session.getMode());
+    clone.setUndoManager(session.getUndoManager()); // shared, so undo spans both
+    clone.setTabSize(session.getTabSize());
+    clone.setUseSoftTabs(session.getUseSoftTabs());
+    clone.setOverwrite(session.getOverwrite());
+    clone.setBreakpoints(session.getBreakpoints());
+    clone.setUseWrapMode(session.getUseWrapMode());
+    clone.setUseWorker(session.getUseWorker());
+    clone.setWrapLimitRange(session.$wrapLimitRange.min, session.$wrapLimitRange.max);
+    clone.$foldData = session.$cloneFoldData();
+    return clone;
+  }
+
+  function closeInlineEditor(adapter) {
+    const entry = adapter._inlineEditor;
+    if (!entry) return;
+    adapter._inlineEditor = null;
+    if (entry.observer) entry.observer.disconnect();
+    // removeLineWidget destroys w.editor for us, and takes the element out.
+    try {
+      adapter.aceEditor.session.widgetManager.removeLineWidget(entry.widget);
+    } catch (e) {
+      console.error("[SS Ext] inline editor close failed:", e);
+    }
+    adapter.aceEditor.focus();
+  }
+
+  function openInlineEditor(adapter) {
+    const editor = adapter.aceEditor;
+    const session = editor.session;
+    const LineWidgets = ace.require("ace/line_widgets").LineWidgets;
+    const Editor = ace.require("ace/editor").Editor;
+    const Renderer = ace.require("ace/virtual_renderer").VirtualRenderer;
+
+    if (!session.widgetManager) {
+      session.widgetManager = new LineWidgets(session);
+      session.widgetManager.attach(editor);
+    }
+
+    const inline = new Editor(new Renderer());
+    inline.setSession(cloneSession(session));
+    const cfg = getAceConfig();
+    inline.setOptions(cfg.options); // font size, keyboard handler (vim) and the rest
+    inline.setTheme(editor.getTheme());
+    inline.container.style.height = "100%";
+
+    const el = document.createElement("div");
+    // resize: vertical + a ResizeObserver, the same pairing installResizablePopups
+    // uses: CSS alone changes the box, not ace's idea of how tall it is.
+    el.className = "ssf-inline-editor";
+    el.style.cssText =
+      "resize:vertical;overflow:hidden;border-top:2px solid #4a90d9;border-bottom:2px solid #4a90d9;height:" +
+      Math.round(INLINE_EDITOR_ROWS * editor.renderer.layerConfig.lineHeight) +
+      "px";
+    el.appendChild(inline.container);
+
+    const widget = { row: editor.getCursorPosition().row, fixedWidth: true, el, editor: inline };
+    session.widgetManager.addLineWidget(widget);
+    // The widget's height is measured off el.offsetHeight, and only for widgets the
+    // manager has been told changed - so a drag has to say so, or the rows below
+    // stay where they were and the editor is drawn over them.
+    const observer = new ResizeObserver(() => {
+      inline.resize(true);
+      session.widgetManager.onWidgetChanged(widget);
+    });
+    observer.observe(el);
+
+    adapter._inlineEditor = { widget, editor: inline, observer };
+    // The same command on the inner editor, so it can close itself - it is an
+    // editor of its own, with its own command set (as the diff's other side is).
+    inline.commands.addCommands(inlineEditorCommands(adapter));
+    inline.focus();
+    return inline;
+  }
+
+  function inlineEditorCommands(adapter) {
+    return [
+      {
+        name: "toggleInlineEditor",
+        description: "Toggle inline editor at the cursor",
+        // Deliberately not the demo's F3 (SAS Studio's Run Program) and not
+        // Alt-Shift-E either, which is ace's own goToPreviousError.
+        bindKey: { win: "Alt-Shift-I", mac: "Option-Shift-I" },
+        exec: () => (adapter._inlineEditor ? closeInlineEditor(adapter) : openInlineEditor(adapter)),
+        readOnly: true,
+      },
+    ];
   }
 
   // -- Diff in the current tab -----------------------------------------------------

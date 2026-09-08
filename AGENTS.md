@@ -349,6 +349,22 @@ Consequences of that split: manifest entries and `chrome.scripting` `files:` lis
   that would mean replacing `renderer.$scrollDecorator` with `ScrollDiffDecorator`, and `ace-patches.js` already has its
   own stake in the decorator layer;
   and a toggle mid-edit re-baselines the DIRTY text, so the marks don't survive one (neither does the undo history).
+  **Inline editor** (`toggleInlineEditor`, `Alt+Shift+I`): a second editor embedded as a LINE WIDGET at the cursor row,
+  on a CLONE of the session — same `Document` and the same undo manager, so edits and undo are shared, but its own
+  scroll, folds and caret, i.e. a second view of one file (a macro definition kept in sight while its call site is
+  edited).
+  Ported from ace's kitchen-sink demo (`demo/kitchen-sink/inline_editor.js`), which is demo code — no ext ships it.
+  Three changes from it: the widget is RESIZABLE (`resize: vertical` plus a `ResizeObserver` that calls the inner
+  editor's `resize()` and `widgetManager.onWidgetChanged(widget)`, since ace re-measures a widget's height from
+  `el.offsetHeight` only for widgets it has been told changed — without that half the drag is drawn over the rows
+  below), it is an editor COMMAND rather than the demo's F3 (SAS Studio's Run Program, which the adapter unbinds from
+  ace anyway; `Alt+Shift+E` is out too, being ace's own `goToPreviousError`), and it drops the demo's bare-Esc close
+  handler, which would have eaten vim's way out of insert mode — the command closes it, from the inner editor as well
+  as the outer one, both having a command set of its own.
+  `cloneSession()` is ext-split's `$cloneSession` copied in: there it is an INSTANCE method, so it can't be reached off
+  the prototype, and it is the only thing that file would be loaded for.
+  `dispose()` closes an open one, since it is a whole second editor parked in the tab.
+
   **The same baseline backs a full diff view**: `toggleDiffSaved` opens ace's own diff view INSIDE the focused tab —
   not in an overlay, so the tab keeps its caret, LSP registration and vim handler.
   It serializes through the usual `_pending` chain and finds the focused adapter (`focusedAdapter()`,
@@ -1212,6 +1228,8 @@ reopen, the native-mouse toggle, Ace activation/deactivation, the text viewer (m
 palette (focused/unfocused/global hotkey), LSP completion (library/table names from `sas/getLibList`, ranking, cache
 invalidation, meta labels), cross-editor word completion and the SAS context completer (PROC SQL tables, columns), the
 unsaved-change gutter (marks on edited/deleted lines, cleared by a save — on a detached adapter, so it needs no tab),
+the inline editor (opening at the cursor as a second view of the same document, an edit in it reaching the tab's own
+text, the dragged height re-measured into the widget's row count, and the command closing it from inside),
 the diff view inside the tab (on the real code tab, since the commands work off the FOCUSED editor and split that
 tab's own pane: two side-by-side editors in it, the other one read-only and holding the saved text, the changes found,
 the nav keys moving the LIVE caret with no wrap while declining when no diff is open so move-lines still works, the

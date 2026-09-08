@@ -15,5 +15,9 @@
           endpoint. All editor-scoped commands (they need an editor), so they map from a vimrc
           (`nmap ]d <Cmd>gotoNextDiff`): toggleDiffSaved, diffAgainstFile, toggleDiffMode,
           gotoNextDiff/gotoPreviousDiff (Alt+Down/Alt+Up), switchDiffPane, rotateDiffLayout
-  - [ ] inline editor (kitchen sink's F3) - a separate feature from the diff viewer, and demo-only
-        code: ace ships no ext for it, so it would have to be ported
+  - [x] ~~inline editor (kitchen sink's F3) - a separate feature from the diff viewer, and demo-only
+        code: ace ships no ext for it, so it would have to be ported~~
+        → `toggleInlineEditor` (Alt+Shift+I, editor-scoped like the diff commands, so it maps from a
+          vimrc): a second editor in a line widget at the cursor, on a clone of the session (same
+          document and undo, own scroll/caret). Resizable, unlike the demo's fixed 10 rows; not F3,
+          which is SAS Studio's Run Program
