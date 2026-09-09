@@ -1,6 +1,63 @@
 # Changelog
 
 
+## 0.21
+
+- The unsaved-change gutter marks every line you have touched since the last
+  save — a full-height bar for a changed or added line, a short red one where a
+  deletion closed the gap. Nothing showed this before.
+- A diff view opens inside the tab itself, against the last save or against any
+  file picked from the browse prompt. Split or inline, the layout rotates a
+  quarter turn at a time, `Alt+Down` / `Alt+Up` step between changes, and the
+  shape you last used is remembered.
+- An inline editor (`Alt+Shift+I`) embeds a second, resizable view of the same
+  file at the cursor row — the same text and undo history, its own scroll and
+  folds — so a macro definition stays in sight while its call site is edited.
+- A vim leader key works now: `nmap <Space>d dd` silently did nothing, because
+  Ace's vim never waited for the second key past a built-in `<Space>` alias.
+- A vimrc line can map a key to an Ace command with `<Cmd>name`, e.g.
+  `nmap ]d <Cmd>gotoNextDiff`, so the diff commands (or any other) are reachable
+  from vim.
+- The completion popup sizes itself to its widest row instead of ellipsizing at
+  a fixed 400px, and a width you drag it to becomes its ceiling from then on.
+  Table names in the meta column are no longer truncated at 12 characters.
+- Pane strips get the tab-group treatment: `Alt+;` switches pane groups and
+  `Alt+Shift+;` moves the focused pane across, creating or collapsing the split.
+- A new "Pane focus on run" setting says what a run may do to the pane
+  selection — SAS Studio's own behaviour, the Log at run start only (the
+  default), or nothing. A pane that got new output is outlined instead of
+  jumped to.
+- `Alt+Shift+L` opens the last submission's log in its own text tab, in the log
+  syntax mode, refreshable with F5. It reads the log endpoint rather than the
+  Log pane, which stops streaming past a size limit and showed only a stump for
+  a big run.
+- "Copy Path" in the LIBRARIES tree right-click menu copies a library's physical
+  location, every concatenated path on its own line.
+- Files save under any extension now: `saveFileAtPath` and vim `:w <path>` asked
+  for `new.lua` and got `new.lua.sas`. The editor also follows the new extension
+  after a Save As instead of keeping SAS highlighting for good.
+- Enter in the file browser is configurable per file extension (options page),
+  and anything unlisted is revealed in the tree rather than handed to SAS
+  Studio, whose fallback for an unknown type is a silent download.
+  `Ctrl+Shift+Enter` lets SAS Studio decide, `Alt+Enter` downloads.
+- Text tabs restored from your last session get the Ace overlay too — they kept
+  a plain textarea before, with no vim and no save.
+- Fixed the Ace editor silently never taking over when the session restored with
+  no code tab open: every tab opened afterwards came up on SAS Studio's own
+  editor for the rest of the page's life.
+- Fixed reopening two closed text tabs in a row wedging the app behind a modal
+  that could never be dismissed.
+- Fixed the amber run indicator being invisible in dark mode — the status bar
+  tint and the running tab's spinner both lost to the dark stylesheet.
+- Fixed the pane-updated outline never clearing on tabs that existed before the
+  extension loaded, and on panes visible in a side strip.
+- Fixed the command palette's history coming back in the wrong order: merely
+  opening the palette reversed the stored list.
+- Fixed SurfingKeys scrolling Ace's gutter out of step with the text, with no
+  way back short of a reload.
+- The light theme pair defaults to `chrome` rather than `iplastic`, and `.sh` /
+  `.py` open as text in the browse prompt.
+
 ## 0.20
 
 - Vim marks are visible: the letter shows in the gutter on the marked line, and
