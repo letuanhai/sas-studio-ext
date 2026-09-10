@@ -844,19 +844,42 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       .waitForFunction(() => window._browseSsLastPrompt?.popup?.data?.length > 0, null, { timeout: 15000 })
       .then(() => true)
       .catch(() => false);
-    // Type the tab's own path: the prompt reopens wherever it was last left, and an
-    // exact name match ranks first, so row one is that file. Deliberately not an
-    // emptied box - done() remembers whatever is typed as the path to reopen at,
-    // and "" would leave every later browse prompt on the saved list.
+    // Type the tab's own path: an exact name match ranks first, so row one is that
+    // file - but ONLY once the prompt has that folder loaded. It reopens wherever it
+    // was last left, and a typed path outside the loaded collection lists a single
+    // "⬇️ Load content..." row (uri = the folder, meta ">") instead, which is what
+    // made this check fail in about half of all runs. Accepting that row is what a
+    // person does: it loads the folder and re-filters on the same typed path, with
+    // the box left alone (keepPrompt). Deliberately not an emptied box - done()
+    // remembers whatever is typed as the path to reopen at, and "" would leave every
+    // later browse prompt on the saved list.
     if (promptOpen) {
       await page.evaluate((uri) => window._browseSsLastPrompt.cmdLine.setValue(uri, 1), fileTabUri);
-      await page
-        .waitForFunction(
-          (uri) => window._browseSsLastPrompt?.popup?.data?.[0]?.uri === uri,
-          fileTabUri,
-          { timeout: 10000 },
-        )
-        .catch(() => {});
+      let seen = null;
+      for (let i = 0; i < 3; i++) {
+        const row0 = await page
+          .waitForFunction(
+            ([uri, seen]) => {
+              const d = window._browseSsLastPrompt?.popup?.data?.[0];
+              // Settled = the file itself, or a folder row to accept. Anything
+              // still equal to what the last pass acted on is the stale listing.
+              if (!d || d.value === seen) return null;
+              if (d.uri === uri) return { done: true };
+              // Only the "⬇️ Load content..." / "🔄️ Reload data..." rows, which
+              // are the ones that load a collection and leave the box alone
+              // (keepPrompt). A plain directory row would navigate somewhere
+              // else entirely and leave every later browse check on that folder.
+              return d.keepPrompt ? { done: false, value: d.value } : null;
+            },
+            [fileTabUri, seen],
+            { timeout: 10000 },
+          )
+          .then((h) => h.jsonValue())
+          .catch(() => null);
+        if (!row0 || row0.done) break;
+        seen = row0.value;
+        await page.keyboard.press("Enter");
+      }
     }
     const pickRow = await page.evaluate(() => {
       const p = window._browseSsLastPrompt;
@@ -4296,6 +4319,18 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   });
   check("focusTabBar focuses the open-file tab strip", /mainTabs_tablist/.test(tabBarFocus), { tabBarFocus });
 
+  // Maximized view hides the side bar outright, and it is a SERVER-SIDE user
+  // preference: whoever last used the app in a browser decides what this run
+  // starts in, which is what made the two tree checks below fail in some runs and
+  // pass in others on identical code. Take it off for the duration, put it back
+  // after - the maximizeEditor patch and the status bar both key off it.
+  const wasMaxView = await page.evaluate(() => {
+    if (!window.appDMS.inMaxView) return false;
+    window.__ssf.run("toggleMaxView");
+    return true;
+  });
+  if (wasMaxView) await page.waitForTimeout(1000);
+
   // Must beat the noTreeFocusSteal patch, which suppresses tree focus coming from
   // outside the tree - dijit's focus() goes through focusChild, not focusNode.
   const treeFocus = await page.evaluate(() => {
@@ -4308,6 +4343,30 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   await page.waitForTimeout(300);
   const treeAfter = await page.evaluate(() => document.activeElement.id);
   check("arrow keys then navigate the tree", treeAfter && treeAfter !== treeFocus.id, { treeFocus, treeAfter });
+  // The side bar hidden is the one case where the action can't do its job; it says
+  // so instead of silently focusing nothing.
+  const maxViewNotice = await page.evaluate(async () => {
+    window.__ssf.run("toggleMaxView");
+    await new Promise((r) => setTimeout(r, 800));
+    window.__ssf.run("focusSideBarTree");
+    // showNotification builds an anonymous div on <body>, so match on its text.
+    const notice = [...document.querySelectorAll("body > div")].find((d) =>
+      /maximized view/i.test(d.textContent || ""),
+    );
+    const text = notice ? notice.textContent : "";
+    window.__ssf.run("toggleMaxView");
+    await new Promise((r) => setTimeout(r, 800));
+    return text;
+  });
+  check(
+    "focusSideBarTree says so when maximized view hides the side bar",
+    /maximized view/i.test(maxViewNotice),
+    { maxViewNotice },
+  );
+  if (wasMaxView) {
+    await page.evaluate(() => window.__ssf.run("toggleMaxView"));
+    await page.waitForTimeout(800);
+  }
 
   // -- Pane groups, the run-focus-steal patch and the log editor tab ----------------
   // All three are about one code tab's own panes, so they share the tab this block

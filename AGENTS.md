@@ -1034,6 +1034,12 @@ file `sas.today` hovers to the server's doc while `sas.symget` hovers to `sas.lu
   is dragged into them), and `focusSideBarTree` calls `tree.focus()` on `getCurrentTargetTree(["library", "projects"])`
   — that works despite `noTreeFocusSteal` because dijit's `_KeyNavContainer.focus()` goes through `focusChild`, not the
   `focusNode` that patch suppresses.
+  In MAXIMIZED view it refuses with a notice instead: the side bar is `display: none` there, and `tree.focus()` on a
+  hidden tree is a silent no-op that reads as a broken hotkey.
+  Un-maximizing on its behalf would be a surprising side effect, so it says so and stops.
+  That is also what made the two smoke checks for it flaky — max view is a SERVER-SIDE user preference, so whoever last
+  used the app in a browser decided what a test run started in;
+  the block now takes it off for the duration and puts it back.
   `switchTabGroup` toggles between tab GROUPS: SAS Studio has at most two, `tabs.mainTabContainer` plus a
   `secondaryTabContainer` that `_dropTab` creates on a drag to the right/bottom edge and `_onTabRemove` destroys again
   when its last tab leaves, with the tab objects mirrored in `tabs.mainTabs`/`tabs.secondaryTabs` (which is how the

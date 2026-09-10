@@ -477,6 +477,12 @@
       return;
     }
     selectTreePane(tree.id.split(".")[0]);
+    // Maximized view hides the whole side bar, and focusing a hidden tree is a
+    // silent no-op - say so rather than leaving it looking broken.
+    if (!tree.domNode.checkVisibility()) {
+      showNotification({ message: "Side bar is hidden in maximized view", isError: true });
+      return;
+    }
     // Survives the noTreeFocusSteal patch: dijit's _KeyNavContainer.focus() goes
     // through focusChild, not the focusNode() that patch suppresses.
     tree.focus();

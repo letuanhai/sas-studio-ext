@@ -114,15 +114,24 @@
       (but non-null) queue: $sendDeltaQueue drops that one without ever calling its callback,
       so awaiting it unguarded hangs the command forever.
 
-- FLAKY TEST, not yet diagnosed: "file diff: the picked file is fetched and shown as the other
-  side" fails in roughly half of runs (observed failing and passing on byte-identical code,
-  2026-09-10). When it fails, the browse prompt's first row is the parent DIRECTORY
-  (`{uri: ".../bcs/utils", meta: ">"}`) instead of the focused tab's own file, so the pick is a
-  folder and nothing is fetched. That first row is `options.currentItem` -> SsFiles.getCurrentItem,
-  i.e. it depends on which tab is focused when the prompt opens - so the suspect is a focus/timing
-  race between opening the fixture tab and opening the prompt, not the diff code. Either wait for
-  the tab to actually hold focus before opening the prompt, or assert on the row rather than
-  taking the first one blindly.
+- [x] ~~FLAKY TESTS~~ (diagnosed and fixed 2026-09-10; three consecutive clean full runs). Neither
+  was a race, and neither was in the code it pointed at:
+  - "file diff: the picked file is fetched and shown as the other side": the suspected
+    focus/timing race was wrong. The prompt reopens at whatever path it was last left on
+    (`lastPaths`), and a typed path OUTSIDE the loaded collection lists a single
+    "⬇️ Load content..." row (`uri` = the folder, `meta` ">") - so the first row was the folder
+    because the folder had never been loaded, not because the wrong tab was focused. The test
+    now accepts that row, which is what a person does: it loads the collection and re-filters on
+    the same typed path with the box left alone (`keepPrompt`). Only `keepPrompt` rows are
+    accepted - an earlier version keyed on `meta === '>'`, which happily descended into a plain
+    directory row and left every later browse check on that folder.
+  - "focusSideBarTree reaches the tree from the editor" / "arrow keys then navigate the tree":
+    maximized view hides the whole side bar, and it is a SERVER-SIDE user preference - whoever
+    last used the app in a browser decided what the run started in. `focusSideBarTree` then
+    focused a hidden tree, which is a silent no-op. Fixed on both sides: the action now says
+    "Side bar is hidden in maximized view" instead of doing nothing quietly (un-maximizing itself
+    would still be a surprising side effect), and the smoke block takes max view off for the
+    duration and puts it back.
 
 - allow configuring snippet for all languages, not just sas, using the snippet editor in options page, adding language selection
 - SAS log: highlight log line for NOTE, WARNING, ERROR, INFO, DEBUG
