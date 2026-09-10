@@ -146,6 +146,14 @@
       viewer.adapter.focus();
       return;
     }
+    // Same tab with the Ace replacement off (or a viewer opened before it was
+    // switched on): there is no overlay, so focus the stock textarea instead -
+    // otherwise focus is left sitting on the tab chip with no way into the text.
+    const textarea = tab?.tab?.tabHolder?.simpleTextArea;
+    if (textarea) {
+      textarea.focus();
+      return;
+    }
     const editorTab = tab?.editor;
     if (!editorTab) return;
     editorTab.editContentPane.getParent().selectChild(editorTab.editContentPane);

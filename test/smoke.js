@@ -3916,7 +3916,9 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     split.secondary.length === 1 &&
       groupToggle.other === split.secondary[0] &&
       groupToggle.back === groupToggle.start &&
-      /textview|ace_/.test(groupToggle.otherActive),
+      // A code tab's editor, our Ace overlay on a text viewer, or - with the Ace
+      // replacement off, which it is by this point - that viewer's stock textarea.
+      /textview|ace_|dijitTextArea/.test(groupToggle.otherActive),
     { split, groupToggle },
   );
   // Moving the last tab back out un-splits - which also leaves the session as we
