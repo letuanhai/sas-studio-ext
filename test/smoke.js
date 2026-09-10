@@ -97,6 +97,24 @@ const openFirstSasFile = (page) =>
     };
   });
 
+// Every block that works off the FOCUSED tab needs that tab to be a code tab, and
+// which tab is focused at any point is not this run's to assume: SAS Studio keeps
+// the open-tab set and the selection in the user's server-side preferences, so a
+// session restores with whatever the last run - or the person using the instance -
+// left behind, .lua text viewers included. Select the fixture (or any code tab)
+// first; without it those blocks read .editor off a viewer and report "found:
+// false" or throw, in a different place on every run.
+const selectCodeTab = async (page) => {
+  const ok = await page.evaluate(() => {
+    const tabs = window.appDMS.tabs;
+    const t = tabs.getAllTabObjects().find((x) => x.editor && x.editor.sasSuiteTabContainer);
+    if (t) tabs.selectTab(t);
+    return !!t;
+  });
+  if (!ok) throw new Error("no code tab open - the .sas fixture never opened");
+  await page.waitForTimeout(600);
+};
+
 let ctx, page;
 // Runs on every exit path, including a harness error, a signal and the watchdog -
 // a leaked headless Chromium pings its session every 10s, so it never even goes
@@ -559,6 +577,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // the second editor is put into that tab's own pane. The baseline is the same
   // _savedLines the gutter above uses, so the edits made here are what it has to
   // find - and toggling off has to give the pane and the editor back.
+  await selectCodeTab(page);
   const splitDiff = await page.evaluate(async () => {
     const tab = window.appDMS.tabs.getFocusedTab();
     const adapter = tab && tab.editor && tab.editor.editor;
@@ -903,6 +922,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // document (so edits and undo are shared), own scroll and caret. Resizable, which
   // the demo's fixed 10 rows are not, and toggled by an editor command rather than
   // the demo's F3 - that is SAS Studio's Run Program.
+  await selectCodeTab(page);
   const inlineEditor = await page.evaluate(async () => {
     const tab = window.appDMS.tabs.getFocusedTab();
     const adapter = tab && tab.editor && tab.editor.editor;
@@ -3485,6 +3505,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // These are pure widget lookups, so what they guard against is SAS Studio's own
   // internals drifting - only a live check sees that. Runs last: the tab-group part
   // creates a real split, then puts the tab back.
+  await selectCodeTab(page); // the reload above restores whatever tab was last selected
   const paneFocus = await page.evaluate(() => {
     window.__ssf.run("focusCodeEditor");
     window.__ssf.run("focusPaneBar");
