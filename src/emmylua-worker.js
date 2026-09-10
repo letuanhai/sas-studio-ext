@@ -130,6 +130,23 @@ function send(obj) {
   ex.ela_push(ptr, b.length);
 }
 
+// emmylua advertises PULL diagnostics (textDocument/diagnostic) as well as
+// pushing them, and ace-linters cannot do the pull: its LanguageClient's
+// doValidation() is a stub returning [], while its ServiceManager runs that stub
+// for EVERY open document of the service on every change/open/close and posts
+// the empty result as that document's diagnostics. So with two .lua tabs open,
+// any activity in one wiped the other's annotations, and the server's push only
+// ever restored the document that had just changed - measured on three tabs,
+// where the wipe outran every push and none of them showed anything.
+// `diagnosticProvider` is what that filter keys on and it gates nothing else in
+// ace-linters, so dropping it from the initialize result leaves only the push.
+function stripPullDiagnostics(msg) {
+  const caps = msg && msg.result && msg.result.capabilities;
+  if (!caps || caps.diagnosticProvider === undefined) return msg;
+  const { diagnosticProvider, ...rest } = caps;
+  return { ...msg, result: { ...msg.result, capabilities: rest } };
+}
+
 function drain() {
   for (;;) {
     const ptr = ex.ela_take();
@@ -156,7 +173,7 @@ function drain() {
       });
       continue;
     }
-    self.postMessage(msg);
+    self.postMessage(stripPullDiagnostics(msg));
   }
 }
 

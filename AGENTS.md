@@ -1356,7 +1356,16 @@ file `sas.today` hovers to the server's doc while `sas.symget` hovers to `sas.lu
   Folding rather than replaying the change after the open is deliberate: the held change carries the version the client
   had at the time, and the server ignores a change that isn't newer than the open it just processed (both verified
   against the server directly).
-  `test/units.js` covers the ordering with a stubbed wasm module.
+  It also **strips `diagnosticProvider` out of the initialize result**, so ace-linters never tries to PULL diagnostics.
+  emmylua advertises the pull form alongside the push, and ace-linters cannot do it: its `LanguageClient.doValidation()`
+  is a stub returning `[]`, while its `ServiceManager`'s own `doValidation` runs that stub for EVERY open document of
+  the service on every change/open/close and posts the empty result as that document's diagnostics — so with more than
+  one `.lua` tab open, any activity in one wiped the others' annotations and the server's push only ever restored the
+  document that had just changed (measured on three tabs, where the wipe outran every push and none of them showed
+  anything;
+  closing a clean tab likewise cleared its neighbour).
+  That capability gates nothing else in ace-linters, so dropping it leaves only the push, which is what already worked.
+  `test/units.js` covers the ordering and the stripping with a stubbed wasm module.
   Its WASI shim is 22 stubs and three real functions (`clock_time_get` — the timers matter, `random_get`, `fd_write` for
   the server's own stderr log, line-buffered and filtered to WARN/ERROR): with the Lua stdlib metadata compiled into the
   binary (`include_dir!`) and the workspace scan patched out, nothing in it ever touches a file, which is why a real

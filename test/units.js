@@ -679,6 +679,22 @@ function runWorker(defs) {
     "only notifications reach the client",
   );
 
+  // ace-linters cannot do PULL diagnostics (its LanguageClient answers [] and
+  // its ServiceManager posts that as every open document's diagnostics), so the
+  // capability that makes it try is dropped from the initialize result.
+  posted.length = 0;
+  third.outbox.push({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { capabilities: { diagnosticProvider: { identifier: "EmmyLua" }, hoverProvider: true } },
+  });
+  third.sandbox.self.onmessage({ data: { jsonrpc: "2.0", method: "$/noop" } });
+  assert.deepEqual(
+    posted[0].result.capabilities,
+    { hoverProvider: true },
+    "the pull-diagnostics capability is stripped, everything else survives",
+  );
+
   console.log("PASS  lua worker answers the server's configuration request");
 
   // A document's folder becomes a workspace root, pushed with
