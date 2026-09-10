@@ -1833,6 +1833,41 @@
     });
   }
 
+  // The two servers share this library, and it must be loaded EXACTLY once: its
+  // ServiceManager, its MockWorker pair and its classes are all module-level, so
+  // a second load replaces window.AceLanguageClient with a fresh copy of all of
+  // them and orphans whatever provider was built from the first - separate
+  // manager (so serviceName no longer keeps the two apart), separate message
+  // channel (so shareLspCallbackIds no longer shares anything) and separate
+  // SessionLanguageProvider prototype, which is what installLspMarkerPatches
+  // patches ONCE per page: the semantic-token viewport filter then silently
+  // applied to one server and not the other (measured - 8000 markers per
+  // keystroke on a 800-line file, the exact regression that patch exists for).
+  // A `if (!window.AceLanguageClient)` check does not cover it: with a .lua tab
+  // restored at page load both servers start at once and both see it unset.
+  // ace-linters' UMD wrapper checks the GLOBAL `define` and takes the AMD branch
+  // if it looks like one (`typeof define === "function" && define.amd`) - Dojo's
+  // own loader satisfies that check, so on this page the module would register
+  // itself into Dojo's registry instead of setting
+  // window.LanguageClient/window.AceLanguageClient. Hide `define` for the two
+  // loads so the UMD wrapper falls through to its plain-global branch instead,
+  // same trick as ace.js avoiding window.require/define.
+  function loadAceLinters(extRoot) {
+    if (ssExt._aceLintersLoading) return ssExt._aceLintersLoading;
+    ssExt._aceLintersLoading = (async () => {
+      if (window.AceLanguageClient) return;
+      const savedDefine = window.define;
+      delete window.define;
+      try {
+        await loadScript(`${extRoot}/lib/ace-linters/language-client.js`);
+        await loadScript(`${extRoot}/lib/ace-linters/ace-language-client.js`);
+      } finally {
+        if (savedDefine) window.define = savedDefine;
+      }
+    })();
+    return ssExt._aceLintersLoading;
+  }
+
   function ensureLsp() {
     if (getAceConfig().lsp === false) return Promise.resolve(null);
     if (ssExt._lspStarting) return ssExt._lspStarting;
@@ -1854,21 +1889,7 @@
           return null;
         }
 
-        // ace-linters' UMD wrapper checks the GLOBAL `define` and takes the AMD
-        // branch if it looks like one (`typeof define === "function" &&
-        // define.amd`) - Dojo's own loader satisfies that check, so on this page
-        // the module would register itself into Dojo's registry instead of
-        // setting window.LanguageClient/window.AceLanguageClient. Hide `define`
-        // for the two loads so the UMD wrapper falls through to its plain-global
-        // branch instead, same trick as ace.js avoiding window.require/define.
-        const savedDefine = window.define;
-        delete window.define;
-        try {
-          await loadScript(`${extRoot}/lib/ace-linters/language-client.js`);
-          await loadScript(`${extRoot}/lib/ace-linters/ace-language-client.js`);
-        } finally {
-          if (savedDefine) window.define = savedDefine;
-        }
+        await loadAceLinters(extRoot);
 
         // Blob + importScripts, not a fetched string: avoids pulling the ~22 MB
         // bundle into a JS string just to hand it back to the Worker constructor.
@@ -2212,17 +2233,8 @@
         worker.addEventListener("error", (e) => {
           console.warn("[SS Ext] Lua LSP worker error:", (e && e.message) || e);
         });
-        // Same UMD-vs-Dojo dance as ensureLsp; skipped when that already ran.
-        if (!window.AceLanguageClient) {
-          const savedDefine = window.define;
-          delete window.define;
-          try {
-            await loadScript(`${extRoot}/lib/ace-linters/language-client.js`);
-            await loadScript(`${extRoot}/lib/ace-linters/ace-language-client.js`);
-          } finally {
-            if (savedDefine) window.define = savedDefine;
-          }
-        }
+        // The same one copy the SAS server uses - see loadAceLinters.
+        await loadAceLinters(extRoot);
         // No capability-coercion shim here (unlike the SAS server, emmylua
         // advertises plain `true` for hoverProvider/documentHighlightProvider)
         // and no inbound-request shim (the worker answers those itself).
