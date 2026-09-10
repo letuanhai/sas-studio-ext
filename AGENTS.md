@@ -764,13 +764,52 @@ work, checked against the server directly).
 `formatWithLsp(provider, editor)` makes the same call — `$sendDeltaQueue`, then one `$messageController.format` per
 range with `$format`/`applyEdits` — with the range it meant, and formats a non-empty selection instead of the file, as
 its version does.
-**PROC LUA `submit;`…`endsubmit;` blocks are deliberately NOT covered.** They were, briefly (commit `b588131` on the
-`lua-lsp` branch): a hand-rolled ~30-line JSON-RPC client over a second emmylua worker, fed a copy of the SAS file with
-every non-Lua line blanked out so LSP positions stayed equal to ace's, plus a `session.setAnnotations` wrapper and a
-`provider.doHover` wrap to share those two surfaces with the SAS provider that owns the session.
-It worked;
-it was removed to finish the `.lua` path and the `sas` table first, and that commit is where to start if it comes back.
-What is left of it is nothing — no `luaRanges`, no second worker, no block detection anywhere.
+**PROC LUA `submit;`…`endsubmit;` blocks** get the same server, over a side channel rather than through ace-linters:
+that Lua lives in an `ace/mode/sas` session, ace-linters serves a session as ONE language, and the session belongs to
+the SAS server — so the Lua provider can never be given it.
+The document handed to emmylua is the SAS file with every **non-Lua LINE blanked out** (`blankNonLua`), which is the
+whole of the position handling: an LSP line/character is an ace row/column unchanged, in both directions, so a
+diagnostic lands on the row it belongs to and a completion is asked for at the caret as it is, with no translation
+anywhere and the Lua the server sees being exactly the Lua the user wrote.
+`luaRanges(lines)` is the block finder — a line scan with three states, where the fence lines themselves are SAS so the
+body is the rows between them, an unclosed block runs to the end of the file (you are typing inside it), and
+`\bsubmit\b` cannot match inside `endsubmit` (no word boundary there), which is what lets one scan test for both.
+It is exposed on `ssExt._procLua` and unit-tested.
+The document is one per session (`file:///ssext-scratch/<session id>-proclua.lua`, the same scratch root the path-less
+`.lua` editors use — a document under no root is not a module), synced 400 ms after the last edit and once from the
+adapter's constructor (content passed at construction fires no `change` event, so its blocks would otherwise stay
+undiagnosed until the first keystroke), closed again when the block is deleted or the tab goes.
+Nothing here starts the server until a file actually HAS a block, and `sessionLuaRanges` honours `aceConfig.lspMaxLines`
+— this pushes the whole file on every edit, which is what that limit is for.
+The three surfaces are wired by hand, since no ace-linters session owns any of this: one extra completer
+(`ssextProcLua`, score 2000 — above the SAS context completer's 1000 — declining outside a block, where the line is
+SAS), one `doHover` wrap on the **SAS** provider (`installProcLuaHover`: inside a block it tries `sasFnHover` first,
+then emmylua, then falls through to the SAS server's own answer), and a `session.setAnnotations` wrapper
+(`hookProcLuaAnnotations`) that remembers what the SAS provider asked for and always re-appends ours — that provider
+replaces the WHOLE annotation set on every validation, so sharing one gutter is only possible if one side keeps the
+other's.
+**Semantic tokens** are added by hand for the same reason: `session.addTextMarker` is the mixin ace-linters installs on
+the session prototype at `registerEditor`, and `toAceTokenClassName` is the (patched, theme-aware) method on its session
+provider, so decoding the server's `semanticTokens/full` answer ourselves and adding the markers through those two gives
+colours identical to the `.lua` tab's by construction.
+`decodeSemanticTokens` is the LSP wire format — five ints per token, the first two delta-encoded — plus a copy of
+ace-linters' bundle-internal `toAceTokenType` scope table (matching it is the whole point);
+the legend comes from the initialize result, which the channel's `intercept` keeps because a `.sas` file has no
+registered Lua session to read it off.
+Without this, `sas.sleep` stayed identifier-black while `os.date` looked highlighted — `os` only being painted because
+ace's own lua mode hardcodes it.
+The token set is remembered on the session, because the marker-store compaction in `installLspMarkerPatches` needs the
+store empty of LIVE markers to reset it and ours would otherwise block that forever (the unbounded growth back, for
+every `.sas` file with a block) — so it drops them, resets, and `reapplyProcLuaTokens` puts them straight back.
+No viewport filter, unlike the SAS server's tokens: a submit block is a handful of rows.
+**Signature help** is one more wrap on the SAS provider (`provideSignatureHelp`): ace-linters' `SignatureTooltip` is
+already attached to this editor, with its idle timer, its Esc binding and its caret-move trigger, so only the answer has
+to come from the other server — `signatureTooltip()` is its `fromSignatureHelp` for a single server's reply, bolding the
+active parameter, which is what the argument highlight IS.
+The `ssextSasFns` completer answers inside a block too (the `sas` table is in scope there exactly as in a `.lua`
+script), which is the only change that path needed.
+`_procLuaTokens`/`_procLuaSignature` are unit-tested.
+All of it goes over `ssExt._luaRaw`, the Lua worker's `rawChannel` — see below.
 
 The `sas` table PROC LUA puts in scope — which a `.lua` script it runs sees exactly as a submit block does — is covered
 from two sources, because it has two halves and only one of them is knowable statically.
@@ -797,10 +836,18 @@ answers only in an `ace/mode/lua` session and only right after `sas.` — everyt
 Docs are `completionItem/resolve`d for the SELECTED row only, from the completer's `getDocTooltip` (fill `docText`, then
 `editor.completer.updateDocTooltip()` — the same lazy dance ace-linters does), through `mdToText`, since nothing here
 bundles a markdown converter.
-Both go over `ssExt._lspRaw`, a `request`/`notify` side channel onto the SAS worker created in `ensureLsp()` for
-questions ace-linters has no API for: its ids are STRINGS (`ssext:<n>`) so they cannot collide with ace-linters' numeric
-ones, and the existing `message` listener resolves and swallows those responses rather than forwarding them, the same
-rule `sas/getLibList` follows.
+Both go over `ssExt._lspRaw`, one of the two **`rawChannel(worker)`** side channels — `request`/`notify` onto a server
+ace-linters already owns, for the questions it has no API for (`_lspRaw` on the SAS worker, `_luaRaw` on the Lua one,
+which is what the PROC LUA blocks above are built on).
+Two rules make sharing one connection safe: the ids are STRINGS (`ssext:<n>`) so they cannot collide with ace-linters'
+numeric ones, and the responses are swallowed rather than forwarded — ace-linters' connection would otherwise see a
+reply to a request it never made, the same rule `sas/getLibList` follows.
+The swallowing is why the channel owns the worker's `onmessage` shim: that ASSIGNMENT is how vscode-jsonrpc's
+`BrowserMessageReader` attaches, so holding the real handler is the only way to decide per message whether it is
+forwarded at all — which is also what `intercept(fn)` (return `true` to swallow; `ensureLsp`'s `sas/getLibList` answer,
+capability coercion and semantic-token error rewrite all ride on it) and `onNotification(method, fn)` (watch without
+taking it away, which is how a `publishDiagnostics` for a PROC LUA document is read while every other one still reaches
+ace-linters) are for.
 The scratch document draws no `publishDiagnostics` (checked against the server directly), so ace-linters never sees a
 document it doesn't know.
 Three details that each cost a visible symptom before they were there.
@@ -1468,7 +1515,9 @@ Dark mode for SAS Studio's own UI is a generated static stylesheet — `node too
 tracking a SAS Studio CSS change).
 Pure-logic checks (no browser, no live instance): `npm run test:units` — covers `tools-meta.js`'s
 `ssfEventKey`/`ssfPatchEnabled`, `mode-saslog.js`'s %INCLUDE folding, `editor-swap.js`'s `_sasFns` (the `sas.<name>`
-hover word and the SAS server's markdown, flattened), `emmylua-worker.js`'s didChange/didOpen ordering, its
+hover word and the SAS server's markdown, flattened), `editor-swap.js`'s `_procLua` (the PROC LUA block ranges and the
+blanked document built from them), `_procLuaTokens` (the LSP semantic-token wire format onto ace scopes) and
+`_procLuaSignature` (the active argument bolded in the signature tooltip), `emmylua-worker.js`'s didChange/didOpen ordering, its
 configuration answer (incl. the injected client capability) and the workspace roots it derives from open documents,
 `editor-swap.js`'s `_semanticScope` (LSP semantic scopes onto themed ace ones), and `editor-swap.js`'s `_foldNav` row
 pickers plus `_vimMarks` (the zj/zk/[z/]z vim motions and the mark gutter decorations) `_dirtyGutter` (diff chunks ->
@@ -1495,7 +1544,12 @@ picked in the browse prompt (the prompt's first row is the tab's own file, so th
 what the server holds),
 the browse prompt's per-extension Enter action, the blanket reveal fallback for unlisted extensions, Ctrl+Shift+Enter
 ("Let SAS Studio decide") and Alt+Enter ("Download item") (against a synthetic popup row with `appDMS.handleWebOneEvent`
-stubbed, so nothing is really opened or downloaded and no file of a given extension has to exist), the Lua server (a `.lua` text viewer registering with ace-linters: LSP-ranked completions with
+stubbed, so nothing is really opened or downloaded and no file of a given extension has to exist),
+the PROC LUA blocks (a detached `.sas` adapter: the diagnostic landing on the file's own row, both halves of the `sas`
+table completing inside the block and nothing offered outside it, hover answered by the SAS server and by emmylua, the
+semantic-token markers carrying the same classes a `.lua` file's do, signature help arriving with the active argument
+marked, and the two servers' annotations sharing one gutter until the block is deleted),
+the Lua server (a `.lua` text viewer registering with ace-linters: LSP-ranked completions with
 no duplicate completer, the server's pushed diagnostics as ace annotations, the formatDocument command, both halves of
 the `sas` table — completions and hover — and `require()` resolving to a second open `.lua` document, which needs the
 real-path URI and the derived workspace root together), the aceConfig flow (seeding, live apply, settings-menu

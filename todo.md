@@ -11,9 +11,14 @@
   - [x] ~~switching an editor's mode from ace's settings pane moves it between the two
         servers~~ (session changeMode -> _syncLspToMode: unregister, re-register with the
         other provider; ace-linters' own changeMode only re-resolves inside its manager)
-  - [ ] PROC LUA submit;...endsubmit; blocks: completion, diagnostics and hover. Built and
-        working once (commit b588131 on lua-lsp: own JSON-RPC client over a second emmylua
-        worker, the sas file with non-lua lines blanked, setAnnotations/doHover shared with
-        the sas provider), then removed to finish the .lua path and the sas module first
+  - [x] ~~PROC LUA submit;...endsubmit; blocks: completion, diagnostics, hover, semantic
+        tokens and signature help~~ (the same worker over a rawChannel side channel, fed the
+        sas file with every non-lua line blanked so an LSP position IS an ace position; one
+        completer, doHover/provideSignatureHelp wraps on the SAS provider, a setAnnotations
+        wrapper so both servers share the gutter, and the tokens decoded and added as the
+        same ace text markers ace-linters uses)
+  - [ ] the rest of what ace-linters gives a .lua file is still missing inside a block:
+        document highlights, code actions and formatting. Each is one more wrap, and none
+        has been asked for yet
 
 - allow configuring snippet for all languages, not just sas, using the snippet editor in options page, adding language selection

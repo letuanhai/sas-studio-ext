@@ -217,6 +217,11 @@
       this._lspRegistered = false;
       this._lspRegistering = false;
       this._maybeRegisterLsp();
+      // The Lua half of a .sas file, if it has one. Content passed at
+      // construction (a text viewer, a toggle conversion) fires no change event
+      // this could hang off, so its blocks would stay undiagnosed until the
+      // first keystroke - a code editor's own setText does fire one.
+      scheduleProcLuaSync(this.aceEditor.session);
     }
 
     // Eligible when the mode has a language server behind it - SAS
@@ -365,6 +370,7 @@
       this.aceEditor.session.on("change", (delta) => {
         this._scheduleDirtyGutter();
         nudgeSasFnCompletions(this.aceEditor);
+        scheduleProcLuaSync(this.aceEditor.session);
         this.triggerEvent("textChanged", { delta });
       });
       this.aceEditor.session.selection.on("changeSelection", () => {
@@ -504,6 +510,7 @@
       if (this._diffView) closeDiff(this);
       if (this._inlineEditor) closeInlineEditor(this);
       this._unregisterLsp(); // must run before aceEditor.destroy() below
+      closeProcLuaDoc(this.aceEditor.session); // the Lua half of a .sas session, if any
       if (this._darkModeMql) {
         this._darkModeMql.removeEventListener("change", this._darkModeHandler);
       }
@@ -932,6 +939,7 @@
     registerOtherEditorsCompleter();
     registerSasContextCompleter();
     registerSasFnCompleter();
+    registerProcLuaCompleter();
     await loadScript(`${srcAcePath}/ext-browse_ss.js`);
     // Warm the command-history cache now (fire-and-forget - "SsCmdPaletteHistory",
     // inlined since CMD_HISTORY_KEY is defined later in this closure but not yet
@@ -1447,12 +1455,18 @@
       const store = this.session.$textMarkers;
       if (store && store.length > 4096) {
         this.clearSemanticTokenMarkers(false);
+        // Ours are the one other thing that can be live in here (a PROC LUA
+        // block's tokens), and a single live marker blocks the reset - which
+        // would put the unbounded growth back for every .sas file that has a
+        // block. Drop them for the reset and put them straight back.
+        clearProcLuaTokens(this.session);
         let live = false;
         store.forEach(() => (live = true));
         if (!live) {
           this.session.$textMarkers = [];
           this.session.$textMarkerId = 0;
         }
+        reapplyProcLuaTokens(this.session);
       }
       return origSet.call(this, tokens);
     };
@@ -1868,6 +1882,72 @@
     return ssExt._aceLintersLoading;
   }
 
+  // A side channel onto a language server ace-linters already owns, for the
+  // questions it has no API for - the SAS DATA step functions, and everything
+  // the PROC LUA blocks need, neither of which belongs to any session
+  // ace-linters knows about.
+  //
+  // Two rules make it safe to share one connection: our request ids are STRINGS
+  // (`ssext:<n>`) so they can never collide with ace-linters' numeric ones, and
+  // our responses are swallowed rather than forwarded - ace-linters' connection
+  // would otherwise see a response to a request it never made.
+  //
+  // The swallowing is why this owns the worker's `onmessage` shim: that
+  // ASSIGNMENT is how vscode-jsonrpc's BrowserMessageReader attaches, so holding
+  // the real handler here is the only way to decide, per message, whether it is
+  // forwarded at all. `intercept(fn)` is for the callers who need to see (or
+  // rewrite, or swallow) messages on their way through: return true to swallow.
+  function rawChannel(worker) {
+    const pending = new Map();
+    const interceptors = [];
+    let seq = 0;
+    let realOnMessage = null;
+    Object.defineProperty(worker, "onmessage", {
+      get: () => realOnMessage,
+      set: (fn) => {
+        realOnMessage = fn;
+      },
+    });
+    worker.addEventListener("message", (e) => {
+      const msg = e.data;
+      if (msg && typeof msg.id === "string" && msg.id.startsWith("ssext:")) {
+        const resolve = pending.get(msg.id);
+        if (resolve) {
+          pending.delete(msg.id);
+          resolve(msg.error ? null : msg.result);
+        }
+        return;
+      }
+      for (const fn of interceptors) {
+        try {
+          if (fn(e) === true) return;
+        } catch (err) {
+          console.warn("[SS Ext] LSP message interceptor failed:", (err && err.message) || err);
+        }
+      }
+      if (realOnMessage) realOnMessage.call(worker, e);
+    });
+    return {
+      notify: (method, params) => worker.postMessage({ jsonrpc: "2.0", method, params }),
+      request: (method, params) =>
+        new Promise((resolve) => {
+          const id = `ssext:${++seq}`;
+          pending.set(id, resolve);
+          worker.postMessage({ jsonrpc: "2.0", id, method, params });
+          setTimeout(() => {
+            if (pending.delete(id)) resolve(null);
+          }, 5000);
+        }),
+      intercept: (fn) => interceptors.push(fn),
+      // Watch a server notification without taking it away from ace-linters,
+      // which needs the same stream for the documents it does own.
+      onNotification: (method, fn) =>
+        interceptors.push((e) => {
+          if (e.data && e.data.method === method) fn(e.data.params);
+        }),
+    };
+  }
+
   function ensureLsp() {
     if (getAceConfig().lsp === false) return Promise.resolve(null);
     if (ssExt._lspStarting) return ssExt._lspStarting;
@@ -1903,40 +1983,19 @@
         });
 
         // A side channel onto the same server, for questions ace-linters has no
-        // API for (sasFunctions() below). String ids so a response of ours can
-        // never collide with ace-linters' numeric ones, and the message listener
-        // swallows them rather than forwarding - same rule as sas/getLibList.
-        const rawPending = new Map();
-        let rawSeq = 0;
-        ssExt._lspRaw = {
-          notify: (method, params) => worker.postMessage({ jsonrpc: "2.0", method, params }),
-          request: (method, params) =>
-            new Promise((resolve) => {
-              const id = `ssext:${++rawSeq}`;
-              rawPending.set(id, resolve);
-              worker.postMessage({ jsonrpc: "2.0", id, method, params });
-              setTimeout(() => {
-                if (rawPending.delete(id)) resolve(null);
-              }, 5000);
-            }),
-        };
+        // API for (sasFunctions() below).
+        const raw = rawChannel(worker);
+        ssExt._lspRaw = raw;
 
         // Workaround for ace-linters 2.2.0: its filterByFeature() checks
         // `capabilities.hoverProvider == true`, but the SAS server advertises the
         // LSP-spec-legal object form (e.g. {workDoneProgress: true}), so hover
         // requests are silently never sent. Coerce object-form hoverProvider/
         // documentHighlightProvider to true in the initialize response before
-        // ace-linters sees it. Must intercept the `onmessage` ASSIGNMENT (that's
-        // how vscode-jsonrpc's BrowserMessageReader attaches) - an
-        // addEventListener wrapper would see the message too late to matter.
-        let realOnMessage = null;
-        Object.defineProperty(worker, "onmessage", {
-          get: () => realOnMessage,
-          set: (fn) => {
-            realOnMessage = fn;
-          },
-        });
-        worker.addEventListener("message", (e) => {
+        // ace-linters sees it. The channel above owns the `onmessage` shim this
+        // needs (see rawChannel) - an addEventListener wrapper would see the
+        // message too late to matter.
+        raw.intercept((e) => {
           // sas/getLibList is a request FROM the server: it has no data access of
           // its own and asks the client for the library/table list (we opt in with
           // initializationOptions.supportSASGetLibList below). ace-linters exposes
@@ -1944,19 +2003,11 @@
           // answer MethodNotFound as soon as it saw this - first response wins, and
           // ours is async - so answer it here and DON'T forward the message.
           const msg = e.data;
-          if (msg && typeof msg.id === "string" && msg.id.startsWith("ssext:")) {
-            const resolve = rawPending.get(msg.id);
-            if (resolve) {
-              rawPending.delete(msg.id);
-              resolve(msg.error ? null : msg.result);
-            }
-            return;
-          }
           if (msg && msg.method === "sas/getLibList" && msg.id !== undefined) {
             getLibList(msg.params && msg.params.libId).then((result) => {
               worker.postMessage({ jsonrpc: "2.0", id: msg.id, result });
             });
-            return;
+            return true; // swallowed
           }
 
           const caps = e.data && e.data.result && e.data.result.capabilities;
@@ -1979,7 +2030,6 @@
             delete e.data.error;
             e.data.result = null;
           }
-          if (realOnMessage) realOnMessage.call(worker, e);
         });
 
         const serverData = {
@@ -2007,6 +2057,8 @@
         });
         ssExt._lspProvider = provider;
         shareLspCallbackIds(provider);
+        installProcLuaHover(provider);
+        installProcLuaSignatureHelp(provider);
 
         if (!ssExt._lspStyleInjected) {
           ssExt._lspStyleInjected = true;
@@ -2235,6 +2287,12 @@
         });
         // The same one copy the SAS server uses - see loadAceLinters.
         await loadAceLinters(extRoot);
+        // The PROC LUA blocks live in an ace/mode/sas session, which this
+        // provider will never be given, so they talk to the same server through
+        // the side channel instead - installed BEFORE ace-linters attaches its
+        // own onmessage handler, since the channel is what holds it.
+        ssExt._luaRaw = rawChannel(worker);
+        installProcLuaChannel(ssExt._luaRaw);
         // No capability-coercion shim here (unlike the SAS server, emmylua
         // advertises plain `true` for hoverProvider/documentHighlightProvider)
         // and no inbound-request shim (the worker answers those itself).
@@ -2300,7 +2358,11 @@
     ace.require("ace/ext/language_tools").addCompleter({
       id: "ssextSasFns",
       getCompletions: (editor, session, pos, prefix, callback) => {
-        if (session.$modeId !== "ace/mode/lua") return callback(null, []);
+        // A .lua file, or the Lua inside a PROC LUA block - the `sas` table is
+        // in scope in both, and knowable statically in neither.
+        if (session.$modeId !== "ace/mode/lua" && !inProcLuaBlock(session, pos)) {
+          return callback(null, []);
+        }
         if (!afterSasDot(session, pos, prefix)) return callback(null, []);
         lastCompletionEditor = editor; // for getDocTooltip, which gets no editor
         sasFunctions(prefix).then(
@@ -2324,6 +2386,486 @@
         return item;
       },
     });
+  }
+
+  // -- PROC LUA submit; ... endsubmit; blocks ------------------------------------
+  //
+  // The Lua inside a PROC LUA step lives in an ace/mode/sas session, and
+  // ace-linters serves a session as ONE language - so that session is the SAS
+  // server's and the Lua server can never be given it. Everything here therefore
+  // goes over the side channel onto the same emmylua worker (ssExt._luaRaw), and
+  // hands its answers to the three surfaces by hand: one extra completer, one
+  // hover wrap on the SAS provider, and an annotation merge.
+  //
+  // The document the server sees is the SAS file with every non-Lua LINE BLANKED
+  // OUT. That is the whole of the position handling: an LSP line/character is an
+  // ace row/column unchanged, in both directions, so a diagnostic comes back on
+  // the row it belongs to and a completion is requested at the caret as it is.
+  // The Lua the server sees is exactly the Lua the user wrote.
+  const PROC_LUA_SCORE = 2000; // above the SAS context completer's 1000, inside a block
+  const PROC_LUA_SYNC_MS = 400;
+
+  // Rows covered by `proc lua ... submit;` / `endsubmit;`, line-granular: the
+  // fence lines themselves are SAS, so the Lua body is the rows between them.
+  function luaRanges(lines) {
+    const ranges = [];
+    let state = 0; // 0 = outside, 1 = in a proc lua step, 2 = inside submit
+    let start = 0;
+    lines.forEach((line, row) => {
+      if (state === 2) {
+        // `\bsubmit\b` cannot match inside "endsubmit" (no word boundary there),
+        // so the two tests below can't confuse the closing fence for an opening one.
+        if (/\bendsubmit\b/i.test(line)) {
+          ranges.push([start, row - 1]);
+          state = 0;
+        }
+        return;
+      }
+      if (state === 0 && /\bproc\s+lua\b/i.test(line)) state = 1;
+      else if (state === 1 && /\b(run|quit)\s*;/i.test(line)) state = 0;
+      if (state === 1 && /\bsubmit\b[^;]*;/i.test(line)) {
+        state = 2;
+        start = row + 1;
+      }
+    });
+    if (state === 2) ranges.push([start, lines.length - 1]);
+    return ranges;
+  }
+
+  function inLuaRange(ranges, row) {
+    return ranges.some(([from, to]) => row >= from && row <= to);
+  }
+
+  function blankNonLua(lines, ranges) {
+    return lines.map((line, row) => (inLuaRange(ranges, row) ? line : "")).join("\n");
+  }
+
+  function sessionLuaRanges(session) {
+    if (!session || session.$modeId !== "ace/mode/sas") return null;
+    // The same line limit the language servers themselves honour: this pushes
+    // the whole (blanked) file on every edit, which is exactly what that limit
+    // is about.
+    const maxLines = getAceConfig().lspMaxLines;
+    if (maxLines > 0 && session.getLength() > maxLines) return null;
+    try {
+      const ranges = luaRanges(session.getDocument().getAllLines());
+      return ranges.length ? ranges : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function inProcLuaBlock(session, pos) {
+    const ranges = sessionLuaRanges(session);
+    return !!ranges && inLuaRange(ranges, pos.row);
+  }
+
+  ssExt._procLua = { luaRanges, inLuaRange, blankNonLua }; // test/units.js
+
+  // One blanked document per SAS session, under the same scratch root the
+  // path-less .lua editors use (a document under no workspace root is not a
+  // module, and the server drops it once any root exists - see scratchLuaPath).
+  const procLuaDocs = new Map(); // ace session id -> { uri, version, text, session }
+
+  function procLuaDoc(session) {
+    let doc = procLuaDocs.get(session.id);
+    if (!doc) {
+      doc = {
+        uri: `file://${SCRATCH_LUA_ROOT}/${session.id}-proclua.lua`,
+        version: 0,
+        text: null,
+        session,
+      };
+      procLuaDocs.set(session.id, doc);
+    }
+    return doc;
+  }
+
+  // Push the session's current Lua to the server, opening the document the first
+  // time. Returns the doc, or null when there is no Lua in this session at all -
+  // which is what keeps a plain .sas file from ever starting the server (a 12 MB
+  // wasm fetch) or opening a document nobody asked for.
+  async function syncProcLuaDoc(session) {
+    const ranges = sessionLuaRanges(session);
+    if (!ranges) {
+      // The block was deleted (or the file grew past the limit): close the
+      // document and take its diagnostics with it, or they would sit in the
+      // gutter of a file that has no Lua in it any more.
+      if (procLuaDocs.has(session.id)) {
+        closeProcLuaDoc(session);
+        setProcLuaAnnotations(session, []);
+        dropProcLuaTokens(session);
+      }
+      return null;
+    }
+    // Awaiting the provider is what orders this behind ace-linters' initialize:
+    // the worker forwards in the order it receives, and that request goes out
+    // when the provider is built.
+    if (!(await ensureLuaLinters())) return null;
+    const raw = ssExt._luaRaw;
+    if (!raw) return null;
+    const doc = procLuaDoc(session);
+    const text = blankNonLua(session.getDocument().getAllLines(), ranges);
+    if (doc.text === text) return doc;
+    doc.text = text;
+    if (doc.version === 0) {
+      doc.version = 1;
+      raw.notify("textDocument/didOpen", {
+        textDocument: { uri: doc.uri, languageId: "lua", version: 1, text },
+      });
+      hookProcLuaAnnotations(session);
+    } else {
+      doc.version += 1;
+      raw.notify("textDocument/didChange", {
+        textDocument: { uri: doc.uri, version: doc.version },
+        contentChanges: [{ text }],
+      });
+    }
+    return doc;
+  }
+
+  // Debounced, because it runs off the session's change event; the server syncs
+  // FULL text, so coalescing costs nothing but the delay.
+  function scheduleProcLuaSync(session) {
+    if (!session || session.$modeId !== "ace/mode/sas") return;
+    // Nothing to do until this file HAS a block - and this runs per keystroke,
+    // so it must stay a line scan and nothing more.
+    if (!procLuaDocs.has(session.id) && !sessionLuaRanges(session)) return;
+    clearTimeout(session.$ssExtProcLuaTimer);
+    session.$ssExtProcLuaTimer = setTimeout(() => {
+      // Through the token refresh, which syncs first - the tokens have to follow
+      // every edit, exactly like the diagnostics the sync itself brings back.
+      refreshProcLuaTokens(session).catch((e) =>
+        console.warn("[SS Ext] PROC LUA sync failed:", (e && e.message) || e),
+      );
+    }, PROC_LUA_SYNC_MS);
+  }
+
+  function closeProcLuaDoc(session) {
+    const doc = session && procLuaDocs.get(session.id);
+    if (!doc) return;
+    procLuaDocs.delete(session.id);
+    clearTimeout(session.$ssExtProcLuaTimer);
+    if (doc.version > 0 && ssExt._luaRaw) {
+      ssExt._luaRaw.notify("textDocument/didClose", { textDocument: { uri: doc.uri } });
+    }
+  }
+
+  // The SAS provider owns session.setAnnotations and replaces the WHOLE set on
+  // every validation, so the two servers' diagnostics can only share the gutter
+  // if one of them keeps the other's set and re-applies both. This wrapper is
+  // that: it remembers what anyone else asked for and always appends ours.
+  function hookProcLuaAnnotations(session) {
+    if (session.$ssExtAnnotationsHooked) return;
+    session.$ssExtAnnotationsHooked = true;
+    const original = session.setAnnotations.bind(session);
+    session.$ssExtOtherAnnotations = session.getAnnotations() || [];
+    session.setAnnotations = (annotations) => {
+      session.$ssExtOtherAnnotations = annotations || [];
+      original([...session.$ssExtOtherAnnotations, ...(session.$ssExtLuaAnnotations || [])]);
+    };
+  }
+
+  const LSP_SEVERITY = { 1: "error", 2: "warning", 3: "info", 4: "info" };
+
+  function setProcLuaAnnotations(session, annotations) {
+    session.$ssExtLuaAnnotations = annotations;
+    hookProcLuaAnnotations(session);
+    // Through the wrapper, so the SAS server's own set comes back with it.
+    session.setAnnotations(session.$ssExtOtherAnnotations || []);
+  }
+
+  function installProcLuaChannel(raw) {
+    // The semantic-token legend is only ever sent in the initialize result, and
+    // this channel is the one thing that sees it whether or not a .lua file is
+    // ever opened (ace-linters keeps its copy on a registered session's
+    // provider, and a .sas file has none).
+    raw.intercept((e) => {
+      const caps = e.data && e.data.result && e.data.result.capabilities;
+      const legend = caps && caps.semanticTokensProvider && caps.semanticTokensProvider.legend;
+      if (legend) procLuaTokenLegend = legend;
+    });
+    raw.onNotification("textDocument/publishDiagnostics", (params) => {
+      const uri = params && params.uri;
+      const doc = uri && [...procLuaDocs.values()].find((d) => d.uri === uri);
+      if (!doc) return; // a .lua file's own document - ace-linters' business
+      setProcLuaAnnotations(
+        doc.session,
+        (params.diagnostics || []).map((d) => ({
+          row: d.range.start.line,
+          column: d.range.start.character,
+          text: d.message,
+          type: LSP_SEVERITY[d.severity] || "info",
+        })),
+      );
+    });
+  }
+
+  // LSP CompletionItemKind -> the popup's right-hand column.
+  const LUA_ITEM_KINDS = {
+    2: "method",
+    3: "function",
+    5: "field",
+    6: "variable",
+    7: "class",
+    9: "module",
+    10: "property",
+    12: "value",
+    14: "keyword",
+    21: "constant",
+    22: "struct",
+    25: "type param",
+  };
+
+  async function procLuaComplete(session, pos) {
+    const doc = await syncProcLuaDoc(session);
+    if (!doc) return [];
+    const res = await ssExt._luaRaw.request("textDocument/completion", {
+      textDocument: { uri: doc.uri },
+      position: { line: pos.row, character: pos.column },
+    });
+    const items = (res && (res.items || res)) || [];
+    return items.map((item) => ({
+      caption: item.label,
+      // emmylua returns plain labels for these, but a server may send either -
+      // prefer what it asks to insert.
+      value: (item.textEdit && item.textEdit.newText) || item.insertText || item.label,
+      meta: LUA_ITEM_KINDS[item.kind] || "lua",
+      docText: (item.labelDetails && item.labelDetails.detail) || item.detail || "",
+      score: PROC_LUA_SCORE,
+    }));
+  }
+
+  function registerProcLuaCompleter() {
+    if (ssExt._procLuaCompleterAdded) return;
+    ssExt._procLuaCompleterAdded = true;
+    ace.require("ace/ext/language_tools").addCompleter({
+      id: "ssextProcLua",
+      getCompletions: (editor, session, pos, prefix, callback) => {
+        // A .lua file is an ace/mode/lua session and gets the whole ace-linters
+        // treatment instead, so this would only duplicate its entries there.
+        const ranges = sessionLuaRanges(session);
+        if (!ranges || !inLuaRange(ranges, pos.row)) return callback(null, []);
+        procLuaComplete(session, pos).then(
+          (items) => callback(null, items),
+          (e) => {
+            console.warn("[SS Ext] PROC LUA completion failed:", (e && e.message) || e);
+            callback(null, []);
+          },
+        );
+      },
+    });
+  }
+
+  // Hover inside a block, in the same order the .lua path uses: the SAS DATA
+  // step functions first (emmylua only knows sas.<name> through sas.lua's index
+  // signature, so it always has a vaguer answer), then the Lua server, then
+  // whatever the SAS server itself makes of the line.
+  function installProcLuaHover(provider) {
+    if (ssExt._procLuaHoverPatched) return;
+    ssExt._procLuaHoverPatched = true;
+    const original = provider.doHover.bind(provider);
+    provider.doHover = (session, position, callback) => {
+      const ranges = sessionLuaRanges(session);
+      if (!ranges || !inLuaRange(ranges, position.row)) return original(session, position, callback);
+      const fallback = () => original(session, position, callback);
+      sasFnHover(session, position)
+        .then((tooltip) => tooltip || procLuaHover(session, position))
+        .then((tooltip) => (tooltip ? callback && callback(tooltip) : fallback()), fallback);
+    };
+  }
+
+  // -- Semantic tokens inside a block ---------------------------------------------
+  //
+  // What paints `sas.sleep` and a required module's members the way `os.date` is
+  // painted in a .lua file: `os` only looks highlighted because ace's own lua
+  // mode hardcodes it, everything else needs the server. ace-linters does this
+  // for the sessions it owns, and this one is the SAS server's, so the tokens are
+  // fetched over the side channel and turned into the SAME ace text markers by
+  // hand - `session.addTextMarker` is the mixin ace-linters installs on the
+  // session prototype at registerEditor, and `toAceTokenClassName` is the
+  // (patched, theme-aware - see themedSemanticScope) method on its session
+  // provider, so the colours are identical to the .lua tab's by construction.
+  //
+  // ponytail: no viewport filter (installLspMarkerPatches' reason for existing) -
+  // a submit block is a handful of rows, not a 1200-line file. Add one if a block
+  // ever gets big enough to feel it.
+  let procLuaTokenLegend = null;
+
+  // LSP semantic token type -> the TextMate-ish scope ace themes are written
+  // against. Copied from ace-linters' toAceTokenType, which is bundle-internal:
+  // matching it is the whole point, since the .lua tab's colours come from it.
+  const LUA_TOKEN_SCOPES = {
+    class: "entity.name.type.class",
+    struct: "storage.type.struct",
+    enum: "entity.name.type.enum",
+    interface: "entity.name.type.interface",
+    namespace: "entity.name.namespace",
+    type: "entity.name.type",
+    parameter: "variable.parameter",
+    variable: "entity.name.variable",
+    enumMember: "variable.other.enummember",
+    property: "variable.other.property",
+    function: "entity.name.function",
+    method: "entity.name.function.member",
+    event: "variable.other.event",
+  };
+
+  // The LSP wire format: five ints per token, the first two delta-encoded
+  // (against the previous token's row, and its column when on the same row).
+  function decodeSemanticTokens(data, legend) {
+    const out = [];
+    if (!data || !legend) return out;
+    const types = legend.tokenTypes || [];
+    const mods = legend.tokenModifiers || [];
+    let row = 0;
+    let column = 0;
+    for (let i = 0; i + 4 < data.length; i += 5) {
+      row += data[i];
+      column = data[i] === 0 ? column + data[i + 1] : data[i + 1];
+      const name = types[data[i + 3]];
+      if (!name) continue;
+      const flags = data[i + 4];
+      const modifiers = mods.filter((_, bit) => flags & (1 << bit));
+      const scope = LUA_TOKEN_SCOPES[name] || name;
+      out.push({
+        row,
+        startColumn: column,
+        length: data[i + 2],
+        type: modifiers.length ? `${scope}.${modifiers.join(".")}` : scope,
+      });
+    }
+    return out;
+  }
+
+  ssExt._procLuaTokens = { decodeSemanticTokens, LUA_TOKEN_SCOPES }; // test/units.js
+
+  function clearProcLuaTokens(session) {
+    if (session.removeTextMarker) {
+      (session.$ssExtLuaTokenIds || []).forEach((id) => session.removeTextMarker(id));
+    }
+    session.$ssExtLuaTokenIds = [];
+  }
+
+  // The block is gone (or the file is): the markers AND the set they came from,
+  // so a later compaction cannot put stale ones back.
+  function dropProcLuaTokens(session) {
+    clearProcLuaTokens(session);
+    session.$ssExtLuaTokens = null;
+  }
+
+  // Re-add the last token set as fresh markers, for the one caller that has to
+  // take them out from under itself (the marker-store compaction above).
+  function reapplyProcLuaTokens(session) {
+    const tokens = session.$ssExtLuaTokens;
+    if (!tokens || !tokens.length || !session.addTextMarker) return;
+    const slp =
+      ssExt._lspProvider && ssExt._lspProvider.$getSessionLanguageProvider
+        ? ssExt._lspProvider.$getSessionLanguageProvider(session)
+        : null;
+    if (!slp) return;
+    session.$ssExtLuaTokenIds = tokens.map((t) =>
+      session.addTextMarker(
+        {
+          start: { row: t.row, column: t.startColumn },
+          end: { row: t.row, column: t.startColumn + t.length },
+        },
+        slp.toAceTokenClassName(t.type),
+      ),
+    );
+  }
+
+  async function refreshProcLuaTokens(session) {
+    const doc = await syncProcLuaDoc(session);
+    const slp =
+      ssExt._lspProvider && ssExt._lspProvider.$getSessionLanguageProvider
+        ? ssExt._lspProvider.$getSessionLanguageProvider(session)
+        : null;
+    // The marker mixin comes with a registered session; without one there is
+    // nothing to draw on (and no SAS server on this file either).
+    if (!slp || !session.addTextMarker) return;
+    if (!doc) return dropProcLuaTokens(session);
+    const res = await ssExt._luaRaw.request("textDocument/semanticTokens/full", {
+      textDocument: { uri: doc.uri },
+    });
+    clearProcLuaTokens(session);
+    session.$ssExtLuaTokens = decodeSemanticTokens(res && res.data, procLuaTokenLegend);
+    reapplyProcLuaTokens(session);
+    // Text markers are drawn into the rendered rows on afterRender, so the ones
+    // already on screen need one now.
+    if (slp.editor) slp.editor.renderer.$textLayer?.$applyTextMarkers?.();
+  }
+
+  // -- Signature help inside a block -----------------------------------------------
+  //
+  // ace-linters' SignatureTooltip is already attached to this editor (the SAS
+  // provider registered it) and calls provider.provideSignatureHelp on every
+  // caret move, so the tooltip, its idle timer and its Esc binding are all in
+  // place - only the answer has to come from the other server.
+  function installProcLuaSignatureHelp(provider) {
+    if (ssExt._procLuaSigPatched) return;
+    ssExt._procLuaSigPatched = true;
+    const original = provider.provideSignatureHelp.bind(provider);
+    provider.provideSignatureHelp = (session, position, callback) => {
+      const ranges = sessionLuaRanges(session);
+      if (!ranges || !inLuaRange(ranges, position.row)) {
+        return original(session, position, callback);
+      }
+      procLuaSignatureHelp(session, position).then(
+        (tooltip) => callback && callback(tooltip),
+        () => callback && callback(undefined),
+      );
+    };
+  }
+
+  // ace-linters' own fromSignatureHelp, for one server's answer: the active
+  // signature's label, with the active parameter bolded (that is the argument
+  // highlight) and the documentation under it.
+  function signatureTooltip(help) {
+    const signature = help && (help.signatures || [])[help.activeSignature || 0];
+    if (!signature) return undefined;
+    let text = signature.label;
+    const param = (signature.parameters || [])[help.activeParameter];
+    if (param && typeof param.label === "string") text = text.replace(param.label, `**${param.label}**`);
+    const doc = signature.documentation;
+    const docText = (doc && (doc.value || doc)) || "";
+    if (typeof docText === "string" && docText.trim()) text += "\n\n" + docText;
+    return { content: { type: "markdown", text } };
+  }
+
+  async function procLuaSignatureHelp(session, pos) {
+    const doc = await syncProcLuaDoc(session);
+    if (!doc) return undefined;
+    const help = await ssExt._luaRaw.request("textDocument/signatureHelp", {
+      textDocument: { uri: doc.uri },
+      position: { line: pos.row, character: pos.column },
+    });
+    return signatureTooltip(help);
+  }
+
+  ssExt._procLuaSignature = { signatureTooltip }; // test/units.js
+
+  async function procLuaHover(session, pos) {
+    const doc = await syncProcLuaDoc(session);
+    if (!doc) return undefined;
+    const hover = await ssExt._luaRaw.request("textDocument/hover", {
+      textDocument: { uri: doc.uri },
+      position: { line: pos.row, character: pos.column },
+    });
+    const contents = hover && hover.contents;
+    const text = (contents && (contents.value || contents)) || "";
+    if (typeof text !== "string" || !text.trim()) return undefined;
+    const range = hover.range || {
+      start: { line: pos.row, character: pos.column },
+      end: { line: pos.row, character: pos.column },
+    };
+    return {
+      content: { type: "markdown", text },
+      range: {
+        start: { row: range.start.line, column: range.start.character },
+        end: { row: range.end.line, column: range.end.character },
+      },
+    };
   }
 
   // -- One-time SAS.Editor / DMSEditor patches -----------------------------------

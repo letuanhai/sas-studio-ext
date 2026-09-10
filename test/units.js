@@ -453,6 +453,95 @@ assert.equal(sasDotWordAt(line("x = mysas.today()"), { row: 0, column: 12 }), nu
 console.log("PASS  sas.<name> function completions");
 
 // ---------------------------------------------------------------------------
+// src/editor-swap.js - the Lua inside PROC LUA submit;...endsubmit; blocks. The
+// document handed to the Lua server is the SAS file with every non-Lua line
+// blanked, so an LSP line/character IS an ace row/column - which is only true
+// if the ranges are right.
+const procLua = global.window.__ssExt._procLua;
+const src = [
+  "data one; set two; run;", // 0
+  "proc lua;", // 1
+  "  submit;", // 2
+  "    local x = 1", // 3
+  "    print(x)", // 4
+  "  endsubmit;", // 5
+  "run;", // 6
+  "proc print data=one; run;", // 7
+].join("\n");
+const lines = src.split("\n");
+assert.deepEqual(procLua.luaRanges(lines), [[3, 4]], "the fence lines themselves are SAS");
+assert.equal(procLua.inLuaRange([[3, 4]], 3), true);
+assert.equal(procLua.inLuaRange([[3, 4]], 5), false);
+// Every non-Lua line is blank, and the Lua ones are untouched at their own row.
+assert.deepEqual(procLua.blankNonLua(lines, [[3, 4]]).split("\n"), [
+  "",
+  "",
+  "",
+  "    local x = 1",
+  "    print(x)",
+  "",
+  "",
+  "",
+]);
+// An unclosed block runs to the end of the file (you are typing inside it).
+assert.deepEqual(procLua.luaRanges(["proc lua;", "submit;", "x = 1"]), [[2, 2]]);
+// `submit` on the proc line itself, and a step that ends without ever submitting.
+assert.deepEqual(procLua.luaRanges(["proc lua; submit;", "x = 1", "endsubmit;"]), [[1, 1]]);
+assert.deepEqual(procLua.luaRanges(["proc lua;", "run;", "x = 1"]), []);
+// "endsubmit" must not read as an opening "submit" - there is no word boundary
+// inside it, which is the whole reason the two tests can share a line scan.
+assert.deepEqual(procLua.luaRanges(["proc lua;", "submit;", "a", "endsubmit;", "b"]), [[2, 2]]);
+
+console.log("PASS  proc lua block ranges");
+
+// The semantic tokens for a block come back in the LSP wire format - five ints
+// per token, the first two delta-encoded - and have to become the same ace
+// scopes ace-linters produces for a .lua file, or the colours differ.
+const { decodeSemanticTokens } = global.window.__ssExt._procLuaTokens;
+const legend = {
+  tokenTypes: ["namespace", "class", "function", "method", "variable"],
+  tokenModifiers: ["declaration", "static", "readonly"],
+};
+// row 3 col 4 len 2 "class"; same row, +7 cols, len 4 "method" (+static);
+// two rows down, col 8 (absolute again, the row changed), len 3 "variable".
+const decoded = decodeSemanticTokens([3, 4, 2, 1, 0, 0, 7, 4, 3, 2, 2, 8, 3, 4, 0], legend);
+assert.deepEqual(decoded, [
+  { row: 3, startColumn: 4, length: 2, type: "entity.name.type.class" },
+  { row: 3, startColumn: 11, length: 4, type: "entity.name.function.member.static" },
+  { row: 5, startColumn: 8, length: 3, type: "entity.name.variable" },
+]);
+// A type the legend doesn't name is skipped rather than mislabelled, and a type
+// with no scope of its own passes through under its own name.
+assert.deepEqual(decodeSemanticTokens([0, 0, 1, 99, 0], legend), []);
+assert.deepEqual(decodeSemanticTokens([0, 0, 1, 0, 0], legend), [
+  { row: 0, startColumn: 0, length: 1, type: "entity.name.namespace" },
+]);
+assert.deepEqual(decodeSemanticTokens(null, legend), []);
+assert.deepEqual(decodeSemanticTokens([0, 0, 1, 0, 0], null), []);
+
+// The signature tooltip: the active parameter is bolded (that IS the argument
+// highlight) and the documentation goes underneath.
+const { signatureTooltip } = global.window.__ssExt._procLuaSignature;
+const help = {
+  activeParameter: 1,
+  signatures: [
+    {
+      label: "sas.sleep(amount: number, unit: number?)",
+      parameters: [{ label: "amount: number" }, { label: "unit: number?" }],
+      documentation: { value: "Sleep for `amount` units." },
+    },
+  ],
+};
+assert.equal(
+  signatureTooltip(help).content.text,
+  "sas.sleep(amount: number, **unit: number?**)\n\nSleep for `amount` units.",
+);
+assert.equal(signatureTooltip({ signatures: [] }), undefined);
+assert.equal(signatureTooltip(null), undefined);
+
+console.log("PASS  proc lua semantic tokens and signature tooltip");
+
+// ---------------------------------------------------------------------------
 // src/editor-swap.js - LSP semantic token scopes rewritten onto scopes ace
 // themes actually style (see themedSemanticScope for why).
 const semanticScope = global.window.__ssExt._semanticScope;

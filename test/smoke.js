@@ -1724,6 +1724,191 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     modeSwitchState,
   );
 
+  // -- PROC LUA submit; ... endsubmit; blocks --------------------------------------
+  // That Lua lives in an ace/mode/sas session, which belongs to the SAS server -
+  // ace-linters serves a session as one language - so it goes over the side
+  // channel onto the same emmylua worker, against a copy of the file with every
+  // non-Lua line blanked. What that has to buy: diagnostics on the right ROWS
+  // (the whole point of the blanking), completion of both halves of the `sas`
+  // table, hover from both servers, the SAS server's own annotations surviving
+  // alongside, and everything disappearing again when the block does.
+  const procLuaState = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_proc_lua";
+    div.style.cssText = "position:fixed;left:0;top:0;width:900px;height:400px;z-index:99999";
+    document.body.appendChild(div);
+    const text = [
+      "data one; set sashelp.class; run;", // 0
+      "proc lua;", // 1
+      "  submit;", // 2
+      "    local dsid = sas.open('sashelp.class')", // 3
+      "    local n = ssext_undefined_global_here + 1", // 4
+      "    print(sas.today())", // 5
+      "    local s = sas.sub", // 6
+      "  endsubmit;", // 7
+      "run;", // 8
+    ].join("\n");
+    const a = new window.__ssExt.AceEditorAdapter(div.id, text, "sas");
+    const session = a.aceEditor.session;
+    const state = { started: false };
+    for (let i = 0; i < 60; i++) {
+      if (a._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // The document opens off the constructor's own sync - no keystroke needed.
+    let ann = [];
+    for (let i = 0; i < 60; i++) {
+      ann = session.getAnnotations() || [];
+      if (ann.some((x) => /undefined global/i.test(x.text))) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    state.started = !!window.__ssExt._luaLintersProvider;
+    state.diagnostic = ann.find((x) => /undefined global/i.test(x.text)) || null;
+
+    // Completion at the end of `local s = sas.sub`: the package API from
+    // src/lua/sas.lua through the Lua server, the DATA step functions through
+    // the SAS one - the two halves of the sas table, in a .sas file.
+    const pos = { row: 6, column: session.getLine(6).length };
+    const gather = (id) =>
+      new Promise((resolve) => {
+        const c = (a.aceEditor.completers || []).find((x) => x.id === id);
+        if (!c) return resolve([]);
+        c.getCompletions(a.aceEditor, session, pos, "sub", (e, items) =>
+          resolve((items || []).map((i) => i.caption)),
+        );
+      });
+    state.luaItems = await gather("ssextProcLua");
+    for (let i = 0; i < 20; i++) {
+      state.sasFnItems = await gather("ssextSasFns");
+      if (state.sasFnItems.length) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    // ...and nothing at all outside the block, where the line is SAS.
+    state.outsideItems = await new Promise((resolve) => {
+      const c = (a.aceEditor.completers || []).find((x) => x.id === "ssextProcLua");
+      c.getCompletions(a.aceEditor, session, { row: 0, column: 9 }, "one", (e, items) =>
+        resolve((items || []).length),
+      );
+    });
+
+    // Hover goes through the SAS provider (it owns this session) and is answered
+    // by whichever server knows the word.
+    const provider = window.__ssExt._lspProvider;
+    const hover = (row, column) =>
+      new Promise((resolve) => {
+        if (!provider) return resolve("");
+        const t = setTimeout(() => resolve(""), 15000);
+        provider.doHover(session, { row, column }, (tip) => {
+          clearTimeout(t);
+          resolve((tip && tip.content && tip.content.text) || "");
+        });
+      });
+    state.hoverSasFn = (await hover(5, 15)).slice(0, 120); // sas.today()
+    state.hoverLuaLocal = (await hover(3, 12)).slice(0, 120); // local dsid
+
+    // Semantic tokens: the same ace text markers ace-linters makes for a .lua
+    // file, added by hand because this session belongs to the SAS server. The
+    // classes are what the colours come from, so read those back.
+    for (let i = 0; i < 40; i++) {
+      if ((session.$ssExtLuaTokenIds || []).length) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const markers = session.$textMarkers || [];
+    state.tokenClasses = (session.$ssExtLuaTokenIds || [])
+      .map((id) => {
+        const m = markers[id];
+        if (!m) return null;
+        const r = m.range || m;
+        return (session.getLine(r.start.row) || "").slice(r.start.column, r.end.column) +
+          "|" + (m.className || "");
+      })
+      .filter(Boolean);
+
+    // Signature help, answered through the SAS provider's own tooltip machinery.
+    const sigRow = 3; // local dsid = sas.open('sashelp.class')
+    const sig = (row, column) =>
+      new Promise((resolve) => {
+        const t = setTimeout(() => resolve(""), 15000);
+        provider.provideSignatureHelp(session, { row, column }, (tip) => {
+          clearTimeout(t);
+          resolve((tip && tip.content && tip.content.text) || "");
+        });
+      });
+    state.signature = await sig(sigRow, session.getLine(sigRow).indexOf("(") + 1);
+
+    // The SAS server's annotations and ours share one gutter.
+    session.setAnnotations([{ row: 0, column: 0, text: "ssext sas side", type: "warning" }]);
+    state.merged = (session.getAnnotations() || []).map((x) => x.text);
+    // Delete the block: the document is closed and its diagnostics go with it.
+    session.doc.replace(
+      { start: { row: 0, column: 0 }, end: { row: 8, column: 4 } },
+      "data one; run;",
+    );
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      state.afterRemoval = (session.getAnnotations() || []).map((x) => x.text);
+      if (!state.afterRemoval.some((t) => /undefined global/i.test(t))) break;
+    }
+    a.dispose();
+    div.remove();
+    return state;
+  });
+  check(
+    procLuaState.started
+      ? "PROC LUA: the server diagnoses the block on the file's own rows"
+      : "PROC LUA diagnostics (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      (procLuaState.diagnostic && procLuaState.diagnostic.row === 4),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: both halves of the sas table complete inside the block"
+      : "PROC LUA completion (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      ((procLuaState.luaItems || []).includes("submit") &&
+        (procLuaState.sasFnItems || []).includes("substrn") &&
+        procLuaState.outsideItems === 0),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: hover answers from the SAS server and the Lua one"
+      : "PROC LUA hover (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      (/TODAY/i.test(procLuaState.hoverSasFn || "") &&
+        /dsid/.test(procLuaState.hoverLuaLocal || "")),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: the block's semantic tokens are painted like a .lua file's"
+      : "PROC LUA semantic tokens (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      // `sas` is the case that started this: ace's lua mode paints `os` itself
+      // and leaves `sas` a plain identifier, so only the server can colour it.
+      ((procLuaState.tokenClasses || []).some((t) => /^sas\|.*ace_support.*ace_class/.test(t)) &&
+        (procLuaState.tokenClasses || []).some((t) => /^open\|.*ace_support.*ace_function/.test(t))),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: signature help arrives with the active argument marked"
+      : "PROC LUA signature help (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started || /sas\.open\(\*\*/.test(procLuaState.signature || ""),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: the two servers' annotations coexist, and go when the block does"
+      : "PROC LUA annotation merge (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      ((procLuaState.merged || []).includes("ssext sas side") &&
+        (procLuaState.merged || []).some((t) => /undefined global/i.test(t)) &&
+        (procLuaState.afterRemoval || []).join() === "ssext sas side"),
+    procLuaState,
+  );
+
   // -- Completion from the other open editors --------------------------------------
   // Words defined in one editor must be offered in another, and must follow edits.
   // A registers as a text viewer (what allAdapters() walks) so this needs no second
