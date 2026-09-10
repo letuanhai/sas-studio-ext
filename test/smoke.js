@@ -3187,6 +3187,15 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       name: t.editor.name,
       mode: adapter.aceEditor.session.$modeId,
       dirty: (adapter._dirtyRows || []).length,
+      // The save drives SAS Studio's own Save As dialog, so a failure is a stuck
+      // dialog or a notification - say which, rather than just "the name never
+      // changed".
+      notice: [...document.querySelectorAll('div[style*="z-index: 100000"]')]
+        .map((n) => n.innerText)
+        .join(" | "),
+      dialogOpen: Object.values((window.dijit.registry._hash || {}))
+        .filter((w) => w.open && w.declaredClass && /Dialog/.test(w.declaredClass))
+        .map((w) => w.id),
     };
     const delUrl = a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(path);
     out.deleted = await new Promise((res) =>

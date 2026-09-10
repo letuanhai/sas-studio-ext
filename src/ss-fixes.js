@@ -1081,7 +1081,13 @@ Add a prefix to the path for different option:
       (function poll() {
         const saveAsDialog = window.appDMS.dialogs.saveAsDialog;
         if (saveAsDialog && saveAsDialog.dialog.open) return resolve(saveAsDialog);
-        if (Date.now() - start > (timeoutMs ?? 3000)) return reject(new Error("Save As dialog did not open"));
+        // 15s, not 3: the dialog is built on first use and its destination tree
+        // is fetched from the workspace session, so the FIRST Save As of a page
+        // can take several seconds - and any Save As at all can, when that
+        // session is busy. It resolves the moment the dialog opens, so a longer
+        // cap costs nothing when it is warm; too short a one just reported
+        // "Save As dialog did not open" and silently skipped the save.
+        if (Date.now() - start > (timeoutMs ?? 15000)) return reject(new Error("Save As dialog did not open"));
         setTimeout(poll, 50);
       })();
     });
