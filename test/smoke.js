@@ -1281,6 +1281,318 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     popupWidth,
   );
 
+  // -- PROC LUA submit; ... endsubmit; blocks --------------------------------------
+  // DELIBERATELY BEFORE the .lua block below, and that order is a check in
+  // itself: ace-linters constructs its LanguageClient - and so sends
+  // `initialize` - only when a document of a mode is first added, which for Lua
+  // normally happens when a .lua editor registers. A .sas file with a block
+  // never registers one, so everything here has to work on a server that
+  // ensureLuaLinters() initialized by itself (initLuaService). Run after the
+  // .lua block instead, all of it passes on a server that block warmed up, which
+  // is exactly how this went unnoticed while no ordinary .sas file worked at all.
+  //
+  // That Lua lives in an ace/mode/sas session, which belongs to the SAS server -
+  // ace-linters serves a session as one language - so it goes over the side
+  // channel onto the same emmylua worker, against a copy of the file with every
+  // non-Lua line blanked. What that has to buy: diagnostics on the right ROWS
+  // (the whole point of the blanking), completion of both halves of the `sas`
+  // table, hover from both servers, the SAS server's own annotations surviving
+  // alongside, and everything disappearing again when the block does.
+  const procLuaState = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_proc_lua";
+    div.style.cssText = "position:fixed;left:0;top:0;width:900px;height:400px;z-index:99999";
+    document.body.appendChild(div);
+    const text = [
+      "data one; set sashelp.class; run;", // 0
+      "proc lua;", // 1
+      "  submit;", // 2
+      "    local dsid = sas.open('sashelp.class')", // 3
+      "    local n = ssext_undefined_global_here + 1", // 4
+      "    print(sas.today())", // 5
+      "    local s = sas.sub", // 6
+      "    print(dsid)", // 7 - a second occurrence, for the highlight check
+      "  endsubmit;", // 8
+      "run;", // 9
+    ].join("\n");
+    const a = new window.__ssExt.AceEditorAdapter(div.id, text, "sas");
+    const session = a.aceEditor.session;
+    const state = { started: false };
+    for (let i = 0; i < 60; i++) {
+      if (a._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // The document opens off the constructor's own sync - no keystroke needed.
+    let ann = [];
+    for (let i = 0; i < 60; i++) {
+      ann = session.getAnnotations() || [];
+      if (ann.some((x) => /undefined global/i.test(x.text))) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    state.started = !!window.__ssExt._luaLintersProvider;
+    state.diagnostic = ann.find((x) => /undefined global/i.test(x.text)) || null;
+
+    // Completion at the end of `local s = sas.sub`: the package API from
+    // src/lua/sas.lua through the Lua server, the DATA step functions through
+    // the SAS one - the two halves of the sas table, in a .sas file.
+    const pos = { row: 6, column: session.getLine(6).length };
+    const gather = (id) =>
+      new Promise((resolve) => {
+        const c = (a.aceEditor.completers || []).find((x) => x.id === id);
+        if (!c) return resolve([]);
+        c.getCompletions(a.aceEditor, session, pos, "sub", (e, items) =>
+          resolve((items || []).map((i) => i.caption)),
+        );
+      });
+    state.luaItems = await gather("ssextProcLua");
+    for (let i = 0; i < 20; i++) {
+      state.sasFnItems = await gather("ssextSasFns");
+      if (state.sasFnItems.length) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    // ...and nothing at all outside the block, where the line is SAS.
+    state.outsideItems = await new Promise((resolve) => {
+      const c = (a.aceEditor.completers || []).find((x) => x.id === "ssextProcLua");
+      c.getCompletions(a.aceEditor, session, { row: 0, column: 9 }, "one", (e, items) =>
+        resolve((items || []).length),
+      );
+    });
+
+    // Hover goes through the SAS provider (it owns this session) and is answered
+    // by whichever server knows the word.
+    const provider = window.__ssExt._lspProvider;
+    const hover = (row, column) =>
+      new Promise((resolve) => {
+        if (!provider) return resolve("");
+        const t = setTimeout(() => resolve(""), 15000);
+        provider.doHover(session, { row, column }, (tip) => {
+          clearTimeout(t);
+          resolve((tip && tip.content && tip.content.text) || "");
+        });
+      });
+    state.hoverSasFn = (await hover(5, 15)).slice(0, 120); // sas.today()
+    state.hoverLuaLocal = (await hover(3, 12)).slice(0, 120); // local dsid
+
+    // Semantic tokens: the same ace text markers ace-linters makes for a .lua
+    // file, added by hand because this session belongs to the SAS server. The
+    // classes are what the colours come from, so read those back.
+    for (let i = 0; i < 40; i++) {
+      if ((session.$ssExtLuaTokenIds || []).length) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const markers = session.$textMarkers || [];
+    state.tokenClasses = (session.$ssExtLuaTokenIds || [])
+      .map((id) => {
+        const m = markers[id];
+        if (!m) return null;
+        const r = m.range || m;
+        return (session.getLine(r.start.row) || "").slice(r.start.column, r.end.column) +
+          "|" + (m.className || "");
+      })
+      .filter(Boolean);
+
+    // Signature help, answered through the SAS provider's own tooltip machinery.
+    const sigRow = 3; // local dsid = sas.open('sashelp.class')
+    const sig = (row, column) =>
+      new Promise((resolve) => {
+        const t = setTimeout(() => resolve(""), 15000);
+        provider.provideSignatureHelp(session, { row, column }, (tip) => {
+          clearTimeout(t);
+          resolve((tip && tip.content && tip.content.text) || "");
+        });
+      });
+    state.signature = await sig(sigRow, session.getLine(sigRow).indexOf("(") + 1);
+
+    // Occurrence highlights: the wrap sits on the message controller, so drive it
+    // exactly the way ace-linters' own changeSelection timer does. `dsid` is
+    // declared on row 3 and used on row 7, and the SAS server knows nothing of it.
+    state.highlightRows = await new Promise((resolve) => {
+      const slp = provider.$getSessionLanguageProvider(session);
+      if (!slp) return resolve(null);
+      const t = setTimeout(() => resolve(null), 15000);
+      provider.$messageController.findDocumentHighlights(
+        slp.comboDocumentIdentifier,
+        { line: 3, character: 11 }, // inside `dsid`
+        (hl) => {
+          clearTimeout(t);
+          resolve((hl || []).map((h) => h.range.start.line).sort());
+        },
+      );
+    });
+
+    // The SAS server's annotations and ours share one gutter.
+    session.setAnnotations([{ row: 0, column: 0, text: "ssext sas side", type: "warning" }]);
+    state.merged = (session.getAnnotations() || []).map((x) => x.text);
+    // Delete the block: the document is closed and its diagnostics go with it.
+    session.doc.replace(
+      { start: { row: 0, column: 0 }, end: { row: 9, column: 4 } },
+      "data one; run;",
+    );
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      state.afterRemoval = (session.getAnnotations() || []).map((x) => x.text);
+      if (!state.afterRemoval.some((t) => /undefined global/i.test(t))) break;
+    }
+    a.dispose();
+    div.remove();
+    return state;
+  });
+  check(
+    procLuaState.started
+      ? "PROC LUA: the server diagnoses the block on the file's own rows"
+      : "PROC LUA diagnostics (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      (procLuaState.diagnostic && procLuaState.diagnostic.row === 4),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: both halves of the sas table complete inside the block"
+      : "PROC LUA completion (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      ((procLuaState.luaItems || []).includes("submit") &&
+        (procLuaState.sasFnItems || []).includes("substrn") &&
+        procLuaState.outsideItems === 0),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: hover answers from the SAS server and the Lua one"
+      : "PROC LUA hover (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      (/TODAY/i.test(procLuaState.hoverSasFn || "") &&
+        /dsid/.test(procLuaState.hoverLuaLocal || "")),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: the block's semantic tokens are painted like a .lua file's"
+      : "PROC LUA semantic tokens (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      // `sas` is the case that started this: ace's lua mode paints `os` itself
+      // and leaves `sas` a plain identifier, so only the server can colour it.
+      ((procLuaState.tokenClasses || []).some((t) => /^sas\|.*ace_support.*ace_class/.test(t)) &&
+        (procLuaState.tokenClasses || []).some((t) => /^open\|.*ace_support.*ace_function/.test(t))),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: signature help arrives with the active argument marked"
+      : "PROC LUA signature help (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started || /sas\.open\(\*\*/.test(procLuaState.signature || ""),
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: occurrence highlights come from the Lua server inside a block"
+      : "PROC LUA document highlights (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      (procLuaState.highlightRows || []).join() === "3,7",
+    procLuaState,
+  );
+  check(
+    procLuaState.started
+      ? "PROC LUA: the two servers' annotations coexist, and go when the block does"
+      : "PROC LUA annotation merge (skipped: lib/emmylua-lsp not built)",
+    !procLuaState.started ||
+      ((procLuaState.merged || []).includes("ssext sas side") &&
+        (procLuaState.merged || []).some((t) => /undefined global/i.test(t)) &&
+        (procLuaState.afterRemoval || []).join() === "ssext sas side"),
+    procLuaState,
+  );
+
+  // Formatting a block: its own fixture, because it rewrites the document and
+  // every check above reads fixed row numbers. What it has to prove is that the
+  // edits land inside the block and NOWHERE else - the document the formatter saw
+  // has blank lines where the SAS is, and collapsing those is a thing formatters do.
+  const procLuaFormat = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_proc_lua_fmt";
+    div.style.cssText = "position:fixed;left:-9999px;top:0;width:600px;height:300px";
+    document.body.appendChild(div);
+    const text = [
+      "data one; set sashelp.class; run;", // 0
+      "proc lua;", // 1
+      "  submit;", // 2
+      // THREE rows at three DIFFERENT indents, none of them the smallest twice:
+      // blockIndent takes the minimum over the block, and with one row the
+      // minimum, the first row's indent and the last row's all agree, so any of
+      // the three implementations passes. Here min=8, first=12, last=16.
+      // All three are flat statements, so the formatter puts them at one level
+      // and the 8-space base goes back on each.
+      "            local x    =    1", // 3
+      "        print(x)", // 4
+      "                print(x + 1)", // 5
+      "  endsubmit;", // 6
+      "run;", // 7
+    ].join("\n");
+    const a = new window.__ssExt.AceEditorAdapter(div.id, text, "sas");
+    const session = a.aceEditor.session;
+    const state = { started: false };
+    for (let i = 0; i < 60; i++) {
+      if (window.__ssExt._luaLintersProvider) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    state.started = !!window.__ssExt._luaLintersProvider;
+    a.aceEditor.moveCursorTo(3, 12);
+    a.aceEditor.execCommand("formatDocument");
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (session.getLine(3) !== "            local x    =    1") break;
+    }
+    state.lines = session.getDocument().getAllLines();
+
+    // The wrap must fall THROUGH outside the block: this session has a PROC LUA
+    // document, so a highlight request on a SAS row must still reach the SAS
+    // server rather than be answered by emmylua against a blanked document.
+    const provider = window.__ssExt._lspProvider;
+    state.sasRowHighlights = await new Promise((resolve) => {
+      const slp = provider && provider.$getSessionLanguageProvider(session);
+      if (!slp) return resolve(null);
+      const t = setTimeout(() => resolve("timeout"), 15000);
+      provider.$messageController.findDocumentHighlights(
+        slp.comboDocumentIdentifier,
+        { line: 0, character: 6 }, // `one` on the SAS data step line
+        (hl) => {
+          clearTimeout(t);
+          resolve((hl || []).map((h) => h.range.start.line));
+        },
+      );
+    });
+
+    a.dispose();
+    div.remove();
+    return state;
+  });
+  check(
+    procLuaFormat.started
+      ? "PROC LUA: formatDocument formats the block, keeps its indent, and touches nothing else"
+      : "PROC LUA formatting (skipped: lib/emmylua-lsp not built)",
+    !procLuaFormat.started ||
+      // The 8-space base is the interesting half: in the blanked document the
+      // block's Lua is top-level, so the server hands it back flush at column 0.
+      // 8 is the block's MINIMUM indent - row 3's own 12 and row 5's 16 are what
+      // a first-row or last-row implementation would have used instead.
+      ((procLuaFormat.lines || [])[3] === "        local x = 1" &&
+        (procLuaFormat.lines || [])[4] === "        print(x)" &&
+        (procLuaFormat.lines || [])[5] === "        print(x + 1)" &&
+        (procLuaFormat.lines || []).length === 8 &&
+        (procLuaFormat.lines || [])[0] === "data one; set sashelp.class; run;" &&
+        (procLuaFormat.lines || [])[7] === "run;"),
+    procLuaFormat,
+  );
+  check(
+    procLuaFormat.started
+      ? "PROC LUA: a highlight request outside the block still goes to the SAS server"
+      : "PROC LUA highlight fall-through (skipped: lib/emmylua-lsp not built)",
+    !procLuaFormat.started ||
+      // Whatever the SAS server answers, it cannot be the Lua block's rows -
+      // dropping the in-block test from the wrap is what this catches.
+      (procLuaFormat.sasRowHighlights !== "timeout" &&
+        !(procLuaFormat.sasRowHighlights || []).some((r) => r >= 3 && r <= 5)),
+    procLuaFormat,
+  );
+
   // -- Lua language server (.lua files) --------------------------------------------
   // A .lua file opened as text is one language end to end, so it goes through
   // ace-linters against the emmylua server (ensureLuaLinters), which is what
@@ -1641,6 +1953,460 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     luaScratchState,
   );
 
+  // -- Definition / references / rename --------------------------------------------
+  // ace-linters implements none of the three, so all of it is ours: the requests
+  // over the side channel, the uri -> open-editor mapping, the jump stack, the
+  // references prompt and the WorkspaceEdit application. Three fixtures in one
+  // page, because the interesting case is the one that spans them: a definition
+  // in ANOTHER open editor, and a rename that has to edit two documents at once.
+  const luaNavState = await page.evaluate(async () => {
+    if (!window.__ssExt._luaLintersProvider) return { started: false };
+    const dir = "/ssext-smoke/nav";
+    const mk = (id, text, mode, path) => {
+      const div = document.createElement("div");
+      div.id = id;
+      div.style.cssText = "position:fixed;left:-9999px;top:0;width:600px;height:300px";
+      document.body.appendChild(div);
+      return { div, adapter: new window.__ssExt.AceEditorAdapter(id, text, mode, path) };
+    };
+    const mod = mk(
+      "ssext_smoke_nav_mod",
+      "local M = {}\nfunction M.greet(name) return 'hi ' .. name end\nreturn M\n",
+      "ace/mode/lua",
+      `${dir}/ssext_navhelper.lua`,
+    );
+    const main = mk(
+      "ssext_smoke_nav_main",
+      'local h = require("ssext_navhelper")\nprint(h.greet("x"))\nprint(h.greet("y"))\n',
+      "ace/mode/lua",
+      `${dir}/ssext_navmain.lua`,
+    );
+    const sas = mk(
+      "ssext_smoke_nav_sas",
+      [
+        "data one; run;", // 0
+        "proc lua;", // 1
+        "  submit;", // 2
+        "    local counter = 0", // 3
+        "    counter = counter + 1", // 4
+        "    print(counter)", // 5
+        "  endsubmit;", // 6
+        "run;", // 7
+      ].join("\n"),
+      "sas",
+    );
+    // Everything here resolves a document uri back to the editor holding it
+    // through allAdapters(), which walks the text viewers and the code tabs -
+    // and a detached adapter is neither. Registering them as text viewers is
+    // what the cross-editor completion block does for the same reason; without
+    // it every uri maps to nothing and each of these commands correctly declines.
+    // A distinct tabHolder each: a real viewer entry always carries one, and an
+    // entry without it makes tabObjectForAdapter's viewer branch degrade to
+    // `tabHolder === undefined`, which every code tab matches - so the run would
+    // select an unrelated real tab as a side effect.
+    const entries = [mod, main, sas].map((e, i) => ({
+      adapter: e.adapter,
+      tabHolder: { ssextSmokeFixture: i },
+    }));
+    entries.forEach((e) => window.__ssExt._textViewers.push(e));
+    for (let i = 0; i < 60; i++) {
+      if (mod.adapter._lspRegistered && main.adapter._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // The root push re-indexes, so wait until require() actually resolves before
+    // asking anything cross-file - a definition into an unindexed module is null.
+    const mainSession = main.adapter.aceEditor.session;
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!(mainSession.getAnnotations() || []).some((a) => /resolve module/.test(a.text))) break;
+    }
+    const state = { started: true };
+
+    // -- definition, cross-file: h.greet("x") in main -> the declaration in the
+    // helper. Proves the uri came back mapped to an OPEN editor and the caret
+    // actually moved there.
+    main.adapter.aceEditor.focus();
+    main.adapter.aceEditor.moveCursorTo(1, 9); // inside `greet`
+    await main.adapter.aceEditor.execCommand("gotoDefinition");
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (mod.adapter.aceEditor.getCursorPosition().row === 1) break;
+    }
+    state.crossDefCursor = mod.adapter.aceEditor.getCursorPosition();
+    state.crossDefFocused = mod.adapter.aceEditor.isFocused();
+
+    // -- and back again, off the jump stack. The origin caret is deliberately
+    // MOVED AWAY first: gotoDefinition moved mod's caret, not main's, so main
+    // was still sitting on (1,9) and asserting it afterwards passed without
+    // gotoLastJump restoring anything at all.
+    main.adapter.aceEditor.moveCursorTo(3, 0);
+    state.originCursorBeforeBack = main.adapter.aceEditor.getCursorPosition();
+    await mod.adapter.aceEditor.execCommand("gotoLastJump");
+    await new Promise((r) => setTimeout(r, 400));
+    state.backCursor = main.adapter.aceEditor.getCursorPosition();
+    state.backFocused = main.adapter.aceEditor.isFocused();
+    state.modCursorAfterBack = mod.adapter.aceEditor.getCursorPosition();
+
+    // -- references, cross-file: the declaration plus both call sites.
+    const refs = await new Promise((resolve) => {
+      const seen = [];
+      const raw = window.__ssExt._luaRaw;
+      raw
+        .request("textDocument/references", {
+          textDocument: { uri: `file://${dir}/ssext_navhelper.lua` },
+          position: { line: 1, character: 12 },
+          context: { includeDeclaration: true },
+        })
+        .then((r) => resolve(r || seen));
+    });
+    state.refCount = (refs || []).length;
+    state.refFiles = [...new Set((refs || []).map((r) => r.uri.replace(/^.*\//, "")))].sort();
+    // ...and the prompt the command opens, listing one row per hit.
+    mod.adapter.aceEditor.focus();
+    mod.adapter.aceEditor.moveCursorTo(1, 12);
+    await mod.adapter.aceEditor.execCommand("findReferences");
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (document.querySelector(".ace_prompt_container")) break;
+    }
+    // The rendered rows of the popup, not the container's textContent - that also
+    // picks up ace's hidden character-measure element, which is a screenful of
+    // repeated glyphs and counts as exactly one line.
+    const promptEl = document.querySelector(".ace_prompt_container");
+    // The input is seeded with the identifier the references were asked for. The
+    // cmdLine's container is appended BEFORE the popup's, so the first non-empty
+    // .ace_line in the prompt is the input, not a result row.
+    state.refPromptValue = promptEl
+      ? [...promptEl.querySelectorAll(".ace_line")].map((n) => n.textContent.trim()).find(Boolean)
+      : null;
+    state.refPromptRows = [
+      ...document.querySelectorAll(".ace_prompt_container .ace_autocomplete .ace_line"),
+    ]
+      .map((n) => n.textContent.trim())
+      .filter(Boolean);
+    if (promptEl) {
+      // Esc closes it; leaving it open would swallow the keystrokes below.
+      promptEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    state.refPromptClosed = !document.querySelector(".ace_prompt_container");
+
+    // -- the rename COMMAND opens a prompt seeded with the current name, which
+    // is prepareRename's placeholder. Escaped again: the apply half is driven
+    // directly below, so this only has to prove the command reaches the prompt.
+    mod.adapter.aceEditor.focus();
+    mod.adapter.aceEditor.moveCursorTo(1, 12);
+    await mod.adapter.aceEditor.execCommand("renameSymbol");
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (document.querySelector(".ace_prompt_container")) break;
+    }
+    const renameEl = document.querySelector(".ace_prompt_container");
+    state.renamePromptValue = renameEl
+      ? [...renameEl.querySelectorAll(".ace_line")].map((n) => n.textContent.trim()).find(Boolean)
+      : null;
+    // The preview list, read off the REAL popup rather than the row builder.
+    // Typing into the prompt's own command line is the point: the rows are
+    // STATIC, so what is typed must not reach them - which is also what stops
+    // the highlight chasing the new name into the file name.
+    if (renameEl) {
+      const cmdLine = mod.adapter.aceEditor.cmdLine;
+      if (cmdLine) {
+        cmdLine.setValue("shout", 1);
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      state.renamePreviewShown = [
+        ...document.querySelectorAll(".ace_prompt_container .ace_autocomplete .ace_line"),
+      ]
+        .map((n) => n.textContent.trim())
+        .filter(Boolean);
+    }
+    if (renameEl) {
+      renameEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    // -- rename, cross-file: one call renames the declaration AND both call
+    // sites, in two different open editors.
+    state.beforeRename = {
+      mod: mod.adapter.getText(),
+      main: main.adapter.getText(),
+    };
+    await window.__ssExt._luaNav.applyRename(
+      `file://${dir}/ssext_navhelper.lua`,
+      { line: 1, character: 12 },
+      "salute",
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    state.afterRename = {
+      mod: mod.adapter.getText(),
+      main: main.adapter.getText(),
+    };
+
+    // -- the same three inside a PROC LUA block ------------------------------
+    const sasSession = sas.adapter.aceEditor.session;
+    for (let i = 0; i < 40; i++) {
+      if (window.__ssExt._procLuaDocs.get(sasSession.id)) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const blockUri = (window.__ssExt._procLuaDocs.get(sasSession.id) || {}).uri;
+    state.blockUri = blockUri || null;
+    for (let i = 0; i < 30 && blockUri; i++) {
+      const h = await window.__ssExt._luaRaw.request("textDocument/hover", {
+        textDocument: { uri: blockUri },
+        position: { line: 3, character: 11 },
+      });
+      if (h) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // definition of `counter` from its use on row 5 -> its declaration on row 3,
+    // in the file's OWN rows (the whole point of the blanking).
+    sas.adapter.aceEditor.focus();
+    sas.adapter.aceEditor.moveCursorTo(5, 12);
+    await sas.adapter.aceEditor.execCommand("gotoDefinition");
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (sas.adapter.aceEditor.getCursorPosition().row === 3) break;
+    }
+    state.blockDefCursor = sas.adapter.aceEditor.getCursorPosition();
+    // rename inside the block: every occurrence, and no SAS row touched.
+    state.beforeBlockRename = sas.adapter.getText();
+    await window.__ssExt._luaNav.applyRename(blockUri, { line: 3, character: 11 }, "tally");
+    await new Promise((r) => setTimeout(r, 500));
+    state.afterBlockRename = sas.adapter.getText();
+
+    // A rename whose edits would land outside the block is refused outright.
+    // Driven through applyRename itself, not through the predicate it uses:
+    // asserting blockEditsInside() directly is just re-running a units.js check
+    // and would still pass with the guard in applyLuaRename deleted, i.e. with
+    // the rename writing into SAS code. The answer is synthesised because the
+    // server cannot produce such an edit against a blanked document - that is
+    // what the guard is insurance against.
+    const realRequest = window.__ssExt._luaRaw.request;
+    state.beforeOutside = sas.adapter.getText();
+    window.__ssExt._luaRaw.request = (method, params) =>
+      method === "textDocument/rename"
+        ? Promise.resolve({
+            changes: {
+              [blockUri]: [
+                // row 0 is `data one; set sashelp.class; run;` - SAS, blanked in
+                // the document the server sees.
+                { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }, newText: "WRECK" },
+              ],
+            },
+          })
+        : realRequest(method, params);
+    try {
+      await window.__ssExt._luaNav.applyRename(blockUri, { line: 3, character: 11 }, "wrecked");
+    } finally {
+      window.__ssExt._luaRaw.request = realRequest;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    state.afterOutside = sas.adapter.getText();
+    state.outsideRefused = state.afterOutside === state.beforeOutside;
+
+    // -- the jump stack skips an editor that has since been disposed ---------
+    // A throwaway .lua editor jumps FROM, then is destroyed before going back:
+    // gotoLastJump must drop that entry and keep walking rather than moving a
+    // caret in a dead editor (which throws inside ace's renderer).
+    const ghost = mk(
+      "ssext_smoke_nav_ghost",
+      "local ghost = 1\nprint(ghost)\n",
+      "ace/mode/lua",
+      `${dir}/ssext_navghost.lua`,
+    );
+    const ghostEntry = { adapter: ghost.adapter, tabHolder: { ssextSmokeFixture: "ghost" } };
+    window.__ssExt._textViewers.push(ghostEntry);
+    main.adapter.aceEditor.moveCursorTo(1, 9);
+    ghost.adapter.aceEditor.focus();
+    ghost.adapter.aceEditor.moveCursorTo(1, 6);
+    await ghost.adapter.aceEditor.execCommand("gotoDefinition");
+    await new Promise((r) => setTimeout(r, 600));
+    window.__ssExt._textViewers.splice(window.__ssExt._textViewers.indexOf(ghostEntry), 1);
+    ghost.adapter.dispose();
+    ghost.div.remove();
+    state.ghostBackThrew = false;
+    try {
+      await main.adapter.aceEditor.execCommand("gotoLastJump");
+    } catch (e) {
+      state.ghostBackThrew = String((e && e.message) || e);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    // It walked past the dead entry to the live one underneath it.
+    state.ghostBackCursor = main.adapter.aceEditor.getCursorPosition();
+
+    // -- a rename naming a document that is NOT open is refused WHOLE ---------
+    // The all-or-nothing promise: the open document must be untouched too, so a
+    // partial apply (validate-as-you-go instead of plan-then-apply) fails here.
+    const beforeNotOpen = { mod: mod.adapter.getText(), main: main.adapter.getText() };
+    window.__ssExt._luaRaw.request = (method, params) =>
+      method === "textDocument/rename"
+        ? Promise.resolve({
+            changes: {
+              [`file://${dir}/ssext_navhelper.lua`]: [
+                { range: { start: { line: 1, character: 11 }, end: { line: 1, character: 16 } }, newText: "nope" },
+              ],
+              "file:///not/open/anywhere.lua": [
+                { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "X" },
+              ],
+            },
+          })
+        : realRequest(method, params);
+    try {
+      await window.__ssExt._luaNav.applyRename(
+        `file://${dir}/ssext_navhelper.lua`,
+        { line: 1, character: 12 },
+        "nope",
+      );
+    } finally {
+      window.__ssExt._luaRaw.request = realRequest;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    state.notOpenRefused =
+      mod.adapter.getText() === beforeNotOpen.mod &&
+      main.adapter.getText() === beforeNotOpen.main;
+
+    // -- the rename prompt's preview rows ------------------------------------
+    // Built from the real occurrences, with the typed name substituted in. Every
+    // row's `value` is the typed name, which is what makes the list safe under a
+    // free-text input (ace re-selects row 0 on each keystroke, and accepting a
+    // selected row takes its value).
+    const previewLocs = await realRequest("textDocument/references", {
+      textDocument: { uri: `file://${dir}/ssext_navhelper.lua` },
+      position: { line: 1, character: 12 },
+      context: { includeDeclaration: true },
+    });
+    state.previewRows = (window.__ssExt._luaNav.previewRows(previewLocs || [], "greet") || []).map(
+      (r) => ({ caption: r.caption, meta: r.meta, value: r.value }),
+    );
+
+    entries.forEach((e) =>
+      window.__ssExt._textViewers.splice(window.__ssExt._textViewers.indexOf(e), 1),
+    );
+    [mod, main, sas].forEach((e) => {
+      e.adapter.dispose();
+      e.div.remove();
+    });
+    return state;
+  });
+  check(
+    luaNavState.started
+      ? "Lua nav: gotoDefinition jumps into the other open .lua editor"
+      : "Lua nav: definition (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started ||
+      (luaNavState.crossDefCursor &&
+        luaNavState.crossDefCursor.row === 1 &&
+        luaNavState.crossDefFocused === true),
+    luaNavState,
+  );
+  check(
+    luaNavState.started
+      ? "Lua nav: gotoLastJump comes back to where the jump started"
+      : "Lua nav: jump stack (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started ||
+      // moved off (1,9) to (3,0) first, so coming back is a real restoration
+      ((luaNavState.originCursorBeforeBack || {}).row === 3 &&
+        luaNavState.backCursor &&
+        luaNavState.backCursor.row === 1 &&
+        luaNavState.backCursor.column === 9 &&
+        luaNavState.backFocused === true),
+    luaNavState,
+  );
+  check(
+    luaNavState.started
+      ? "Lua nav: findReferences seeds the prompt with the name and lists the declaration and both call sites"
+      : "Lua nav: references (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started ||
+      // seeded with the identifier under the caret, so the box is not empty and
+      // the rows below it survive that as a filter
+      (luaNavState.refPromptValue === "greet" &&
+        luaNavState.refCount === 3 &&
+        (luaNavState.refFiles || []).join() === "ssext_navhelper.lua,ssext_navmain.lua" &&
+        (luaNavState.refPromptRows || []).length === 3 &&
+        // each row names its file and 1-based line, and shows the source line
+        (luaNavState.refPromptRows || []).some((r) => /^ssext_navhelper\.lua:2\b/.test(r)) &&
+        (luaNavState.refPromptRows || []).filter((r) => /^ssext_navmain\.lua:[23]\b/.test(r))
+          .length === 2 &&
+        (luaNavState.refPromptRows || []).every((r) => /greet/.test(r)) &&
+        luaNavState.refPromptClosed === true),
+    luaNavState,
+  );
+  check(
+    luaNavState.started
+      ? "Lua nav: renameSymbol prompts with the current name, then rewrites every occurrence across two open editors"
+      : "Lua nav: rename (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started ||
+      (luaNavState.renamePromptValue === "greet" &&
+        /function M\.salute\(/.test((luaNavState.afterRename || {}).mod || "") &&
+        ((luaNavState.afterRename || {}).main || "").match(/h\.salute\(/g || []) !== null &&
+        ((luaNavState.afterRename || {}).main || "").match(/h\.salute\(/g).length === 2 &&
+        // the require() line is NOT a reference to the function and must survive
+        /require\("ssext_navhelper"\)/.test((luaNavState.afterRename || {}).main || "")),
+    luaNavState,
+  );
+  check(
+    luaNavState.started
+      ? "Lua nav: definition and rename work inside a PROC LUA block, on the file's own rows"
+      : "Lua nav: block definition/rename (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started ||
+      (luaNavState.blockDefCursor &&
+        luaNavState.blockDefCursor.row === 3 &&
+        // every `counter` renamed...
+        !/counter/.test(luaNavState.afterBlockRename || "") &&
+        (luaNavState.afterBlockRename || "").match(/tally/g).length === 4 &&
+        // ...and the SAS around it untouched
+        /^data one; run;/m.test(luaNavState.afterBlockRename || "") &&
+        /^ {2}endsubmit;$/m.test(luaNavState.afterBlockRename || "")),
+    luaNavState,
+  );
+  check(
+    luaNavState.started
+      ? "Lua nav: a block rename with an edit outside the block's rows leaves the file untouched"
+      : "Lua nav: block rename guard (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started || luaNavState.outsideRefused === true,
+    luaNavState,
+  );
+  check(
+    luaNavState.started
+      ? "Lua nav: a rename naming a file that is not open touches neither document"
+      : "Lua nav: not-open rename guard (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started || luaNavState.notOpenRefused === true,
+    luaNavState,
+  );
+  check(
+    luaNavState.started
+      ? "Lua nav: gotoLastJump walks past an editor disposed since the jump"
+      : "Lua nav: jump stack disposal (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started ||
+      (luaNavState.ghostBackThrew === false &&
+        (luaNavState.ghostBackCursor || {}).row === 1 &&
+        (luaNavState.ghostBackCursor || {}).column === 9),
+    luaNavState,
+  );
+  check(
+    luaNavState.started
+      ? "Lua nav: the rename prompt lists every occurrence as static text, location in the meta column"
+      : "Lua nav: rename preview (skipped: lib/emmylua-lsp not built)",
+    !luaNavState.started ||
+      // Rendered by the real prompt. The rows are STATIC source lines: typing
+      // "shout" into the box must not change them, so the ORIGINAL name is what
+      // appears and the typed one must not.
+      ((luaNavState.renamePreviewShown || []).length >= 3 &&
+        (luaNavState.renamePreviewShown || []).every((r) => /greet/.test(r)) &&
+        !(luaNavState.renamePreviewShown || []).some((r) => /shout/.test(r)) &&
+        // the location is the right-hand meta, so the caption is only code -
+        // otherwise the highlight lands in the file name
+        (luaNavState.renamePreviewShown || []).some((r) =>
+          /ssext_navhelper\.lua:2$/.test(r),
+        ) &&
+        (luaNavState.previewRows || []).length >= 3 &&
+        (luaNavState.previewRows || []).every((r) => !/ssext_nav/.test(r.caption)) &&
+        (luaNavState.previewRows || []).every((r) => /^\S+\.lua:\d+/.test(r.meta)) &&
+        // every row answers the CURRENT name, so a stray click cannot rename
+        (luaNavState.previewRows || []).every((r) => r.value === "greet")),
+    luaNavState,
+  );
+
   // -- Changing the mode moves the editor to the other language server -------------
   // ace's own settings pane changes a live session's mode, and the mode is what
   // picks the server. ace-linters only re-resolves services inside its shared
@@ -1722,191 +2488,6 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
         modeSwitchState.sasKnowsItAgain === true &&
         modeSwitchState.luaStillKnowsIt === false),
     modeSwitchState,
-  );
-
-  // -- PROC LUA submit; ... endsubmit; blocks --------------------------------------
-  // That Lua lives in an ace/mode/sas session, which belongs to the SAS server -
-  // ace-linters serves a session as one language - so it goes over the side
-  // channel onto the same emmylua worker, against a copy of the file with every
-  // non-Lua line blanked. What that has to buy: diagnostics on the right ROWS
-  // (the whole point of the blanking), completion of both halves of the `sas`
-  // table, hover from both servers, the SAS server's own annotations surviving
-  // alongside, and everything disappearing again when the block does.
-  const procLuaState = await page.evaluate(async () => {
-    const div = document.createElement("div");
-    div.id = "ssext_smoke_proc_lua";
-    div.style.cssText = "position:fixed;left:0;top:0;width:900px;height:400px;z-index:99999";
-    document.body.appendChild(div);
-    const text = [
-      "data one; set sashelp.class; run;", // 0
-      "proc lua;", // 1
-      "  submit;", // 2
-      "    local dsid = sas.open('sashelp.class')", // 3
-      "    local n = ssext_undefined_global_here + 1", // 4
-      "    print(sas.today())", // 5
-      "    local s = sas.sub", // 6
-      "  endsubmit;", // 7
-      "run;", // 8
-    ].join("\n");
-    const a = new window.__ssExt.AceEditorAdapter(div.id, text, "sas");
-    const session = a.aceEditor.session;
-    const state = { started: false };
-    for (let i = 0; i < 60; i++) {
-      if (a._lspRegistered) break;
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    // The document opens off the constructor's own sync - no keystroke needed.
-    let ann = [];
-    for (let i = 0; i < 60; i++) {
-      ann = session.getAnnotations() || [];
-      if (ann.some((x) => /undefined global/i.test(x.text))) break;
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    state.started = !!window.__ssExt._luaLintersProvider;
-    state.diagnostic = ann.find((x) => /undefined global/i.test(x.text)) || null;
-
-    // Completion at the end of `local s = sas.sub`: the package API from
-    // src/lua/sas.lua through the Lua server, the DATA step functions through
-    // the SAS one - the two halves of the sas table, in a .sas file.
-    const pos = { row: 6, column: session.getLine(6).length };
-    const gather = (id) =>
-      new Promise((resolve) => {
-        const c = (a.aceEditor.completers || []).find((x) => x.id === id);
-        if (!c) return resolve([]);
-        c.getCompletions(a.aceEditor, session, pos, "sub", (e, items) =>
-          resolve((items || []).map((i) => i.caption)),
-        );
-      });
-    state.luaItems = await gather("ssextProcLua");
-    for (let i = 0; i < 20; i++) {
-      state.sasFnItems = await gather("ssextSasFns");
-      if (state.sasFnItems.length) break;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-    // ...and nothing at all outside the block, where the line is SAS.
-    state.outsideItems = await new Promise((resolve) => {
-      const c = (a.aceEditor.completers || []).find((x) => x.id === "ssextProcLua");
-      c.getCompletions(a.aceEditor, session, { row: 0, column: 9 }, "one", (e, items) =>
-        resolve((items || []).length),
-      );
-    });
-
-    // Hover goes through the SAS provider (it owns this session) and is answered
-    // by whichever server knows the word.
-    const provider = window.__ssExt._lspProvider;
-    const hover = (row, column) =>
-      new Promise((resolve) => {
-        if (!provider) return resolve("");
-        const t = setTimeout(() => resolve(""), 15000);
-        provider.doHover(session, { row, column }, (tip) => {
-          clearTimeout(t);
-          resolve((tip && tip.content && tip.content.text) || "");
-        });
-      });
-    state.hoverSasFn = (await hover(5, 15)).slice(0, 120); // sas.today()
-    state.hoverLuaLocal = (await hover(3, 12)).slice(0, 120); // local dsid
-
-    // Semantic tokens: the same ace text markers ace-linters makes for a .lua
-    // file, added by hand because this session belongs to the SAS server. The
-    // classes are what the colours come from, so read those back.
-    for (let i = 0; i < 40; i++) {
-      if ((session.$ssExtLuaTokenIds || []).length) break;
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    const markers = session.$textMarkers || [];
-    state.tokenClasses = (session.$ssExtLuaTokenIds || [])
-      .map((id) => {
-        const m = markers[id];
-        if (!m) return null;
-        const r = m.range || m;
-        return (session.getLine(r.start.row) || "").slice(r.start.column, r.end.column) +
-          "|" + (m.className || "");
-      })
-      .filter(Boolean);
-
-    // Signature help, answered through the SAS provider's own tooltip machinery.
-    const sigRow = 3; // local dsid = sas.open('sashelp.class')
-    const sig = (row, column) =>
-      new Promise((resolve) => {
-        const t = setTimeout(() => resolve(""), 15000);
-        provider.provideSignatureHelp(session, { row, column }, (tip) => {
-          clearTimeout(t);
-          resolve((tip && tip.content && tip.content.text) || "");
-        });
-      });
-    state.signature = await sig(sigRow, session.getLine(sigRow).indexOf("(") + 1);
-
-    // The SAS server's annotations and ours share one gutter.
-    session.setAnnotations([{ row: 0, column: 0, text: "ssext sas side", type: "warning" }]);
-    state.merged = (session.getAnnotations() || []).map((x) => x.text);
-    // Delete the block: the document is closed and its diagnostics go with it.
-    session.doc.replace(
-      { start: { row: 0, column: 0 }, end: { row: 8, column: 4 } },
-      "data one; run;",
-    );
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 500));
-      state.afterRemoval = (session.getAnnotations() || []).map((x) => x.text);
-      if (!state.afterRemoval.some((t) => /undefined global/i.test(t))) break;
-    }
-    a.dispose();
-    div.remove();
-    return state;
-  });
-  check(
-    procLuaState.started
-      ? "PROC LUA: the server diagnoses the block on the file's own rows"
-      : "PROC LUA diagnostics (skipped: lib/emmylua-lsp not built)",
-    !procLuaState.started ||
-      (procLuaState.diagnostic && procLuaState.diagnostic.row === 4),
-    procLuaState,
-  );
-  check(
-    procLuaState.started
-      ? "PROC LUA: both halves of the sas table complete inside the block"
-      : "PROC LUA completion (skipped: lib/emmylua-lsp not built)",
-    !procLuaState.started ||
-      ((procLuaState.luaItems || []).includes("submit") &&
-        (procLuaState.sasFnItems || []).includes("substrn") &&
-        procLuaState.outsideItems === 0),
-    procLuaState,
-  );
-  check(
-    procLuaState.started
-      ? "PROC LUA: hover answers from the SAS server and the Lua one"
-      : "PROC LUA hover (skipped: lib/emmylua-lsp not built)",
-    !procLuaState.started ||
-      (/TODAY/i.test(procLuaState.hoverSasFn || "") &&
-        /dsid/.test(procLuaState.hoverLuaLocal || "")),
-    procLuaState,
-  );
-  check(
-    procLuaState.started
-      ? "PROC LUA: the block's semantic tokens are painted like a .lua file's"
-      : "PROC LUA semantic tokens (skipped: lib/emmylua-lsp not built)",
-    !procLuaState.started ||
-      // `sas` is the case that started this: ace's lua mode paints `os` itself
-      // and leaves `sas` a plain identifier, so only the server can colour it.
-      ((procLuaState.tokenClasses || []).some((t) => /^sas\|.*ace_support.*ace_class/.test(t)) &&
-        (procLuaState.tokenClasses || []).some((t) => /^open\|.*ace_support.*ace_function/.test(t))),
-    procLuaState,
-  );
-  check(
-    procLuaState.started
-      ? "PROC LUA: signature help arrives with the active argument marked"
-      : "PROC LUA signature help (skipped: lib/emmylua-lsp not built)",
-    !procLuaState.started || /sas\.open\(\*\*/.test(procLuaState.signature || ""),
-    procLuaState,
-  );
-  check(
-    procLuaState.started
-      ? "PROC LUA: the two servers' annotations coexist, and go when the block does"
-      : "PROC LUA annotation merge (skipped: lib/emmylua-lsp not built)",
-    !procLuaState.started ||
-      ((procLuaState.merged || []).includes("ssext sas side") &&
-        (procLuaState.merged || []).some((t) => /undefined global/i.test(t)) &&
-        (procLuaState.afterRemoval || []).join() === "ssext sas side"),
-    procLuaState,
   );
 
   // -- Completion from the other open editors --------------------------------------

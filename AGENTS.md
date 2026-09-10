@@ -256,7 +256,15 @@ Consequences of that split: manifest entries and `chrome.scripting` `files:` lis
   what it does expose is the keymap array itself (`exports.handler.defaultKeymap`), which is the complete set, with
   `Vim.map`'s unshifted user entries on top.
   Far too long for vim's notification box, so `openVimMappingsPrompt()` opens the same `ace/ext/prompt` the command
-  palette uses, one row per mapping (`keys` + what it dispatches — `toKeys`, else the operator/motion/action, plus the
+  palette uses — through `openListPrompt()`, the ONE call site all four of these share (command palette, vim mappings,
+  the Lua references list and the rename preview), which had accumulated as three near-verbatim copies of the same
+  `FilteredList` + `getPrefix` + clone-and-filter block before it was factored out;
+  callers differ only in the entries, the empty-list message, what accepting does, and whether the typed text FILTERS
+  the rows (a picker) or is itself the answer (`filter: false`, the rename preview).
+  Its `entries` is a FUNCTION of the current input rather than an array, which is what lets the preview rebuild its
+  rows per keystroke;
+  a picker ignores the argument.
+  One row per mapping (`keys` + what it dispatches — `toKeys`, else the operator/motion/action, plus the
   ace command name for the `aceCommand` action — with the mode as the `meta` column), so the filter input searches keys
   and behaviour alike and accepting a row just closes it.
   It is deliberately NOT a `:map` ex-command: the ex dialog's `close()` ends with `editor.focus()`, so a prompt opened
@@ -747,8 +755,11 @@ That buys ace-linters' whole client-side feature set with no UI code here: diagn
 `textDocument/publishDiagnostics`;
 a `.lua` session has no SAS provider competing for `session.setAnnotations`), hover,
 signature help, document highlights, code actions, semantic tokens, completion + resolve, and `provider.format()`.
-Not covered, because ace-linters implements none of them: definition/references/rename/symbols/folding/inlay hints/code
-lens/colour/links/call hierarchy.
+**Definition, references and rename are built here** (see the section of their own below), because ace-linters
+implements none of the three — its `MessageType` enum IS its whole feature set, and the `textDocument/definition`-ish
+strings in the bundle are just the vendored protocol constants, wired to nothing.
+Still not covered, for the same reason and with nothing built on top: symbols/folding/inlay hints/code lens/colour/
+links/call hierarchy.
 `installLspMetaLabels` stays SAS-only (it exists to fix that server's Folder/Keyword kinds; emmylua kinds its items
 properly).
 Formatting needs a binding of its own — ace-linters exposes `format()` but binds nothing — so the adapter adds a
@@ -808,8 +819,136 @@ to come from the other server — `signatureTooltip()` is its `fromSignatureHelp
 active parameter, which is what the argument highlight IS.
 The `ssextSasFns` completer answers inside a block too (the `sas` table is in scope there exactly as in a `.lua`
 script), which is the only change that path needed.
-`_procLuaTokens`/`_procLuaSignature` are unit-tested.
+**Occurrence highlights** have no provider method to wrap at all: ace-linters drives them from its own
+`changeSelection` timer in `registerEditor`, which calls `$messageController.findDocumentHighlights` and hands the
+answer to the session provider's `$applyDocumentHighlight` — an instance arrow function, so not prototype-reachable
+either.
+So `installProcLuaHighlights` wraps the message CONTROLLER (`comboDocumentIdentifier.sessionId` is the ace session id,
+which is what `procLuaDocs` is keyed by) and feeds the very same callback, i.e. ace-linters' own `MarkerGroup` and its
+own CSS.
+It REPLACES the SAS request rather than running beside it — both write the one marker group, so two answers for one
+caret would race — and answers `[]` rather than `null` on an empty result, since `$applyDocumentHighlight` ignores a
+null and would leave the previous caret's markers up.
+**Formatting** a block is `textDocument/rangeFormatting` over its rows, since `formatDocument` otherwise reaches the SAS
+provider — which does format (`sas-server.js`'s `onInitialize` advertises `documentFormattingProvider: true`, so a plain
+`.sas` file formats through it), but would format the whole file AS SAS, submit block included.
+Two things the blanking makes necessary, both measured: the edits are re-INDENTED (`reindentEdits` over `blockIndent`'s
+smallest leading run — in the blanked document that Lua is top-level, so the server returns it flush at column 0 and
+applying it verbatim would de-indent the block out of its `submit;`), and the row filter that keeps an edit from ever
+landing on the SAS around the block accepts an end of `(to + 1, 0)`, which is how a whole-block format states "through
+the end of the last row" and is what the server actually sends.
+`applyProcLuaEdits` applies them LAST FIRST, every LSP edit range being stated against the document as it was.
+`_procLuaTokens`/`_procLuaSignature` and `_procLua`'s `orderedEdits`/`reindentEdits` are unit-tested.
 All of it goes over `ssExt._luaRaw`, the Lua worker's `rawChannel` — see below.
+
+**The Lua server has to be initialized by `ensureLuaLinters()` itself** (`initLuaService`), and this is load-bearing for
+every one of the surfaces above.
+`AceLanguageClient.for()` only REGISTERS a service;
+ace-linters constructs the `LanguageClient` — and with it sends `initialize` — lazily, the first time a document of that
+mode is added, which normally happens when a `.lua` editor registers.
+A `.sas` file with a block never registers one, so without this the server sat there uninitialized and every
+side-channel request timed out to `null` (`rawChannel.request`'s 5 s fallback), i.e. no diagnostics, no hover, no
+completion, no highlights and no formatting for a block on any page where no `.lua` tab happened to be open — which is
+every ordinary `.sas` file.
+One empty scratch document through ace-linters' own `$messageController.init` is the whole fix: it goes under `/ssext/`,
+the prefix the worker skips when deriving workspace roots, so it never becomes a requireable module, and a
+`publishDiagnostics` for a uri with no ace session is dropped by ace-linters' own message controller
+(`if (!sessionId) return`).
+The identifier has to name `documentUri`/`sessionId` and not `uri` — `BaseMessage` reads exactly those two off it and
+the `ServiceManager` defaults a missing `documentUri` to `""`, so the first version of this opened the scratch document
+under the EMPTY uri and left `$sessionIDToMode[""] = "lua"` behind.
+It still worked, the service being built either way, but under a uri that made both of the reasons above accidents
+rather than the design.
+The smoke suite had missed all of this by running its `.lua` block FIRST, which warmed the server up for the PROC LUA
+block that followed;
+that order is now reversed, and the reversal is itself the regression guard.
+
+**Definition, references and rename** are the one Lua feature set that spans both kinds of editor without caring which:
+a `.lua` tab and a PROC LUA block differ in nothing but which document uri the caret resolves to, so `luaDocAt(adapter,
+pos)` answers that one question — the block's blanked document if the caret is inside one (via `syncProcLuaDoc`), else
+the `.lua` document ace-linters registered — and everything downstream is shared.
+All of it goes down `ssExt._luaRaw`;
+`ssExt._lspRaw` is deliberately not involved, the SAS server having none of these features.
+Four ace COMMANDS carry them (`gotoDefinition`, `findReferences`, `renameSymbol`, `gotoLastJump`), registered on every
+adapter and left there like the diff commands, so ace's settings menu can bind them and a vimrc can map them
+(`nmap gd <Cmd>gotoDefinition`).
+**None has a default keybinding, and that is deliberate**: every key a VS Code user reaches for is already taken —
+F12 is the browser's, F2 is ace's `toggleFoldWidget`, `Alt-Left` is its `gotolinestart`, and `ss-fixes.js` binds
+Alt+letter globally in the CAPTURE phase, so a "convenient" default would have to break something that works today.
+The palette lists them whenever an editor is focused, which is the entry point that costs nothing.
+The three server-backed ones report "no Lua language server for this position" in an editor that has none rather than
+declining through `isAvailable`, since a command missing from the palette is indistinguishable from one that is broken.
+`firstLspLocation` normalises what `textDocument/definition` may answer: emmylua sends a bare `Location` for a
+same-document hit and an ARRAY for a cross-file one (both measured), and `LocationLink` is normalised too, at the cost
+of one line, because it is the third thing the spec permits.
+A uri comes back to an editor through `luaTargetForUri`, whose two branches are the only two kinds of Lua document this
+page can have: `procLuaDocs` for a block's blanked document, and ace-linters' own `$urisToSessionsIds` for a `.lua`
+tab — then `allAdapters()`.
+**A uri matching nothing open is declined with a notice**, never fetched: the only files this server knows are the ones
+the page has open, that being the whole of what the workspace roots resolve.
+`luaTargetForUri`'s `.lua` branch goes through ace-linters' own `$messageController.getSessionIdByUri` where it exists
+rather than indexing `$urisToSessionsIds` raw: that helper falls back to `convertToUri(uri)`, and the two sides encode
+independently (vscode-uri on the client, Rust `url::Url` on the server), so a path containing anything they escape
+differently would miss a string compare and be reported as "not open".
+The jump SELECTS the target's tab as well as focusing its editor (`revealAdapter` → `tabObjectForAdapter`, text viewers
+matched through their `tabHolder` exactly as `viewerTabControlButton` does) — focusing an editor in an unselected tab
+moves a caret nobody can see.
+That match is guarded on `viewer.tabHolder` being truthy: without it an entry that has none degrades to
+`tabHolder === undefined`, which every CODE tab satisfies (only `createFileView` ever sets one), so an unrelated tab
+would be selected.
+`luaJumpStack` is what `gotoLastJump` unwinds, skipping entries whose editor has since been disposed — and dropping
+them on the way IN as well, since the stack holds strong adapter references and a skipped-but-kept entry pins a
+destroyed editor, its session and its DOM for the page's life.
+The references prompt is one row per hit as `<file>:<1-based line>  <source line>`, with the locations in a **side table
+keyed by index** — `getCompletions` JSON-clones its entries on every keystroke, which is the same reason the command
+palette keeps its runner functions outside the entries.
+Its input is SEEDED with the identifier the references were asked for (`wordAt`, ace's own word range at the caret — no
+round trip for something the session already knows), selected by the shared `[0, Number.MAX_VALUE]`, so it reads as a
+label and typing replaces it.
+The file name deliberately stays in the CAPTION here, unlike the rename list where it moved to `meta`: this input is a
+real filter, and `FilteredList` matches on the caption, so moving it would take away narrowing the hits by file.
+Rename asks `textDocument/prepareRename` FIRST, so a caret on a keyword says so instead of opening a prompt that could
+only end in "no edits", and its `placeholder` seeds the prompt.
+**Under the rename box is the list of occurrences that will be renamed** — one row per hit, the source line as it
+stands, from ONE `textDocument/references` at prompt-open.
+It is deliberately STATIC: nothing in it depends on what is typed, so it is built once and never rebuilt.
+The location is the row's `meta`, i.e. the popup's RIGHT-HAND column, and that placement is load-bearing rather than
+cosmetic.
+ace highlights the first `indexOf` of the filter text in the CAPTION, and with the file name in front of the code a
+rename of `expand` in `debug_expand_rrule.sas` highlighted the file name instead of the occurrence.
+The highlight itself is pinned by `openListPrompt`'s `highlight` option, which makes `getPrefix` answer a fixed string
+instead of the typed value: the prompt hands whatever `getPrefix` returns to `popup.setData` as its filter text, which
+is BOTH what a picker filters on and what the rows highlight, so decoupling the two is what stops the highlight chasing
+the new name as it is typed.
+(With `filter: false` the rows carry no `matchMask`, so that loop degrades to a single whole-string `indexOf` — which
+is exactly the behaviour wanted here.)
+Two things keep an informational list safe under a FREE-TEXT input, where ace's prompt is built for pickers and takes
+the selected row's value the moment anything below the first is selected: `staticList` unbinds the navigation keys
+after the prompt has bound its own, so the selection stays on row 0 and Enter always means what was typed;
+and every row's `value` is the CURRENT name, so the one path left — a mouse click, which ace takes outright — resolves
+to a no-op, `onAccept` discarding a new name equal to the old one.
+emmylua answers the `changes` form of `WorkspaceEdit`;
+the spec's other half, `documentChanges`, is not handled and says so rather than silently renaming nothing if that ever
+changes.
+**Every target is resolved and checked before a single document is touched** — a rename that half-applies leaves code
+that no longer compiles — so a file that is not open, or a block edit outside the block's own rows
+(`blockEditsInside`, both ends of every edit against `luaRanges()`), refuses the whole operation.
+The block guard is belt-and-braces rather than a live failure mode (the blanked document hides the surrounding SAS, so
+the server cannot produce such an edit), which is why the smoke test synthesises one to prove it holds.
+One thing the `.lua` path needs and the block path does not: `flushLspDeltas` drains ace-linters' `$deltaQueue` before
+asking anything.
+ace-linters batches a session's edits and flushes them on its own schedule, so a request sent straight after typing is
+answered against stale text — which for rename means edits at the wrong columns (`formatWithLsp` goes through
+`$sendDeltaQueue` for the same reason).
+It has to special-case an EMPTY but non-null queue: `$sendDeltaQueue` drops that one WITHOUT ever invoking its
+callback, so awaiting it unguarded hangs the command forever.
+The non-empty branch is bounded at 5 s for the same class of reason: ace-linters registers that callback with no
+timeout of its own, so a throw in its `applyDelta` handler before it posts back would hang the command with no notice —
+flushing late is a stale-position risk, never resolving is a dead editor command.
+`rawChannel.request`'s 5 s timeout was left alone deliberately — measured, every one of these answers in 1–2 ms, the
+server being in-process wasm with no network anywhere.
+`_luaNav`'s `firstLspLocation`/`blockEditsInside` are unit-tested;
+`test/smoke.js` drives all four commands against the real server across two open `.lua` editors and a submit block.
 
 The `sas` table PROC LUA puts in scope — which a `.lua` script it runs sees exactly as a submit block does — is covered
 from two sources, because it has two halves and only one of them is knowable statically.
@@ -1516,7 +1655,10 @@ tracking a SAS Studio CSS change).
 Pure-logic checks (no browser, no live instance): `npm run test:units` — covers `tools-meta.js`'s
 `ssfEventKey`/`ssfPatchEnabled`, `mode-saslog.js`'s %INCLUDE folding, `editor-swap.js`'s `_sasFns` (the `sas.<name>`
 hover word and the SAS server's markdown, flattened), `editor-swap.js`'s `_procLua` (the PROC LUA block ranges and the
-blanked document built from them), `_procLuaTokens` (the LSP semantic-token wire format onto ace scopes) and
+blanked document built from them, plus the format edits: applied last-first, filtered to the block's own rows — with
+`(to + 1, 0)` kept as a legitimate end — and re-indented back into the block), `_procLuaTokens` (the LSP semantic-token
+wire format onto ace scopes), `_luaNav` (the three shapes `textDocument/definition` may answer, and the both-ends row
+check that bounds a rename to its PROC LUA block) and
 `_procLuaSignature` (the active argument bolded in the signature tooltip), `emmylua-worker.js`'s didChange/didOpen ordering, its
 configuration answer (incl. the injected client capability) and the workspace roots it derives from open documents,
 `editor-swap.js`'s `_semanticScope` (LSP semantic scopes onto themed ace ones), and `editor-swap.js`'s `_foldNav` row
@@ -1548,7 +1690,19 @@ stubbed, so nothing is really opened or downloaded and no file of a given extens
 the PROC LUA blocks (a detached `.sas` adapter: the diagnostic landing on the file's own row, both halves of the `sas`
 table completing inside the block and nothing offered outside it, hover answered by the SAS server and by emmylua, the
 semantic-token markers carrying the same classes a `.lua` file's do, signature help arriving with the active argument
-marked, and the two servers' annotations sharing one gutter until the block is deleted),
+marked, occurrence highlights coming from the Lua server, `formatDocument` formatting the block while keeping its
+indent and touching no row outside it, and the two servers' annotations sharing one gutter until the block is deleted)
+— this block runs BEFORE the `.lua` one on purpose, since a `.lua` editor registering is what makes ace-linters
+initialize the Lua server, and running it first hid `initLuaService`'s whole reason for existing,
+definition/references/rename (two open `.lua` editors plus a submit block in one page, since the interesting cases are
+the ones that span them: `gotoDefinition` jumping from a call site into the OTHER editor and `gotoLastJump` coming back,
+the references prompt listing the declaration and both call sites with their file and line, `renameSymbol` prompting
+with the current name, a rename rewriting all three occurrences across two documents while leaving the `require()` line
+alone, the same three inside a block landing on the file's own rows with the SAS around it untouched, and a synthesised
+out-of-block edit refusing the rename;
+the fixtures push themselves onto `_textViewers`, since `allAdapters()` — which is
+how every uri here maps back to an editor — walks the text viewers and the code tabs, and a detached adapter is
+neither),
 the Lua server (a `.lua` text viewer registering with ace-linters: LSP-ranked completions with
 no duplicate completer, the server's pushed diagnostics as ace annotations, the formatDocument command, both halves of
 the `sas` table — completions and hover — and `require()` resolving to a second open `.lua` document, which needs the

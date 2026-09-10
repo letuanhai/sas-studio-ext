@@ -494,6 +494,106 @@ assert.deepEqual(procLua.luaRanges(["proc lua;", "submit;", "a", "endsubmit;", "
 
 console.log("PASS  proc lua block ranges");
 
+// Format edits come back against the document as it was, so they are applied
+// last-first; and anything outside the block's rows is dropped, since those rows
+// are the SAS the blanking hid from the formatter.
+const edit = (sl, sc, el, ec, newText) => ({
+  range: { start: { line: sl, character: sc }, end: { line: el, character: ec } },
+  newText,
+});
+assert.deepEqual(
+  procLua
+    .orderedEdits(
+      [edit(3, 0, 3, 4, "a"), edit(4, 2, 4, 6, "b"), edit(3, 8, 3, 9, "c")],
+      [3, 4],
+    )
+    .map((e) => e.newText),
+  ["b", "c", "a"],
+);
+// A blank-line collapse reaching outside the block, and one wholly outside it.
+assert.deepEqual(
+  procLua.orderedEdits([edit(2, 0, 3, 0, ""), edit(6, 0, 6, 1, "x")], [3, 4]),
+  [],
+);
+assert.deepEqual(procLua.orderedEdits(null, [3, 4]), []);
+// A whole-block format states its end as (to + 1, 0) - the row after the last
+// one, at column 0 - which touches nothing below the block and must be kept.
+assert.equal(procLua.orderedEdits([edit(3, 0, 5, 0, "x\n")], [3, 4]).length, 1);
+assert.equal(procLua.orderedEdits([edit(3, 0, 5, 1, "x\n")], [3, 4]).length, 0);
+// ...but that allowance must not let an edit START on the row after the block:
+// a zero-width edit at (to + 1, 0) satisfies the end clause and would apply as
+// an insert into the `endsubmit;` line, i.e. straight into SAS code.
+assert.equal(procLua.orderedEdits([edit(5, 0, 5, 0, "WRECK")], [3, 4]).length, 0);
+assert.equal(procLua.orderedEdits([edit(5, 0, 5, 3, "WRECK")], [3, 4]).length, 0);
+
+// Two edits at the SAME position keep the order the server sent them in - LSP
+// says that is the order their text appears - so applying last-first has to
+// reverse the tie as well, or the second one's text lands in front.
+assert.deepEqual(
+  procLua.orderedEdits([edit(3, 2, 3, 2, "A"), edit(3, 2, 3, 2, "Z")], [3, 4]).map((e) => e.newText),
+  ["Z", "A"],
+);
+
+// The formatter sees the block's Lua at the top level and returns it flush
+// against column 0, so the block's own base indent goes back on every line -
+// but not on a first line that starts mid-row, which is already past an indent.
+assert.deepEqual(
+  procLua.reindentEdits([edit(3, 0, 5, 0, "local x = 1\nif x then\n    print(x)\nend\n")], "  "),
+  [edit(3, 0, 5, 0, "  local x = 1\n  if x then\n      print(x)\n  end\n")],
+);
+assert.deepEqual(procLua.reindentEdits([edit(3, 8, 3, 9, "a\nb")], "  "), [
+  edit(3, 8, 3, 9, "a\n  b"),
+]);
+assert.deepEqual(procLua.reindentEdits([edit(3, 0, 3, 1, "a")], ""), [edit(3, 0, 3, 1, "a")]);
+// A whole-newText deletion at column 0 is a formatter stripping the indent: the
+// indent has to go back, or that row ends up flush against column 0. A blank
+// line INSIDE a multi-line replacement still gets none.
+assert.deepEqual(procLua.reindentEdits([edit(3, 0, 3, 2, "")], "  "), [edit(3, 0, 3, 2, "  ")]);
+assert.deepEqual(procLua.reindentEdits([edit(3, 0, 5, 0, "a\n\nb\n")], "  "), [
+  edit(3, 0, 5, 0, "  a\n\n  b\n"),
+]);
+
+console.log("PASS  proc lua format edits");
+
+// textDocument/definition answers any of three shapes, and emmylua uses two of
+// them: a bare Location for a hit in the same document, an array for a
+// cross-file one. LocationLink is the third the spec permits.
+const { firstLspLocation } = global.window.__ssExt._luaNav;
+const loc = (uri, line, ch) => ({ uri, range: { start: { line, character: ch }, end: { line, character: ch + 3 } } });
+assert.deepEqual(firstLspLocation(loc("file:///a.lua", 3, 10)), loc("file:///a.lua", 3, 10));
+assert.deepEqual(
+  firstLspLocation([loc("file:///a.lua", 1, 2), loc("file:///b.lua", 9, 0)]),
+  loc("file:///a.lua", 1, 2),
+);
+assert.deepEqual(
+  firstLspLocation([
+    {
+      targetUri: "file:///a.lua",
+      targetRange: loc("x", 0, 0).range,
+      targetSelectionRange: loc("x", 4, 6).range,
+    },
+  ]),
+  // the SELECTION range is the name itself, which is where a jump should land
+  { uri: "file:///a.lua", range: loc("x", 4, 6).range },
+);
+assert.equal(firstLspLocation(null), null);
+assert.equal(firstLspLocation([]), null);
+assert.equal(firstLspLocation({ nonsense: 1 }), null);
+
+// A rename inside a block may only touch rows the block owns: the blanked
+// document hides the surrounding SAS, so an edit landing there would be written
+// into SAS code.
+const { blockEditsInside } = global.window.__ssExt._luaNav;
+const at = (sl, sc, el, ec) => ({ range: { start: { line: sl, character: sc }, end: { line: el, character: ec } } });
+assert.equal(blockEditsInside([[3, 5]], [at(3, 0, 3, 4), at(5, 2, 5, 9)]), true);
+assert.equal(blockEditsInside([[3, 5]], [at(3, 0, 3, 4), at(6, 0, 6, 1)]), false);
+assert.equal(blockEditsInside([[3, 5]], [at(2, 0, 4, 0)]), false); // spans out of the top
+assert.equal(blockEditsInside([[3, 5]], [at(5, 0, 6, 0)]), false); // and out of the bottom
+assert.equal(blockEditsInside(null, [at(3, 0, 3, 1)]), false); // no block at all
+assert.equal(blockEditsInside([[3, 5]], []), true);
+
+console.log("PASS  lsp definition location shapes");
+
 // The semantic tokens for a block come back in the LSP wire format - five ints
 // per token, the first two delta-encoded - and have to become the same ace
 // scopes ace-linters produces for a .lua file, or the colours differ.

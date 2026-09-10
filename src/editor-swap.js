@@ -131,17 +131,29 @@
       // Alt-Up/Alt-Down keys doing what they did before.
       this.aceEditor.commands.addCommands(diffEditorCommands(this));
       this.aceEditor.commands.addCommands(inlineEditorCommands(this));
+      this.aceEditor.commands.addCommands(luaNavCommands(this));
 
       // ace-linters implements formatting but binds no key to it, and the
       // command palette lists the focused editor's own ace commands - so this
       // one line is both the keybinding and the palette entry. No-op (with a
-      // notice) in an editor no provider registered, e.g. a SAS file: the SAS
-      // server advertises no formatting.
+      // notice) in an editor no provider registered at all. NOT because the SAS
+      // server has no formatting - it advertises documentFormattingProvider:
+      // true, checked in lib/sas-lsp/sas-server.js's onInitialize, and a .sas
+      // file formats through it.
       this.aceEditor.commands.addCommand({
         name: "formatDocument",
         description: "Format document (language server)",
         bindKey: { win: "Ctrl-Shift-F", mac: "Command-Shift-F" },
         exec: () => {
+          // Inside a PROC LUA block the session is the SAS server's, which has no
+          // formatting - the Lua server has to be asked for the block instead.
+          const pos = this.aceEditor.getCursorPosition();
+          if (inProcLuaBlock(this.aceEditor.session, pos)) {
+            formatProcLuaBlock(this.aceEditor.session, pos).catch((e) =>
+              console.error("[SS Ext] PROC LUA format failed:", e),
+            );
+            return;
+          }
           if (!this._lspRegistered || !this._lspProvider) {
             if (window.__ssf) window.__ssf.notify("No language server for this file");
             return;
@@ -2059,6 +2071,7 @@
         shareLspCallbackIds(provider);
         installProcLuaHover(provider);
         installProcLuaSignatureHelp(provider);
+        installProcLuaHighlights(provider);
 
         if (!ssExt._lspStyleInjected) {
           ssExt._lspStyleInjected = true;
@@ -2311,6 +2324,7 @@
         ssExt._luaLintersProvider = provider; // asserted by test/smoke.js
         shareLspCallbackIds(provider);
         installLuaFileHover(provider);
+        await initLuaService(provider);
         return provider;
       } catch (e) {
         console.warn(
@@ -2322,6 +2336,53 @@
     })();
 
     return ssExt._luaLintersStarting;
+  }
+
+  // `AceLanguageClient.for()` only REGISTERS a service. ace-linters constructs
+  // the LanguageClient - and with it sends `initialize` - lazily, the first time
+  // a document of that mode is added, which normally happens when a .lua editor
+  // registers. A .sas file with a PROC LUA block never registers one: its
+  // session belongs to the SAS server and everything Lua about it goes over the
+  // side channel instead. So without this the server sits there uninitialized
+  // and every side-channel request times out to null - measured as no
+  // diagnostics, no hover, no completion and no formatting for a block on a page
+  // where no .lua tab happens to be open, which is every ordinary .sas file.
+  // (The smoke suite missed it because its .lua block runs first and initializes
+  // the server for the PROC LUA block that follows.)
+  //
+  // One empty scratch document through ace-linters' own init path is the whole
+  // fix. It goes under /ssext/, the prefix the worker skips when deriving
+  // workspace roots, so it never becomes a requireable module; and a
+  // publishDiagnostics for a uri with no ace session is dropped by ace-linters'
+  // own message controller (`if (!sessionId) return`).
+  const LUA_INIT_URI = "file:///ssext/lua-init.lua";
+  const LUA_INIT_SESSION = "ssext-lua-init";
+  // ensureLuaLinters awaits this, so everything downstream - every .lua editor
+  // registration and every syncProcLuaDoc - waits for it, which is the ordering
+  // syncProcLuaDoc's own didOpen relies on. The cap only stops a server that
+  // never answers from wedging that chain for the page's life.
+  const LUA_INIT_TIMEOUT_MS = 20000;
+
+  function initLuaService(provider) {
+    return new Promise((resolve) => {
+      const done = setTimeout(resolve, LUA_INIT_TIMEOUT_MS);
+      provider.$messageController.init(
+        // `documentUri`/`sessionId`, NOT `uri`: ace-linters' BaseMessage reads
+        // those two names off the identifier and the ServiceManager defaults a
+        // missing documentUri to "". With `uri` the scratch document opened
+        // under the EMPTY uri and left $sessionIDToMode[""] = "lua" behind - the
+        // service still got built, so the fix worked by accident, but under a
+        // uri that made both justifications above untrue.
+        { documentUri: LUA_INIT_URI, sessionId: LUA_INIT_SESSION, version: 1 },
+        { getValue: () => "", version: 1 },
+        "ace/mode/lua",
+        {},
+        () => {
+          clearTimeout(done);
+          resolve();
+        },
+      );
+    });
   }
 
   // The folder path-less lua editors are parked under, so they are inside a
@@ -2460,12 +2521,23 @@
     return !!ranges && inLuaRange(ranges, pos.row);
   }
 
-  ssExt._procLua = { luaRanges, inLuaRange, blankNonLua }; // test/units.js
+  ssExt._procLua = {
+    luaRanges,
+    inLuaRange,
+    blankNonLua,
+    get orderedEdits() {
+      return orderedProcLuaEdits; // declared below this literal
+    },
+    get reindentEdits() {
+      return reindentEdits;
+    },
+  }; // test/units.js
 
   // One blanked document per SAS session, under the same scratch root the
   // path-less .lua editors use (a document under no workspace root is not a
   // module, and the server drops it once any root exists - see scratchLuaPath).
   const procLuaDocs = new Map(); // ace session id -> { uri, version, text, session }
+  ssExt._procLuaDocs = procLuaDocs; // test/smoke.js
 
   function procLuaDoc(session) {
     let doc = procLuaDocs.get(session.id);
@@ -2675,6 +2747,175 @@
     };
   }
 
+  // Occurrence highlights inside a block. Unlike hover/signature help there is no
+  // provider METHOD to wrap: ace-linters drives these from its own changeSelection
+  // timer in registerEditor, which calls $messageController.findDocumentHighlights
+  // and hands the answer to the session provider's $applyDocumentHighlight (an
+  // instance arrow function, so not prototype-reachable either). So the wrap goes
+  // on the message controller, and the answer is fed to the very same callback -
+  // ace-linters' own MarkerGroup and its own CSS, nothing of ours on screen.
+  //
+  // It has to REPLACE the SAS request rather than run beside it: both write the one
+  // occurrence marker group, so two answers for one caret would race, and the SAS
+  // server's answer for a row of Lua is not the one that should win.
+  function installProcLuaHighlights(provider) {
+    if (ssExt._procLuaHighlightPatched) return;
+    ssExt._procLuaHighlightPatched = true;
+    const mc = provider.$messageController;
+    const original = mc.findDocumentHighlights.bind(mc);
+    mc.findDocumentHighlights = (documentIdentifier, position, callback) => {
+      // comboDocumentIdentifier.sessionId IS the ace session id, which is what
+      // procLuaDocs is keyed by. No entry yet means no block has ever synced in
+      // this session, so there is nothing of ours to answer with.
+      const doc = procLuaDocs.get(documentIdentifier && documentIdentifier.sessionId);
+      const fallback = () => original(documentIdentifier, position, callback);
+      if (!doc || !inProcLuaBlock(doc.session, { row: position.line })) return fallback();
+      // [] rather than null on an empty answer: $applyDocumentHighlight ignores a
+      // null, which would leave the previous caret's markers on screen.
+      procLuaHighlights(doc.session, position).then(
+        (highlights) => callback && callback(highlights || []),
+        (e) => {
+          console.warn("[SS Ext] PROC LUA highlight failed:", (e && e.message) || e);
+          fallback();
+        },
+      );
+    };
+  }
+
+  // Formatting the block at the caret. Range formatting rather than the whole
+  // document: the blanked document is mostly empty lines, and a formatter is
+  // entitled to collapse those - which would be edits landing on the SAS around
+  // the block. The row filter in applyProcLuaEdits is the guard that makes that
+  // impossible rather than merely unlikely.
+  async function formatProcLuaBlock(session, pos) {
+    const ranges = sessionLuaRanges(session);
+    const block = ranges && ranges.find(([from, to]) => pos.row >= from && pos.row <= to);
+    if (!block) return false;
+    const doc = await syncProcLuaDoc(session);
+    // No server (not built, or it failed to start). The sibling .lua path says
+    // so through formatWithLsp's own notice, and silence here is
+    // indistinguishable from "nothing to reformat".
+    if (!doc) {
+      notify("No Lua language server for this block", true);
+      return false;
+    }
+    const [from, to] = block;
+    const indent = blockIndent(session, block);
+    const edits = await ssExt._luaRaw.request("textDocument/rangeFormatting", {
+      textDocument: { uri: doc.uri },
+      range: {
+        start: { line: from, character: 0 },
+        end: { line: to, character: session.getLine(to).length },
+      },
+      options: { tabSize: session.getTabSize(), insertSpaces: session.getUseSoftTabs() },
+    });
+    // rawChannel.request resolves null on a 5 s timeout, so "no answer" and
+    // "already formatted" arrive here identically - say something either way
+    // rather than letting the keystroke look dead.
+    const applied = applyProcLuaEdits(session, reindentEdits(edits, indent), block);
+    if (!applied) notify(edits ? "Nothing to reformat in this block" : "The Lua server did not answer");
+    return applied;
+  }
+
+  // In the blanked document the block's Lua is at the top level, so that is how
+  // the formatter returns it - flush against column 0, dropping the indent that
+  // puts it inside `proc lua; submit;`. The block's own base indent is put back
+  // on every line, leaving the formatter's RELATIVE indentation alone. Only when
+  // the edit starts at column 0: an edit starting mid-line already sits after
+  // whatever indent that line has.
+  function blockIndent(session, [from, to]) {
+    let indent = null;
+    for (let row = from; row <= to; row++) {
+      const line = session.getLine(row) || "";
+      if (!line.trim()) continue;
+      const lead = line.match(/^[ \t]*/)[0];
+      if (indent === null || lead.length < indent.length) indent = lead;
+    }
+    return indent || "";
+  }
+
+  function reindentEdits(edits, indent) {
+    if (!indent) return edits || [];
+    return (edits || []).map((e) => ({
+      ...e,
+      newText: e.newText
+        .split("\n")
+        .map((line, i) =>
+          // An empty line only stays empty PAST the first: a blank line inside a
+          // multi-line replacement wants no indent, but an edit whose whole
+          // newText is "" is a deletion at column 0 - a formatter stripping the
+          // indent - and there the indent has to go back, or that row ends up
+          // flush against column 0, which is the one thing this exists to stop.
+          (line === "" && i > 0) || (i === 0 && e.range.start.character > 0)
+            ? line
+            : indent + line,
+        )
+        .join("\n"),
+    }));
+  }
+
+  // LSP TextEdit[] onto the ace session. Applied LAST FIRST, since every edit's
+  // range is stated against the document as it was: doing them in order would
+  // shift every later one by the length change of the earlier ones. Shared with
+  // rename, which gets a set per document from the same server.
+  // Two edits at the SAME position keep the order the server sent them in, which
+  // LSP says is the order their text must appear: applying them last-first means
+  // reversing that tie too, or the second one's text lands in front of the
+  // first's. Array.sort is stable, so the index is what carries it.
+  const lastFirstEdits = (edits) =>
+    (edits || [])
+      .map((e, index) => ({ e, index }))
+      .sort(
+        (a, b) =>
+          b.e.range.start.line - a.e.range.start.line ||
+          b.e.range.start.character - a.e.range.start.character ||
+          b.index - a.index,
+      )
+      .map(({ e }) => e);
+
+  function applyLspEdits(session, edits) {
+    const Range = ace.require("ace/range").Range;
+    const ordered = lastFirstEdits(edits);
+    ordered.forEach((e) =>
+      session.doc.replace(
+        new Range(e.range.start.line, e.range.start.character, e.range.end.line, e.range.end.character),
+        e.newText,
+      ),
+    );
+    return ordered.length > 0;
+  }
+
+  function orderedProcLuaEdits(edits, [from, to]) {
+    return lastFirstEdits(
+      (edits || []).filter(
+        (e) =>
+          e.range.start.line >= from &&
+          // Both ENDS, and the start needs its own bound: the (to + 1, 0)
+          // allowance below would otherwise admit a zero-width edit anchored ON
+          // the endsubmit line, which applies as an insert into SAS code - the
+          // one thing this filter exists to stop.
+          e.range.start.line <= to &&
+          // "through the end of the last row" is stated as (to + 1, 0) - which
+          // is what a whole-block format comes back as, and is still an edit
+          // that touches nothing below the block.
+          (e.range.end.line <= to ||
+            (e.range.end.line === to + 1 && e.range.end.character === 0)),
+      ),
+    );
+  }
+
+  const applyProcLuaEdits = (session, edits, block) =>
+    applyLspEdits(session, orderedProcLuaEdits(edits, block));
+
+  async function procLuaHighlights(session, position) {
+    const doc = await syncProcLuaDoc(session);
+    if (!doc) return null;
+    return ssExt._luaRaw.request("textDocument/documentHighlight", {
+      textDocument: { uri: doc.uri },
+      position, // already LSP-shaped, and a blanked row/column IS an ace one
+    });
+  }
+
   // -- Semantic tokens inside a block ---------------------------------------------
   //
   // What paints `sas.sleep` and a required module's members the way `os.date` is
@@ -2866,6 +3107,461 @@
         end: { row: range.end.line, column: range.end.character },
       },
     };
+  }
+
+  // -- Definition / references / rename --------------------------------------------
+  //
+  // ace-linters implements none of these - its MessageType enum IS its whole
+  // feature set, and the textDocument/definition-ish strings in the bundle are
+  // just the vendored protocol constants, wired to nothing - so all three go
+  // straight down ssExt._luaRaw, and every piece of UI here is ours: ace has no
+  // go-to-definition, no references panel and no rename widget either.
+  // The SAS server has none of these features, so ssExt._lspRaw is not involved:
+  // this is Lua only, and a .lua tab and a PROC LUA block differ in nothing but
+  // which document uri the caret resolves to.
+  //
+  // ponytail: no default keybindings. Every key a VS Code user would reach for is
+  // either the browser's (F12) or already ace's (F2 toggleFoldWidget, Alt-Left
+  // gotolinestart), and ss-fixes binds Alt+letter globally in the capture phase,
+  // so a "convenient" default would have to steal something that works today.
+  // They are ace COMMANDS, so the command palette lists them whenever an editor
+  // is focused and a vimrc can map them (`nmap gd <Cmd>gotoDefinition`), which is
+  // the workflow they belong to anyway. Give them keys when a free one is agreed.
+  //
+  // Also deliberately absent: workspace symbols, call hierarchy, and opening a
+  // file that is not already open. The only files this server knows are the ones
+  // the page has open (that is the whole of what the workspace roots resolve), so
+  // a location outside them is declined rather than fetched.
+
+  // Where a jump came from, so it can be undone. Adapters are held weakly in the
+  // sense that a disposed one is skipped on the way back rather than tracked.
+  const luaJumpStack = [];
+  const LUA_JUMP_STACK_MAX = 50;
+
+  // The Lua document behind a caret, whichever kind of editor holds it: the
+  // blanked document of the PROC LUA block the caret is inside, or the .lua
+  // document ace-linters registered for a .lua tab. Positions need no
+  // translation in either case - the blanking preserves every row and column,
+  // and a .lua tab IS the document.
+  async function luaDocAt(adapter, pos) {
+    const session = adapter.aceEditor.session;
+    if (inProcLuaBlock(session, pos)) {
+      const doc = await syncProcLuaDoc(session);
+      return doc ? { uri: doc.uri } : null;
+    }
+    if (session.$modeId !== "ace/mode/lua") return null;
+    const provider = ssExt._luaLintersProvider;
+    if (!adapter._lspRegistered || adapter._lspProvider !== provider) return null;
+    const slp = provider.$getSessionLanguageProvider(session);
+    if (!slp) return null;
+    await flushLspDeltas(slp);
+    return { uri: slp.documentUri };
+  }
+
+  // ace-linters batches a session's edits and flushes them on its own schedule,
+  // so a request sent right after typing can be answered against stale text -
+  // which for rename means edits at the wrong columns. formatWithLsp already
+  // goes through $sendDeltaQueue for the same reason.
+  // The guard matters: $sendDeltaQueue drops an EMPTY (but non-null) queue
+  // without ever invoking its callback, so awaiting it unconditionally hangs the
+  // command forever.
+  function flushLspDeltas(slp) {
+    if (!slp.$deltaQueue || !slp.$deltaQueue.length) return Promise.resolve();
+    // Bounded like every other request on these paths: ace-linters registers the
+    // callback with no timeout of its own, so if its applyDelta handler ever
+    // threw before posting back, the nav command would hang forever with no
+    // notice. Flushing late is a stale-position risk; never resolving is a dead
+    // editor command.
+    return new Promise((resolve) => {
+      const done = setTimeout(resolve, LSP_DELTA_FLUSH_MS);
+      slp.$sendDeltaQueue(() => {
+        clearTimeout(done);
+        resolve();
+      });
+    });
+  }
+  const LSP_DELTA_FLUSH_MS = 5000;
+
+  // A document uri back to the OPEN editor that owns it, or null. The two kinds
+  // of Lua document this page can have are the two branches: a block's blanked
+  // document (procLuaDocs, keyed by ace session id) and a .lua tab's own
+  // (ace-linters' $urisToSessionsIds, which is the map it keeps for exactly this).
+  function luaTargetForUri(uri) {
+    for (const doc of procLuaDocs.values()) {
+      if (doc.uri !== uri) continue;
+      const adapter = allAdapters().find((a) => a.aceEditor.session === doc.session);
+      return adapter ? { adapter, isBlock: true } : null;
+    }
+    const provider = ssExt._luaLintersProvider;
+    // Through ace-linters' own lookup where it exists: it falls back to
+    // convertToUri(uri), and the two sides encode independently (vscode-uri on
+    // the client, Rust url::Url on the server), so a path containing something
+    // they escape differently would miss a raw string compare and report the
+    // file as "not open".
+    const sessionId =
+      provider &&
+      (provider.$messageController && provider.$messageController.getSessionIdByUri
+        ? provider.$messageController.getSessionIdByUri(uri)
+        : provider.$urisToSessionsIds && provider.$urisToSessionsIds[uri]);
+    if (!sessionId) return null;
+    const adapter = allAdapters().find((a) => a.aceEditor.session.id === sessionId);
+    return adapter ? { adapter, isBlock: false } : null;
+  }
+
+  // The tab object holding an adapter, so a cross-file jump can SELECT that tab -
+  // focusing an editor in an unselected tab moves a caret nobody can see. Text
+  // viewers are matched through their tabHolder (the same resolution
+  // textViewerTabButton uses), code tabs through the adapter itself.
+  function tabObjectForAdapter(adapter) {
+    if (typeof appDMS === "undefined" || !appDMS.tabs || !appDMS.tabs.getAllTabObjects) return null;
+    const viewer = ssExt._textViewers.find((e) => e.adapter === adapter);
+    return (
+      appDMS.tabs
+        .getAllTabObjects()
+        .find((t) =>
+          // `viewer.tabHolder &&` matters: without it a viewer entry that has
+          // none degrades to `t.tab.tabHolder === undefined`, which every CODE
+          // tab satisfies (only createFileView ever sets one) - so an unrelated
+          // tab would be selected. Production entries always carry it; a test
+          // fixture need not.
+          viewer && viewer.tabHolder
+            ? t.tab && t.tab.tabHolder === viewer.tabHolder
+            : !viewer && t.editor && t.editor.editor === adapter,
+        ) || null
+    );
+  }
+
+  function revealAdapter(adapter, row, column) {
+    const tabObj = tabObjectForAdapter(adapter);
+    if (tabObj && appDMS.tabs.selectTab) {
+      try {
+        appDMS.tabs.selectTab(tabObj);
+      } catch (e) {
+        console.warn("[SS Ext] could not select the target tab:", (e && e.message) || e);
+      }
+    }
+    adapter.aceEditor.moveCursorTo(row, column);
+    adapter.aceEditor.clearSelection();
+    adapter.aceEditor.renderer.scrollCursorIntoView(null, 0.5);
+    adapter.focus();
+  }
+
+  // LSP answers `Location | Location[] | LocationLink[]` for definition, and
+  // emmylua uses two of the three: a bare Location for a same-document hit, an
+  // array for a cross-file one (both measured). LocationLink is normalised too -
+  // it costs one line and is the third thing the spec permits.
+  function firstLspLocation(answer) {
+    const one = Array.isArray(answer) ? answer[0] : answer;
+    if (!one) return null;
+    if (one.targetUri) {
+      return { uri: one.targetUri, range: one.targetSelectionRange || one.targetRange };
+    }
+    return one.uri && one.range ? { uri: one.uri, range: one.range } : null;
+  }
+
+  // Every edit of a set lands on a row the block actually owns. Both ends, since
+  // an edit spanning out of the block is exactly the case that must not apply.
+  const blockEditsInside = (ranges, edits) =>
+    (edits || []).every(
+      (e) =>
+        inLuaRange(ranges || [], e.range.start.line) &&
+        inLuaRange(ranges || [], e.range.end.line),
+    );
+
+  ssExt._luaNav = {
+    firstLspLocation,
+    blockEditsInside,
+    get previewRows() {
+      return renamePreviewRows; // declared below this literal
+    },
+    get applyRename() {
+      return applyLuaRename; // declared below this literal
+    },
+  }; // test/units.js + test/smoke.js
+
+  function notify(message, isError) {
+    if (window.__ssf) window.__ssf.notify(message, isError);
+    else console.warn("[SS Ext]", message);
+  }
+
+  // The short name a prompt row shows for a document: the block's own tab title
+  // for a blanked document (its uri is a scratch path nobody typed), else the
+  // file's basename.
+  function luaDocLabel(uri) {
+    const target = luaTargetForUri(uri);
+    if (target && target.isBlock) {
+      const tabObj = tabObjectForAdapter(target.adapter);
+      return (tabObj && (tabObj.name || tabObj.title)) || "PROC LUA block";
+    }
+    return uri.replace(/^.*\//, "");
+  }
+
+  async function gotoLuaDefinition(adapter) {
+    const pos = adapter.aceEditor.getCursorPosition();
+    const doc = await luaDocAt(adapter, pos);
+    if (!doc) return notify("No Lua language server for this position");
+    const answer = await ssExt._luaRaw.request("textDocument/definition", {
+      textDocument: { uri: doc.uri },
+      position: { line: pos.row, character: pos.column },
+    });
+    const loc = firstLspLocation(answer);
+    if (!loc) return notify("No definition found");
+    const target = luaTargetForUri(loc.uri);
+    if (!target) {
+      return notify(`Definition is in a file that is not open: ${loc.uri.replace(/^.*\//, "")}`, true);
+    }
+    pushLuaJump(adapter, pos);
+    revealAdapter(target.adapter, loc.range.start.line, loc.range.start.character);
+  }
+
+  function pushLuaJump(adapter, pos) {
+    // Drop entries whose editor is gone on the way IN, not just on the way back:
+    // the stack holds strong adapter references, so a skipped-but-kept entry
+    // pins a destroyed editor, its session and its DOM for the page's life.
+    const live = allAdapters();
+    for (let i = luaJumpStack.length - 1; i >= 0; i--) {
+      if (!live.includes(luaJumpStack[i].adapter)) luaJumpStack.splice(i, 1);
+    }
+    luaJumpStack.push({ adapter, row: pos.row, column: pos.column });
+    if (luaJumpStack.length > LUA_JUMP_STACK_MAX) luaJumpStack.shift();
+  }
+
+  // Back to wherever the last jump started. Entries whose editor has since been
+  // disposed (tab closed, Ace toggled off) are dropped rather than jumped to.
+  function gotoLastLuaJump() {
+    while (luaJumpStack.length) {
+      const from = luaJumpStack.pop();
+      if (!allAdapters().includes(from.adapter)) continue;
+      revealAdapter(from.adapter, from.row, from.column);
+      return;
+    }
+    notify("Nowhere to go back to");
+  }
+
+  async function findLuaReferences(adapter) {
+    const pos = adapter.aceEditor.getCursorPosition();
+    const doc = await luaDocAt(adapter, pos);
+    if (!doc) return notify("No Lua language server for this position");
+    const locations = await ssExt._luaRaw.request("textDocument/references", {
+      textDocument: { uri: doc.uri },
+      position: { line: pos.row, character: pos.column },
+      context: { includeDeclaration: true },
+    });
+    if (!locations || !locations.length) return notify("No references found");
+    openLuaReferencesPrompt(adapter, locations, wordAt(adapter.aceEditor, pos));
+  }
+
+  // The identifier under the caret, from ace's own word range - no round trip,
+  // and the server is not asked for something the session already knows.
+  function wordAt(aceEditor, pos) {
+    try {
+      const session = aceEditor.session;
+      return session.getTextRange(session.getWordRange(pos.row, pos.column)).trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // One prompt row per hit, the way openVimMappingsPrompt lists mappings. The
+  // targets ride in a side table keyed by index rather than on the entries
+  // themselves: prompt's getCompletions JSON-clones what it is given on every
+  // keystroke, which is exactly why the command palette keeps its runners
+  // outside too - a number survives the clone, a reference does not.
+  function openLuaReferencesPrompt(adapter, locations, word) {
+    const entries = locations.map((loc, index) => {
+      const target = luaTargetForUri(loc.uri);
+      const row = loc.range.start.line;
+      const text = target ? (target.adapter.aceEditor.session.getLine(row) || "").trim() : "";
+      return {
+        value: `${luaDocLabel(loc.uri)}:${row + 1}  ${text}`,
+        meta: target ? "" : "not open",
+        index,
+      };
+    });
+    openListPrompt(adapter.aceEditor, {
+      name: "ssextReferences",
+      // Seeded with the identifier the references were asked for, selected (the
+      // shared [0, MAX] selection), so it reads as a label and typing replaces
+      // it. Unlike the rename box this one IS a filter, so the seed also
+      // highlights the name in every row and narrowing from there is a matter of
+      // typing over it.
+      message: word || "",
+      entries: () => entries,
+      emptyText: "No matching references",
+      onAccept: (data) => {
+        const loc = locations[data.item && data.item.index];
+        if (!loc) return;
+        const target = luaTargetForUri(loc.uri);
+        if (!target) return notify("That file is no longer open", true);
+        pushLuaJump(adapter, adapter.aceEditor.getCursorPosition());
+        revealAdapter(target.adapter, loc.range.start.line, loc.range.start.character);
+      },
+    });
+  }
+
+  async function renameLuaSymbol(adapter) {
+    const pos = adapter.aceEditor.getCursorPosition();
+    const doc = await luaDocAt(adapter, pos);
+    if (!doc) return notify("No Lua language server for this position");
+    const position = { line: pos.row, character: pos.column };
+    // prepareRename first, so a caret on a keyword or a literal says so instead
+    // of opening a prompt that can only end in "no edits".
+    const prep = await ssExt._luaRaw.request("textDocument/prepareRename", {
+      textDocument: { uri: doc.uri },
+      position,
+    });
+    if (!prep) return notify("Nothing renameable at the cursor");
+    const current = prep.placeholder || "";
+
+    // The occurrences that will be rewritten, fetched ONCE - their ranges do not
+    // depend on the new name, only the text written into them does, so the
+    // preview is rebuilt from these on every keystroke with no further round
+    // trips (getCompletions is synchronous anyway, so it could not await one).
+    //
+    // ponytail: the authoritative edits come from textDocument/rename at accept
+    // time; this asks textDocument/references instead, which for emmylua is the
+    // same set. A divergence would show up as a different "Renamed N" count, not
+    // as a wrong edit - applyLuaRename still validates everything it applies.
+    const locations =
+      (await ssExt._luaRaw.request("textDocument/references", {
+        textDocument: { uri: doc.uri },
+        position,
+        context: { includeDeclaration: true },
+      })) || [];
+
+    const previewRows = renamePreviewRows(locations, current);
+    openListPrompt(adapter.aceEditor, {
+      name: "ssextRename",
+      message: current,
+      placeholder: "New name",
+      // The typed text is the NEW NAME, not a filter over the rows - and the
+      // rows are a fixed listing of what is about to change, so they are built
+      // once and never rebuilt. `highlight` pins the highlight to the name being
+      // replaced instead of letting it chase what is being typed.
+      filter: false,
+      staticList: true,
+      highlight: current,
+      entries: () => previewRows,
+      emptyText: "No occurrences found",
+      onAccept: (data) => {
+        const newName = (data.value || "").trim();
+        if (!newName || newName === current) return;
+        applyLuaRename(doc.uri, position, newName).catch((e) =>
+          console.error("[SS Ext] rename failed:", e),
+        );
+      },
+    });
+  }
+
+  // One row per occurrence about to be renamed: the source line AS IT IS, with
+  // the name being replaced highlighted (see `highlight` in openListPrompt).
+  // Static - nothing here depends on what is typed into the box.
+  //
+  // The location goes in `meta`, i.e. the popup's RIGHT-HAND column, so the
+  // caption is nothing but code: ace highlights the first `indexOf` of the
+  // filter text in the CAPTION, and with the file name in front of it a name
+  // that also occurs in the file name (`debug_expand_rrule.sas` for a rename of
+  // `expand`) got the highlight instead of the occurrence.
+  //
+  // Every row's `value` is the CURRENT name, which is the safe answer if the
+  // list is ever reached anyway: ace's prompt takes a selected row's value on a
+  // click, and onAccept discards a new name equal to the old one. Together with
+  // staticList's unbound arrow keys that leaves Enter as the only thing that can
+  // rename, and only ever to what was typed.
+  function renamePreviewRows(locations, current) {
+    return locations.map((loc) => {
+      const target = luaTargetForUri(loc.uri);
+      const line = target
+        ? (target.adapter.aceEditor.session.getLine(loc.range.start.line) || "").trim()
+        : "";
+      return {
+        caption: line,
+        meta: `${luaDocLabel(loc.uri)}:${loc.range.start.line + 1}${target ? "" : " (not open)"}`,
+        value: current,
+      };
+    });
+  }
+
+  async function applyLuaRename(uri, position, newName) {
+    const edit = await ssExt._luaRaw.request("textDocument/rename", {
+      textDocument: { uri },
+      position,
+      newName,
+    });
+    // ponytail: emmylua answers with the `changes` form (measured); the spec's
+    // other half, `documentChanges`, is not handled - this says so rather than
+    // silently renaming nothing if that ever changes.
+    const changes = edit && edit.changes;
+    if (!changes || !Object.keys(changes).length) return notify("Rename produced no edits");
+
+    // Resolve and check EVERYTHING before touching a single document: a rename
+    // that half-applies leaves code that no longer compiles, so a file that is
+    // not open (or an edit that would land outside its block) refuses the whole
+    // operation rather than part of it.
+    const plan = [];
+    for (const [docUri, edits] of Object.entries(changes)) {
+      const target = luaTargetForUri(docUri);
+      if (!target) {
+        return notify(
+          `Rename would touch a file that is not open: ${docUri.replace(/^.*\//, "")}`,
+          true,
+        );
+      }
+      const session = target.adapter.aceEditor.session;
+      // The blanked document cannot see a name the surrounding SAS also uses,
+      // and an edit on a blanked row would be written straight into SAS code, so
+      // any edit outside the block's own rows refuses the rename.
+      if (target.isBlock && !blockEditsInside(sessionLuaRanges(session), edits)) {
+        return notify("Rename would edit SAS code outside the PROC LUA block", true);
+      }
+      plan.push({ session, edits });
+    }
+    plan.forEach(({ session, edits }) => applyLspEdits(session, edits));
+    notify(`Renamed ${countLspEdits(changes)} occurrence(s) to ${newName}`);
+  }
+
+  const countLspEdits = (changes) =>
+    Object.values(changes).reduce((n, edits) => n + edits.length, 0);
+
+  // Registered on every adapter and left there, like the diff commands: a
+  // command that came and went could not be bound from ace's settings menu or
+  // mapped from a vimrc. The three server-backed ones report "no Lua language
+  // server for this position" in an editor that has none (a plain .sas file),
+  // rather than declining through isAvailable - a command missing from the
+  // palette is indistinguishable from one that is broken, and the message says
+  // which it is. gotoLastJump is the exception: with an empty stack there is
+  // genuinely nothing to do, and it says that too.
+  function luaNavCommands(adapter) {
+    const guard = (name, fn) => () =>
+      fn(adapter).catch((e) => {
+        console.error(`[SS Ext] ${name} failed:`, e);
+        notify(`${name} failed: ${(e && e.message) || e}`, true);
+      });
+    return [
+      {
+        name: "gotoDefinition",
+        description: "Go to definition (language server)",
+        exec: guard("gotoDefinition", gotoLuaDefinition),
+        readOnly: true,
+      },
+      {
+        name: "findReferences",
+        description: "Find references (language server)…",
+        exec: guard("findReferences", findLuaReferences),
+        readOnly: true,
+      },
+      {
+        name: "renameSymbol",
+        description: "Rename symbol (language server)…",
+        exec: guard("renameSymbol", renameLuaSymbol),
+      },
+      {
+        name: "gotoLastJump",
+        description: "Go back to the last jump origin",
+        exec: gotoLastLuaJump,
+        readOnly: true,
+      },
+    ];
   }
 
   // -- One-time SAS.Editor / DMSEditor patches -----------------------------------
@@ -3400,21 +4096,73 @@
     return ssExt._pending;
   }
 
-  function openVimMappingsPrompt(editor, entries) {
-    const FilteredList = ssExt.newLib.ace.require("ace/autocomplete").FilteredList;
-    ssExt.newLib.ace.require("ace/ext/prompt").prompt(editor || null, "", {
-      name: "vimMappings",
+  // The one ace/ext/prompt call site. Four near-identical copies of this block
+  // had accumulated (command palette, vim mappings, references, and rename would
+  // have been the fourth); they differ only in the entries, the empty-list
+  // message, what accepting does, and whether the typed text FILTERS the list (a
+  // picker) or is itself the answer (rename, where the list is a live preview of
+  // what the typed name will do).
+  //
+  // `entries` is a function of the current input rather than an array, which is
+  // what lets the preview case rebuild its rows on every keystroke; a picker
+  // just ignores the argument.
+  function openListPrompt(editor, options) {
+    const aceLib = ssExt.newLib.ace;
+    const FilteredList = aceLib.require("ace/autocomplete").FilteredList;
+    // The prompt hands whatever this returns to popup.setData as its filterText,
+    // which is BOTH what a picker filters on and what the rows highlight. A
+    // fixed `highlight` decouples the two: the rename list highlights the name
+    // being replaced, which does not change as the new one is typed.
+    const getPrefix = (cmdLine) =>
+      options.highlight !== undefined
+        ? options.highlight
+        : cmdLine.getValue().substring(0, cmdLine.getCursorPosition().column);
+    aceLib.require("ace/ext/prompt").prompt(editor || null, options.message || "", {
+      name: options.name,
+      placeholder: options.placeholder,
       selection: [0, Number.MAX_VALUE],
-      onAccept: function () {}, // a listing: picking a row just closes the prompt
-      getPrefix: function (cmdLine) {
-        return cmdLine.getValue().substring(0, cmdLine.getCursorPosition().column);
-      },
-      getCompletions: function (cmdLine) {
-        // Clone like prompt.commands does - FilteredList mutates its input.
+      onAccept: options.onAccept || function () {}, // a listing: accepting just closes
+      getPrefix,
+      getCompletions: (cmdLine) => {
+        const entries = options.entries(cmdLine.getValue()) || [];
+        // Cloned per call because FilteredList MUTATES its input and this runs
+        // on every keystroke - the same reason prompt.commands clones. The clone
+        // is also why every caller keys its side table by an index: JSON drops
+        // functions and object identity.
         const cloned = JSON.parse(JSON.stringify(entries));
-        const filtered = new FilteredList(cloned).filterCompletions(cloned, this.getPrefix(cmdLine));
-        return filtered.length > 0 ? filtered : [{ value: "No matching mappings", error: 1 }];
+        const rows =
+          options.filter === false
+            ? cloned
+            : new FilteredList(cloned).filterCompletions(cloned, getPrefix(cmdLine));
+        return rows.length ? rows : [{ value: options.emptyText, error: 1 }];
       },
+    });
+
+    // An INFORMATIONAL list (the rename preview): the rows are there to be read,
+    // not chosen. ace's prompt is built for pickers - it takes the selected
+    // row's value the moment anything below the first is selected - so the
+    // navigation keys are unbound here and the selection stays on row 0, which
+    // is what keeps Enter meaning "what I typed". The prompt binds these in its
+    // own constructor, so this has to run after it.
+    if (options.staticList && editor && editor.cmdLine) {
+      const noop = () => {};
+      editor.cmdLine.commands.bindKeys({
+        Up: noop,
+        Down: noop,
+        Tab: noop,
+        PageUp: noop,
+        PageDown: noop,
+        "Ctrl-Up|Ctrl-Home": noop,
+        "Ctrl-Down|Ctrl-End": noop,
+      });
+    }
+  }
+
+  function openVimMappingsPrompt(editor, entries) {
+    openListPrompt(editor, {
+      name: "vimMappings",
+      entries: () => entries,
+      emptyText: "No matching mappings",
     });
   }
 
@@ -4942,10 +5690,10 @@
     // Stashed for test/debug visibility - not read by any runtime code path.
     window.__ssCmdPalette_lastList = entries;
 
-    const FilteredList = ssExt.newLib.ace.require("ace/autocomplete").FilteredList;
-    ssExt.newLib.ace.require("ace/ext/prompt").prompt(focusedEditor || null, "", {
+    openListPrompt(focusedEditor || null, {
       name: "commands",
-      selection: [0, Number.MAX_VALUE],
+      entries: () => entries,
+      emptyText: "No matching commands",
       onAccept: function (data) {
         const runner = data.item && data.item.command && runners[data.item.command];
         if (!runner) return;
@@ -4955,17 +5703,6 @@
         } catch (e) {
           console.error("[SS Ext] command palette command failed:", e);
         }
-      },
-      getPrefix: function (cmdLine) {
-        const currentPos = cmdLine.getCursorPosition();
-        return cmdLine.getValue().substring(0, currentPos.column);
-      },
-      getCompletions: function (cmdLine) {
-        const prefix = this.getPrefix(cmdLine);
-        // Clone like prompt.commands does - FilteredList mutates its input.
-        const cloned = JSON.parse(JSON.stringify(entries));
-        const filtered = new FilteredList(cloned).filterCompletions(cloned, prefix);
-        return filtered.length > 0 ? filtered : [{ value: "No matching commands", error: 1 }];
       },
     });
   }
