@@ -235,14 +235,51 @@
       return !maxLines || maxLines <= 0 || this.aceEditor.session.getLength() <= maxLines;
     }
 
+    _unregisterLsp() {
+      if (!this._lspRegistered) return;
+      try {
+        // ace-linters' unregisterEditor(editor, cleanupSession) closes the
+        // document server-side and takes its session listeners with it.
+        if (this._lspProvider) this._lspProvider.unregisterEditor(this.aceEditor, true);
+      } catch (e) {
+        console.error("[SS Ext] LSP unregister failed:", e);
+      }
+      this._lspRegistered = false;
+      this._lspProvider = null;
+    }
+
+    // The mode can change under a live editor - from ace's own settings pane
+    // (its Mode dropdown calls session.setMode) or from a Save As under a new
+    // extension, via setMode() below - and the mode is what decides WHICH
+    // language server this editor belongs to, the two being separate providers
+    // over separate workers. So move the editor across.
+    // ace-linters' own changeMode handling is not enough: it only re-resolves
+    // services INSIDE the shared ServiceManager, and the other server may not be
+    // registered there at all yet. Measured before this existed - switching a
+    // registered editor from sas to lua left the document on the SAS service,
+    // still under its file:///<id>.sas uri, with the Lua server never started
+    // and not one lua diagnostic.
+    _syncLspToMode() {
+      const modeId = this.aceEditor.session.$modeId;
+      if (!modeId || modeId === this._resolvedMode) return;
+      this._resolvedMode = modeId;
+      this._unregisterLsp();
+      this._maybeRegisterLsp();
+    }
+
     _maybeRegisterLsp() {
       if (this._lspRegistered || this._lspRegistering) return;
       if (!this._lspEligible()) return;
-      const lua = this._resolvedMode === "ace/mode/lua";
+      const mode = this._resolvedMode;
+      const lua = mode === "ace/mode/lua";
       this._lspRegistering = true;
       (lua ? ensureLuaLinters() : ensureLsp()).then((provider) => {
         this._lspRegistering = false;
-        if (!provider || this._disposed) return;
+        if (this._disposed) return;
+        // The mode changed while the server was starting: this provider is the
+        // wrong one now, and _syncLspToMode's own call bailed on _lspRegistering.
+        if (this._resolvedMode !== mode) return this._maybeRegisterLsp();
+        if (!provider) return;
         // Re-check: a big setText() may have landed while this promise was in flight.
         if (!this._lspEligible()) return;
         try {
@@ -260,9 +297,18 @@
           // require() of another open .lua tab resolves. Only for the Lua
           // provider: the SAS server has no module concept, and its documents
           // are better left on the ids the rest of this file's LSP code keys on.
+          // An editor with no file of its own - a code tab switched to lua mode
+          // from the settings pane, a scratch buffer - gets a path under one
+          // shared scratch root rather than none: a document under NO workspace
+          // root is dropped by the server outright once any root exists
+          // (is_workspace_file: no folders means everything, folders means only
+          // what matches one), so it silently got no diagnostics at all, and
+          // every require() in it was reported "visibility is not `public`",
+          // that check needing the requiring file to be a module - which needs a
+          // root. Both measured against the real server.
           provider.registerEditor(
             this.aceEditor,
-            lua && this._filePath ? { filePath: this._filePath } : undefined,
+            lua ? { filePath: this._filePath || scratchLuaPath(this.aceEditor) } : undefined,
           );
           this._lspRegistered = true;
           // Which provider to unregister from in dispose() - there are two now.
@@ -299,7 +345,9 @@
           // after the server's had time to open the document so the initial
           // view is styled without needing an edit/scroll first.
           setTimeout(() => {
-            if (this._disposed) return;
+            // Gone, or moved to the other server in the meantime (a mode change
+            // leaves this provider with no session provider to ask).
+            if (this._disposed || this._lspProvider !== provider) return;
             try {
               provider.$getSessionLanguageProvider(this.aceEditor.session).getSemanticTokens();
             } catch (e) {
@@ -313,6 +361,7 @@
     }
 
     setupAceEventBindings() {
+      this.aceEditor.session.on("changeMode", () => this._syncLspToMode());
       this.aceEditor.session.on("change", (delta) => {
         this._scheduleDirtyGutter();
         nudgeSasFnCompletions(this.aceEditor);
@@ -354,14 +403,7 @@
       // growth past the limit isn't monitored; a page reload (or another
       // setText) is needed to pick it up.
       if (this._lspRegistered && !this._lspEligible()) {
-        if (this._lspProvider) {
-          try {
-            this._lspProvider.unregisterEditor(this.aceEditor, true);
-          } catch (e) {
-            console.error("[SS Ext] LSP unregister failed:", e);
-          }
-        }
-        this._lspRegistered = false;
+        this._unregisterLsp();
         console.log("[SS Ext] LSP: file exceeds lspMaxLines, skipping for this editor");
       } else if (!this._lspRegistered) {
         this._maybeRegisterLsp();
@@ -461,15 +503,7 @@
       // inline editor is a whole second editor parked in a line widget.
       if (this._diffView) closeDiff(this);
       if (this._inlineEditor) closeInlineEditor(this);
-      if (this._lspRegistered && this._lspProvider) {
-        // ace-linters' unregisterEditor(editor, cleanupSession) closes the
-        // document server-side - must run before aceEditor.destroy() below.
-        try {
-          this._lspProvider.unregisterEditor(this.aceEditor, true);
-        } catch (e) {
-          console.error("[SS Ext] LSP unregister failed:", e);
-        }
-      }
+      this._unregisterLsp(); // must run before aceEditor.destroy() below
       if (this._darkModeMql) {
         this._darkModeMql.removeEventListener("change", this._darkModeHandler);
       }
@@ -2219,6 +2253,14 @@
 
     return ssExt._luaLintersStarting;
   }
+
+  // The folder path-less lua editors are parked under, so they are inside a
+  // workspace root like every other document. The worker turns any document's
+  // folder into a root, so opening the first one registers it. Deliberately not
+  // under /ssext/ - that prefix is the one rootOf() skips, since the sas.lua defs
+  // must not become a requireable module.
+  const SCRATCH_LUA_ROOT = "/ssext-scratch";
+  const scratchLuaPath = (aceEditor) => `${SCRATCH_LUA_ROOT}/${aceEditor.session.id}.lua`;
 
   // A .lua file's hover is ace-linters' (emmylua's), which knows sas.<name> only
   // as the index signature - so that one gets the same SAS-function pass first.

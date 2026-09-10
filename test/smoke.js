@@ -276,6 +276,39 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       await page.evaluate(() => window.__ssf.run("reopenClosedTab"));
       await page.waitForTimeout(2500);
     }
+
+    // -- the reopened item carries an id ------------------------------------------
+    // AppDMS backfills item.id from the uri only for FileOpen/FileOpenWithCodeEditor,
+    // and the TextViewer branch rewrites the action to FileOpen only afterwards - so
+    // two id-less TXT tabs both open as tab id "undefined" and the second throws
+    // "Tried to register widget with id==editTabContentPane_undefined_texttoolbar"
+    // out of the middle of the open chain, leaving its uncancelable "Reading ..."
+    // modal up for good. handleWebOneEvent is stubbed, so nothing is really opened.
+    const reopenIds = await page.evaluate(async () => {
+      const seen = [];
+      const orig = window.appDMS.handleWebOneEvent;
+      window.appDMS.handleWebOneEvent = (action, item) => seen.push({ action, id: item.id });
+      const saved = window.__ssfClosedTabs;
+      window.__ssfClosedTabs = [
+        { name: "b.lua", uri: "/folders/myfolders/b.lua", type: "FILE", fileType: "TXT" },
+        { name: "a.lua", uri: "/folders/myfolders/a.lua", type: "FILE", fileType: "TXT" },
+      ];
+      try {
+        window.__ssf.run("reopenClosedTab");
+        window.__ssf.run("reopenClosedTab");
+      } finally {
+        window.appDMS.handleWebOneEvent = orig;
+        window.__ssfClosedTabs = saved;
+      }
+      return seen;
+    });
+    check(
+      "reopening a TXT tab gives the item an id (two of them stay distinct)",
+      reopenIds.length === 2 &&
+        reopenIds.every((r) => r.action === "FileOpenWithTextViewer" && r.id) &&
+        reopenIds[0].id !== reopenIds[1].id,
+      reopenIds,
+    );
   }
 
   // -- native mouse handling toggle (live) ----------------------------------------
@@ -1332,11 +1365,13 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       if (afterFormat !== beforeFormat) break;
     }
     const leaked = (window.__ssExt._luaLintersProvider && ed.completers.filter((c) => c.id === "lspCompleters").length) || 0;
+    // Before dispose(): unregistering clears the flag.
+    const registered = adapter._lspRegistered;
     adapter.dispose();
     div.remove();
     return {
       modeForName,
-      registered: adapter._lspRegistered,
+      registered,
       started: !!window.__ssExt._luaLintersProvider,
       top,
       captions,
@@ -1521,6 +1556,152 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
         luaRequireState.unresolved.length === 0 &&
         /greet/.test(luaRequireState.hover)),
     luaRequireState,
+  );
+
+  // -- an editor with no file of its own still lives in a workspace ----------------
+  // A document under NO workspace root is not a module, and the visibility check
+  // behind require() needs the REQUIRING file to be one - so a path-less editor
+  // (a code tab switched to lua mode, a scratch buffer) reported every require as
+  // "visibility is not `public`". They get a path under one shared scratch root
+  // instead, which the worker turns into a root like any other.
+  const luaScratchState = await page.evaluate(async () => {
+    if (!window.__ssExt._luaLintersProvider) return { started: false };
+    const mk = (id, text, path) => {
+      const div = document.createElement("div");
+      div.id = id;
+      div.style.cssText = "position:fixed;left:-9999px;top:0;width:600px;height:300px";
+      document.body.appendChild(div);
+      return { div, adapter: new window.__ssExt.AceEditorAdapter(id, text, "ace/mode/lua", path) };
+    };
+    // The module lives under its own root, registered FIRST - the ordering that
+    // made this visible (with no roots at all the server takes every file).
+    const mod = mk(
+      "ssext_smoke_scratch_mod",
+      "local M = {}\nfunction M.greet(name) return 'hi ' .. name end\nreturn M\n",
+      "/ssext-smoke/scratch/ssext_scratch_helper.lua",
+    );
+    for (let i = 0; i < 60; i++) {
+      if (mod.adapter._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+    // The undefined global is the control: it proves diagnostics reach this
+    // document at all, so an empty list can't pass the check by accident.
+    const main = mk(
+      "ssext_smoke_scratch_main",
+      'local h = require("ssext_scratch_helper")\nprint(h)\nlocal y = ssext_undefined_global_here\n',
+    );
+    for (let i = 0; i < 60; i++) {
+      if (main.adapter._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const session = main.adapter.aceEditor.session;
+    let ann = [];
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      ann = (session.getAnnotations() || []).map((a) => a.text);
+      if (ann.length) break;
+    }
+    const slp = window.__ssExt._luaLintersProvider.$getSessionLanguageProvider(session);
+    const state = { started: true, uri: slp && slp.documentUri, ann };
+    [mod, main].forEach((e) => {
+      e.adapter.dispose();
+      e.div.remove();
+    });
+    return state;
+  });
+  check(
+    luaScratchState.started
+      ? "Lua LSP: a path-less editor is parked under a workspace root, so require() is not 'not public'"
+      : "Lua LSP: path-less editor root (skipped: lib/emmylua-lsp not built)",
+    !luaScratchState.started ||
+      (/^file:\/\/\/ssext-scratch\//.test(luaScratchState.uri || "") &&
+        luaScratchState.ann.length > 0 &&
+        !luaScratchState.ann.some((t) => /visibility is not/.test(t))),
+    luaScratchState,
+  );
+
+  // -- Changing the mode moves the editor to the other language server -------------
+  // ace's own settings pane changes a live session's mode, and the mode is what
+  // picks the server. ace-linters only re-resolves services inside its shared
+  // manager, so without _syncLspToMode the document stayed on the SAS service
+  // under its .sas uri and the Lua server was never even started.
+  const modeSwitchState = await page.evaluate(async () => {
+    const div = document.createElement("div");
+    div.id = "ssext_smoke_mode_switch";
+    div.style.cssText = "position:fixed;left:0;top:0;width:800px;height:300px;z-index:99999";
+    document.body.appendChild(div);
+    const a = new window.__ssExt.AceEditorAdapter(
+      div.id,
+      'local s = "abc"\nlocal y = undefined_global_here\n',
+      "sas",
+    );
+    const ed = a.aceEditor;
+    for (let i = 0; i < 60; i++) {
+      if (a._lspRegistered) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const which = () =>
+      a._lspProvider === window.__ssExt._luaLintersProvider
+        ? "lua"
+        : a._lspProvider === window.__ssExt._lspProvider
+          ? "sas"
+          : "none";
+    // Per session: both providers' uri maps are page-wide, and the run has other
+    // documents open in each by now.
+    const sasUri = `file:///${ed.session.id}.sas`;
+    // No filePath on this one, so the lua side parks it under the scratch root.
+    const luaUri = `file:///ssext-scratch/${ed.session.id}.lua`;
+    const state = { luaStarted: false, sasFirst: which(), sasUri, luaUri };
+    ed.session.setMode("ace/mode/lua");
+    for (let i = 0; i < 80; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if ((ed.session.getAnnotations() || []).length) break;
+    }
+    state.luaStarted = !!window.__ssExt._luaLintersProvider;
+    state.afterLua = which();
+    state.annotations = (ed.session.getAnnotations() || []).map((x) => x.text);
+    // The document moved: its uri now carries the .lua extension, and the SAS
+    // provider no longer knows it.
+    const known = (p, uri) => !!(p && p.$urisToSessionsIds || {})[uri];
+    state.luaKnowsIt = known(window.__ssExt._luaLintersProvider, luaUri);
+    state.sasStillKnowsIt = known(window.__ssExt._lspProvider, sasUri);
+    ed.session.setMode("ace/mode/sas");
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (which() === "sas") break;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+    state.backToSas = which();
+    state.backAnnotations = (ed.session.getAnnotations() || []).map((x) => x.text);
+    state.sasKnowsItAgain = known(window.__ssExt._lspProvider, sasUri);
+    state.luaStillKnowsIt = known(window.__ssExt._luaLintersProvider, luaUri);
+    a.dispose();
+    div.remove();
+    return state;
+  });
+  check(
+    modeSwitchState.luaStarted
+      ? "changing the mode to lua moves the editor onto the Lua server"
+      : "mode change to lua (skipped: lib/emmylua-lsp not built)",
+    !modeSwitchState.luaStarted ||
+      (modeSwitchState.sasFirst === "sas" &&
+        modeSwitchState.afterLua === "lua" &&
+        modeSwitchState.annotations.some((t) => /undefined global/i.test(t)) &&
+        modeSwitchState.luaKnowsIt === true &&
+        modeSwitchState.sasStillKnowsIt === false),
+    modeSwitchState,
+  );
+  check(
+    modeSwitchState.luaStarted
+      ? "...and changing it back to sas moves it onto the SAS server again"
+      : "mode change back to sas (skipped: lib/emmylua-lsp not built)",
+    !modeSwitchState.luaStarted ||
+      (modeSwitchState.backToSas === "sas" &&
+        modeSwitchState.backAnnotations.length === 0 &&
+        modeSwitchState.sasKnowsItAgain === true &&
+        modeSwitchState.luaStillKnowsIt === false),
+    modeSwitchState,
   );
 
   // -- Completion from the other open editors --------------------------------------

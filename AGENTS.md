@@ -593,13 +593,27 @@ post-register semantic-token kick (`languageProvider.$getSessionLanguageProvider
 try/catch — the initial request races the server's `didOpen`).
 The code editor is constructed with empty content and its real text arrives later via `setText()` (text viewers/toggle
 conversion pass content at construction instead) — `setText()` re-runs the eligibility check after setting the value: if
-now registered-but-over-the-limit it unregisters (`ssExt._lspProvider.unregisterEditor(this.aceEditor, true)`, clears
-`_lspRegistered`, logs one `[SS Ext]` line);
+now registered-but-over-the-limit it unregisters (`_unregisterLsp()`, the one funnel for
+`ssExt._lspProvider.unregisterEditor(this.aceEditor, true)` + clearing `_lspRegistered`/`_lspProvider`, shared with
+`dispose()` and the mode switch below), logging one `[SS Ext]` line;
 if not registered and now eligible it calls `_maybeRegisterLsp()` again.
 Typing growth past the limit after that isn't monitored (a `// ponytail:` comment on the spot notes it — a reload or
 another `setText` picks it up).
-`dispose()` calls `ssExt._lspProvider.unregisterEditor(this.aceEditor, true)` (closes the document server-side) before
-`aceEditor.destroy()`.
+**A mode change moves the editor between the two servers.** ace's own settings pane changes a live session's mode, and
+so does a Save As under a new extension (`setMode()`), and the mode is what decides which server owns the editor.
+`setupAceEventBindings()` listens for the session's `changeMode` and calls `_syncLspToMode()`, which updates
+`_resolvedMode`, `_unregisterLsp()`s and `_maybeRegisterLsp()`s — so switching an editor to `ace/mode/lua` starts the
+Lua server if it wasn't running, re-opens the document under a `file:///<session>.lua` uri and gives it emmylua's
+diagnostics, and switching back to `ace/mode/sas` hands it to the SAS server again.
+Leaving it to ace-linters is not enough, and was measured: its own `changeMode` only re-resolves services INSIDE the
+shared `ServiceManager`, so with the Lua service not registered there yet (nothing had built that provider) the document
+stayed on the SAS service under its `.sas` uri with no lua diagnostics at all.
+`_maybeRegisterLsp()` captures the mode it started for and, if `_resolvedMode` changed while the server was starting,
+re-enters instead of registering with the wrong provider — the `_syncLspToMode()` call that raced it bailed on
+`_lspRegistering`.
+The 2-second semantic-token kick checks `this._lspProvider !== provider` for the same reason (the old provider has no
+session provider left to ask, which was one caught-but-noisy warning per switch).
+`dispose()` calls `_unregisterLsp()` (closing the document server-side) before `aceEditor.destroy()`.
 The worker/provider persist for the whole page lifetime once started — deactivating/reactivating the Ace toggle just
 re-registers editors against the same one, nothing tears it down.
 Three more perf workarounds, applied once per page by `installLspMarkerPatches(provider, session)` (called right after
@@ -716,6 +730,17 @@ For the Lua provider it also passes `registerEditor`'s second argument, `{ fileP
 constructor argument, `item.uri` from the `createFileView` wrapper): that becomes the LSP document's URI in place of
 ace-linters' `file:///<ace session id>.lua`, and a real path is what lets the server derive a module name — the whole of
 why `require()` of another open `.lua` tab resolves.
+An editor with **no file of its own** — a code tab switched to lua mode from the settings pane, a scratch buffer — gets
+a synthesised path under one shared scratch root (`/ssext-scratch/<session id>.lua`, `scratchLuaPath()`) rather than no
+path at all, because a document under NO workspace root is not a module, and the visibility check behind `require()`
+needs the REQUIRING file to be one: `check_module_visibility` asks `get_workspace_id(file)`, which is only answered for
+files in the module index, and `.unwrap_or(false)` turns the miss into ``module '<x>' visibility is not `public` `` on
+every require in that editor.
+Measured both ways against the real server — same file, `file:///<session>.lua` warns, `file:///ssext-scratch/…` does
+not, and the require still resolves to a module under a different root (all non-library roots are `WorkspaceId::MAIN`,
+so they can require each other).
+The root itself needs no special handling: the worker turns any document's folder into one, and `/ssext-scratch` is
+deliberately not under `/ssext/` — that is the prefix `rootOf()` skips so the `sas.lua` defs never become requireable.
 Deliberately not done for the SAS provider, which has no module concept and whose documents the rest of this file's LSP
 code keys on by session id.
 That buys ace-linters' whole client-side feature set with no UI code here: diagnostics (the server pushes
@@ -893,6 +918,17 @@ file `sas.today` hovers to the server's doc while `sas.symget` hovers to `sas.lu
   The same wrapper called the original as `.apply(this, tabMenu)`, i.e. with no arguments at all, so the secondary
   group's tab menu never got SAS Studio's own items;
   that is a `.call` now.
+  `openItem(item)` — the one call into `appDMS.handleWebOneEvent` that `reopenClosedTab` and the "open path" prompt
+  share — **backfills `item.id` from the uri** (`uri.replaceAll("/", "~ps~")`), the same thing `ext-browse_ss.js` does
+  for the same reason: AppDMS derives the id itself only for the `FileOpen`/`FileOpenWithCodeEditor` actions
+  (AppDMS.js:5240), and the TextViewer branch rewrites the action to `FileOpen` only AFTERWARDS, so an id-less TXT item
+  opens as tab id `"undefined"`.
+  One such tab is fine;
+  the SECOND throws `Tried to register widget with id==editTabContentPane_undefined_texttoolbar but that id is already
+  registered` out of the middle of the open chain, which leaves its UNCANCELABLE "Reading &lt;file&gt;…" modal up for
+  good — the app looks hung on the file, and only a reload clears it.
+  Closed-tab records carry no id (the tab objects don't keep one), so the derivation is the fix rather than remembering
+  it.
   The dominant pattern for patches is wrap-and-delegate: save the original method (e.g. `tabs.closeTab`), replace it
   with a wrapper that calls through.
   `confirmDropFile` wraps `projects.projectTreeStore.pasteItem` (re-applied from a `createProjectsModel` wrapper, since
