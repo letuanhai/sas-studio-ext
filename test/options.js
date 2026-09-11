@@ -275,6 +275,113 @@ const loadScript = (page, src) =>
   // the option text, and with ~200 languages that is the only way to reach one.
   check("every option still starts with its caption (type-ahead)", (await optionText(page, "sas")).startsWith("SAS"), await optionText(page, "sas"));
 
+  // ---------------------------------------------------------------------------
+  // The saslog mode's severity colours. The snippet box is a real Ace with a
+  // real theme, which is the only way to answer "does anything actually paint
+  // this token?" - the trap src/ace/mode-saslog.js's token-name comment names.
+  await loadScript(page, "../lib/ace/src-noconflict/mode-python.js");
+  await loadScript(page, "../lib/ace/src-noconflict/mode-lua.js");
+  await loadScript(page, "ace/mode-sas.js");
+  await loadScript(page, "ace/mode-saslog.js");
+  const LOG = [
+    "1          data x;",
+    "NOTE: The data set WORK.X has 1 observations and 1",
+    "      variables.",
+    "2          put 'unterminated;",
+    "ERROR 22-322: Syntax error, expecting one of the following: ;.",
+    "      Some more detail.",
+    "",
+    "      indented text after a blank line",
+    "WARNING: Apparent symbolic reference X not resolved.",
+    "INFO: Index i not used.",
+    "DEBUG: loop",
+    "3          run;",
+    "error: my own put output",
+    "warning: still my own",
+    "4          proc lua;",
+    "5          submit;",
+    "NOTE: inside an embedded block",
+    "6          endsubmit;",
+  ];
+  await pick(page, "saslog");
+  await page.evaluate((text) => {
+    const ace = window.__ssAce;
+    const session = ace.createEditSession(text);
+    session.setMode(new (ace.require("ace/mode/saslog").Mode)());
+    session.setUseWorker(false);
+    const editor = ace.edit("snippets-editor");
+    // This fixture renders log tokens; it does not use SAS snippet expansion.
+    editor.setOption("enableSnippets", false);
+    editor.setSession(session);
+  }, LOG.join("\n"));
+  const { tokens, states } = await page.evaluate((n) => {
+    const session = window.__ssAce.edit("snippets-editor").session;
+    const rows = [...Array(n).keys()];
+    return {
+      tokens: rows.map((r) => session.getTokens(r).map((t) => [t.type, t.value])),
+      states: rows.map((r) => session.getState(r)),
+    };
+  }, LOG.length);
+  const only = (r, type) => tokens[r].length === 1 && tokens[r][0][0] === type && tokens[r][0][1] === LOG[r];
+  const none = (r) => tokens[r].every((t) => !/^saslog_/.test(t[0]));
+
+  check("a marker line is one whole-line token", only(1, "saslog_note"), tokens[1]);
+  check("indented continuations do not inherit severity colours", none(2) && none(5), [tokens[2], tokens[5]]);
+  check("indented text after a blank line has no severity colour", none(7), tokens[7]);
+  check("the numbered form (ERROR 22-322:) counts as a marker", only(4, "saslog_error"), tokens[4]);
+  // The marker must be recognized inside row 3's string state and return to
+  // start, so the following line resumes ordinary SAS highlighting.
+  check(
+    "an error after an unbalanced quote resets the tokenizer",
+    states[3] !== "start" && only(4, "saslog_error") && states[4] === "start" && none(5),
+    { before: states[3], after: states[4], following: tokens[5] }
+  );
+  check("all five markers are distinguished", only(8, "saslog_warning") && only(9, "saslog_info") && only(10, "saslog_debug"), [tokens[8], tokens[9], tokens[10]]);
+  // ...and the reset leaves row 11 back on the SAS rules rather than inside
+  // row 3's string, which is what its line-number token being numeric shows.
+  check("non-marker lines keep the SAS highlighting", none(0) && none(11) && tokens[0].some((t) => /keyword/.test(t[0])) && tokens[11][0][0] === "constant.numeric.sas", [tokens[0], tokens[11]]);
+  // Deliberate - see the rule's comment in src/ace/mode-saslog.js. This pins the
+  // BEHAVIOUR, not which rule set the flag: `start` is case-insensitive from the
+  // SAS rules too, so it takes stripping BOTH to stop it matching, and a suite
+  // cannot mutate two files (measured by hand instead).
+  check("a lower-case marker counts too", only(12, "saslog_error") && only(13, "saslog_warning"), [tokens[12], tokens[13]]);
+  // The stack clear in `restart`: a NOTE inside a PROC LUA submit block would
+  // otherwise carry that block's state stack to the end of the file.
+  check(
+    "a marker inside an embedded block drops the block's state stack",
+    Array.isArray(states[15]) && only(16, "saslog_note") && states[16] === "start" && states[17] === "start",
+    { before: states[15], after: states[16], following: states[17] }
+  );
+
+  const paint = (theme) =>
+    page.evaluate(
+      (theme) =>
+        new Promise((done) => {
+          const editor = window.__ssAce.edit("snippets-editor");
+          editor.setTheme(theme, () =>
+            setTimeout(() => {
+              const layer = editor.renderer.container.querySelector(".ace_text-layer");
+              const at = (cls) => {
+                const el = layer.querySelector("." + cls);
+                return el && getComputedStyle(el).color;
+              };
+              done({
+                dark: editor.renderer.container.classList.contains("ace_dark"),
+                plain: getComputedStyle(layer).color,
+                error: at("ace_saslog_error"),
+                note: at("ace_saslog_note"),
+              });
+            }, 150)
+          );
+        }),
+      theme
+    );
+
+  const light = await paint("ace/theme/chrome");
+  check("light theme: the marker colours are painted, and differ from plain text", light.error === "rgb(204, 0, 0)" && light.note === "rgb(0, 87, 184)" && light.error !== light.plain, light);
+  const dark = await paint("ace/theme/gruvbox");
+  check("dark theme: the ace_dark half wins", dark.dark && dark.error === "rgb(255, 107, 107)" && dark.note === "rgb(111, 179, 255)" && dark.error !== dark.plain, dark);
+
   check("no console errors on the options page", errors.length === 0, errors.slice(0, 3));
 
   console.log(failures ? `\n${failures} check(s) failed` : "\nAll checks passed");
