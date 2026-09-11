@@ -25,7 +25,8 @@ const { chromium } = require("playwright");
 const port = process.env.PORT || 9333;
 const root = path.resolve(__dirname, "..");
 
-// --check just asks whether this repo is the extension installed there, for
+// --check asks whether THIS extension is installed there - by path when the
+// browser is on this box, else by manifest name - and prints `<id>\t<path>`, for
 // dev-browser.sh's `status`. Asking the extension REGISTRY rather than looking
 // for a service-worker target in /json/list is the point: the worker goes
 // dormant after ~30s idle, and a missing target then reads as "not loaded".
@@ -135,10 +136,18 @@ const log = (msg) => console.log(`${new Date().toTimeString().slice(0, 8)} ${msg
 		const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 15000 });
 		const session = await browser.newBrowserCDPSession();
 		const { extensions } = await session.send("Extensions.getExtensions");
-		const mine = extensions.find((e) => e.path === root || e.path === root + "/");
+		// Path equality alone answers the WRONG question on a tunnelled browser:
+		// the laptop loads the extension from its OWN checkout, so its path never
+		// matches this box's and a plainly-loaded extension read as "NOT loaded".
+		// So fall back to the manifest name, and print the path for `status` to
+		// tell the two cases apart.
+		const { name } = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+		const mine =
+			extensions.find((e) => e.path === root || e.path === root + "/") ||
+			extensions.find((e) => e.name === name);
 		await browser.close();
 		if (!mine) process.exit(1);
-		console.log(mine.id);
+		console.log(`${mine.id}\t${mine.path}`);
 		return;
 	}
 

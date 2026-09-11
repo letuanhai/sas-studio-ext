@@ -104,10 +104,29 @@ guarded_stop() {
 
 [ "$1" = "stop" ] && { stop; echo "stopped"; exit 0; }
 
+# `<id><tab><path>` for our extension in the browser on $PORT, non-zero if it has
+# none. The PATH is the interesting half: it says which machine that browser is
+# on, which is the one thing a CDP client cannot see for itself.
+ext_check() { PORT=$PORT node "$ROOT/tools/ext-load.js" --check 2>/dev/null; }
+ext_path_is_ours() { [ "$1" = "$ROOT" ] || [ "$1" = "$ROOT/" ]; }
+
 # The chrome://extensions Reload button, without the page or the mouse. Open
 # SAS Studio tabs still need their own reload afterwards to pick up the new
 # content scripts.
 if [ "$1" = "reload" ]; then
+	# Refuse a tunnelled browser. Extensions.loadUnpacked takes a path, and it is
+	# resolved on the BROWSER's filesystem - so reloading the laptop's chrome from
+	# here hands it this VM's path, which does not exist over there. Chrome answers
+	# that with an error or, worse, whatever happens to sit at the same path,
+	# neither of which is the edit you wanted to pick up.
+	if found=$(ext_check) && ! ext_path_is_ours "${found#*	}"; then
+		echo "refusing to reload: that browser loaded the extension from" >&2
+		echo "  ${found#*	}" >&2
+		echo "  not $ROOT - so it is running on another machine (the ssh -R tunnel)," >&2
+		echo "  and the path this would send it is meaningless there." >&2
+		echo "  Run 'dev-browser.sh reload' on THAT machine instead; 'status' confirms which is which." >&2
+		exit 1
+	fi
 	ID=$(PORT=$PORT node "$ROOT/tools/ext-load.js") || exit 1
 	echo "reloaded: chrome-extension://$ID (manual reload)"
 	echo "          reload the SAS Studio tab to re-inject"
@@ -117,8 +136,10 @@ fi
 # `status` answers the only question that matters when one fixed port serves two
 # devices: WHICH browser is the MCP talking to right now. On the laptop the port
 # is an `ssh -R` tunnel to chrome over there; on the phone it is a headed chrome
-# here. Both look identical to a client, so ask the browser itself - a tunnelled
-# one runs on a different host and has no extension of ours loaded.
+# here. Both look identical to a client, so ask the browser itself - and ask it
+# for the extension's PATH, not just whether one is loaded: the laptop has the
+# extension too, loaded from its own checkout, so "no extension" was never the
+# tunnelled signal. A path that is not this repo is.
 if [ "$1" = "status" ]; then
 	echo "port:  $PORT"
 	if own=$(running_display); then
@@ -134,10 +155,16 @@ if [ "$1" = "status" ]; then
 		exit 1
 	fi
 	echo "cdp:   $(printf %s "$ver" | sed -n 's/.*"Browser": "\([^"]*\)".*/\1/p')"
-	if ID=$(PORT=$PORT node "$ROOT/tools/ext-load.js" --check 2>/dev/null); then
-		echo "ext:   loaded ($ID) -> this is the browser on THIS machine"
+	if found=$(ext_check); then
+		ID=${found%%	*}
+		EXT_PATH=${found#*	}
+		if ext_path_is_ours "$EXT_PATH"; then
+			echo "ext:   loaded ($ID) from this repo -> the browser on THIS machine"
+		else
+			echo "ext:   loaded ($ID) from $EXT_PATH -> a tunnelled browser (your laptop), its own checkout"
+		fi
 	else
-		echo "ext:   NOT loaded -> a tunnelled browser (your laptop), or the extension is off"
+		echo "ext:   NOT loaded -> no extension of ours in this browser, or it is off"
 	fi
 	exit 0
 fi

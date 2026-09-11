@@ -118,8 +118,16 @@ pick up, until Ctrl-C.
 `WATCH=0` gives launch-and-return, which is what an agent wants.
 `./tools/dev-browser.sh reload` is the same reload on demand from another shell — over X11 forwarding, restarting the
 browser is the expensive part, so this is the normal way to pick up an edit.
+It **refuses a tunnelled browser**: `Extensions.loadUnpacked` resolves its path on the BROWSER's filesystem, so
+reloading the laptop's chrome from here would hand it a path that exists only on this VM.
+Reload from the machine the browser runs on;
+`status` says which that is.
 `stop` kills it by pidfile (not `pkill -f`, whose pattern would match the launching shell);
-`status` asks the browser which extension is loaded.
+`status` asks the browser which extension is loaded, and from WHICH PATH — that path is what tells a local dev browser
+from a tunnelled one, since the laptop has the extension loaded too, out of its own checkout.
+(Matching the path against this repo alone once made `status` report a plainly-loaded extension as "NOT loaded" on every
+tunnelled browser;
+it now falls back to the manifest name and prints the path.)
 Re-running the script is a full restart and no longer wipes the user-data-dir (`CLEAN=1` for a genuine first run).
 
 **What needs what** (measured with a purpose-built probe extension, not assumed):
