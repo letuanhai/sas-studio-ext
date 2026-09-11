@@ -133,7 +133,49 @@
     would still be a surprising side effect), and the smoke block takes max view off for the
     duration and puts it back.
 
-- allow configuring snippet for all languages, not just sas, using the snippet editor in options page, adding language selection
-- SAS log: highlight log line for NOTE, WARNING, ERROR, INFO, DEBUG
-- make status bar always show in maximized view, not just when start submit and then hide it when done
+- [x] ~~allow configuring snippets for all languages, not just SAS, using the snippet editor in the options page,
+      with a language selection~~ (storage is a scope -> text map and the select is built from ace/ext/modelist, so
+      there is no second language list to maintain. The box always uses `ace/mode/snippets`, giving every language's
+      snippet file the same snippet-syntax highlighting while the select chooses only its registration scope.
+      Its explicit completer list contains Ace's snippet and text completers, but no target-language keyword completer;
+      basic/live completion and Tab expansion are enabled, so Ace's snippet-authoring templates and words already in
+      the file are both available. The `snippets` scope is registered into the options page's snippet manager on load,
+      when leaving that scope (previewing its still-unsaved draft), and on Save, so user-defined snippet-authoring
+      templates work regardless of the target language currently selected.
+      Switching languages neither saves nor discards: every language's draft stays in memory, and the shared session's
+      undo manager is reset so Ctrl+Z cannot pull the previous language's text into the current one. One Save writes
+      every language's draft at once.
+      Emptying a non-default scope removes its stored entry; emptying a default scope stores `""` so the default does
+      not return. The select markers keep their original meaning and remain suffixes for working type-ahead: `*` means
+      that language has unsaved edits and `•` means it has snippets saved.
+      test/options.js covers the common mode, syntax tokens, all-draft save, preserved drafts/markers, empty values and
+      the cross-language undo regression)
+- [x] ~~SAS log: highlight log line for NOTE, WARNING, ERROR, INFO, DEBUG~~ (ace/mode/saslog gets highlight
+      rules of its own: one WHOLE-LINE token per marker line - the numbered `ERROR 22-322:` form too.
+      Continuation lines retain ordinary SAS syntax highlighting, with no inherited severity colour.
+      Colours are SAS's own convention, NOTE blue / WARNING green / ERROR
+      red, with INFO and DEBUG - which have none there - reading as extra information and noise. The token
+      names are NOT TextMate scopes and a small importCssString sheet is the only thing painting them: no ace
+      theme has five severity scopes and the nearest, .ace_invalid, is missing from BOTH configured defaults
+      (chrome, gruvbox) and pink in dracula, so depending on a theme was the trap here. Light/dark is one
+      `.ace_dark` override, i.e. the renderer's own class, so the colours follow the editor THEME. The marker
+      rules go into EVERY state, not just `start`: an unbalanced quote in an echoed source line leaves the SAS
+      rules in a string state that otherwise runs to the end of the file, which is exactly what a log is full
+      of.
+      Their `next` returns to `start` and clears the tokenizer stack - only the
+      embedded PROC LUA/PYTHON blocks push one, and a NOTE inside one would otherwise carry it to EOF.
+      Matching is case-INSENSITIVE and says so on the rule: it started out that way by accident (ace shares one
+      flag set per state and the SAS rules carry caseInsensitive), and a hand-written `%put error: ...` means
+      the same severity, so it is kept and pinned rather than fought.
+      Checked in test/options.js, which is where a real ace with a real theme is reachable without the server: tokens,
+      continuations without severity colours, the unshift, lower-case markers, the stack clear, and the computed
+      colour of a rendered span under theme-chrome and theme-gruvbox. Review found three wrong claims in the
+      first version of this entry - all three were about what the stack clear does)
+- [x] ~~make status bar always show in maximized view, not just when start submit and then hide it when
+      done~~ (a deletion: the bar was collapsed to 0 by the maximizeEditor patch and un-collapsed again by
+      minimizeBusyDialog for the duration of a run, which is what made it flicker in and out around every
+      submit. Stock setMaxView never touches #studio_status_bar - only headContainer is ours to reclaim - so
+      neither patch sets its height now and statusBarHeight() is gone. Unconditional, not a preference:
+      config for 17 pixels on a bar whose run status and Cancel chip have to be visible anyway. Smoke-checked
+      on the trip into maximized view the focusSideBarTree block already makes)
 - browse tabs: behave like windows alt+tab, sort the tab list by last access on top, current tab at bottom, when first open focus previous tab, pressing the main key (non-modifier key) again while still holding the modifier keys will move the focus forward (to next previous focused tab), releasing all keys to jump to selected tab, pressing any other key start searching, pressing esc to close prompt with no jump
