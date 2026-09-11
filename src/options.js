@@ -340,7 +340,7 @@
 
   function mergeAceConfig(stored) {
     stored = stored || {};
-    const defaults = window.DEFAULT_ACE_CONFIG || { darkTheme: "ace/theme/gruvbox", lightTheme: "ace/theme/iplastic", options: {}, vimrc: "", lsp: true, lspMaxLines: 500, luaLsp: true };
+    const defaults = window.DEFAULT_ACE_CONFIG || { darkTheme: "ace/theme/gruvbox", lightTheme: "ace/theme/iplastic", options: {}, vimrc: "", lsp: true, lspMaxLines: 500, luaLsp: true, procLuaLsp: false };
     return {
       darkTheme: stored.darkTheme || defaults.darkTheme,
       lightTheme: stored.lightTheme || defaults.lightTheme,
@@ -350,6 +350,7 @@
       lsp: typeof stored.lsp === "boolean" ? stored.lsp : defaults.lsp,
       lspMaxLines: typeof stored.lspMaxLines === "number" ? stored.lspMaxLines : defaults.lspMaxLines,
       luaLsp: typeof stored.luaLsp === "boolean" ? stored.luaLsp : defaults.luaLsp,
+      procLuaLsp: typeof stored.procLuaLsp === "boolean" ? stored.procLuaLsp : defaults.procLuaLsp,
     };
   }
 
@@ -420,6 +421,7 @@
     const lspCheckbox = document.getElementById("ace-lsp");
     const lspMaxLinesInput = document.getElementById("ace-lsp-max-lines");
     const luaLspCheckbox = document.getElementById("ace-lua-lsp");
+    const procLuaLspCheckbox = document.getElementById("ace-proc-lua-lsp");
     const vimrcEditor = document.getElementById("vimrc-editor");
 
     themes.forEach((t) => {
@@ -462,6 +464,7 @@
       lspCheckbox.checked = current.lsp !== false;
       lspMaxLinesInput.value = current.lspMaxLines;
       luaLspCheckbox.checked = current.luaLsp !== false;
+      procLuaLspCheckbox.checked = current.procLuaLsp === true;
       vimrcEditor.value = current.vimrc || "";
     }
 
@@ -494,6 +497,10 @@
     });
     luaLspCheckbox.addEventListener("change", () => {
       current.luaLsp = luaLspCheckbox.checked;
+      persist();
+    });
+    procLuaLspCheckbox.addEventListener("change", () => {
+      current.procLuaLsp = procLuaLspCheckbox.checked;
       persist();
     });
     lspMaxLinesInput.addEventListener("change", () => {

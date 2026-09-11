@@ -67,6 +67,8 @@ function mergeAceConfig(stored) {
     lsp: typeof stored.lsp === "boolean" ? stored.lsp : DEFAULT_ACE_CONFIG.lsp,
     lspMaxLines: typeof stored.lspMaxLines === "number" ? stored.lspMaxLines : DEFAULT_ACE_CONFIG.lspMaxLines,
     luaLsp: typeof stored.luaLsp === "boolean" ? stored.luaLsp : DEFAULT_ACE_CONFIG.luaLsp,
+    procLuaLsp:
+      typeof stored.procLuaLsp === "boolean" ? stored.procLuaLsp : DEFAULT_ACE_CONFIG.procLuaLsp,
   };
 }
 

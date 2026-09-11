@@ -188,6 +188,7 @@
     </p>
     <label>Dark theme <select id="ace-dark-theme"></select></label>
     <label>Light theme <select id="ace-light-theme"></select></label>
+    <h5>SAS</h5>
     <label
       ><input type="checkbox" id="ace-lsp" /> SAS language server (completions, hover,
       diagnostics)</label
@@ -196,11 +197,21 @@
       >Disable for files over <input type="number" id="ace-lsp-max-lines" min="0" step="1" style="width: 5em" />
       lines (0 = no limit)</label
     >
+    <h5>Lua</h5>
     <label
       ><input type="checkbox" id="ace-lua-lsp" /> Lua language server for
       <code>.lua</code> files opened as text (completions, diagnostics, hover,
       formatting)</label
     >
+    <label
+      ><input type="checkbox" id="ace-proc-lua-lsp" /> Lua language server inside
+      <code>proc lua</code> <code>submit;...endsubmit;</code> blocks</label
+    >
+    <p class="note">
+      <i>Note</i>: the language server never reads the SAS filesystem, so <code>require</code> resolves only against the
+      <code>.lua</code> files currently open in the SAS Studio session, not being aware of the <code>fileref LUAPATH</code>
+      of the environment variable <code>LUA_PATH</code>.
+    </p>
     <p class="note">Applies next time the Ace editor is activated.</p>
 
     <h3 id="vim">Vim Keymap</h3>

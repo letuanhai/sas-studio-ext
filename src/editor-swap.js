@@ -800,6 +800,11 @@
       // undefined), fixed alongside adding lspMaxLines.
       lsp: typeof cfg.lsp === "boolean" ? cfg.lsp : true,
       lspMaxLines: typeof cfg.lspMaxLines === "number" ? cfg.lspMaxLines : 500,
+      // Same story as `lsp`: left out of here, both Lua flags read as undefined
+      // everywhere, so the .lua path could never be turned off and the PROC LUA
+      // path could never be turned on.
+      luaLsp: typeof cfg.luaLsp === "boolean" ? cfg.luaLsp : true,
+      procLuaLsp: typeof cfg.procLuaLsp === "boolean" ? cfg.procLuaLsp : false,
       // vimrc was missing here too - installSettingsMenuPersistence() posts this
       // object back to chrome.storage.local wholesale, so omitting it silently
       // wiped the saved vimrc on the next in-page settings-menu change.
@@ -2287,8 +2292,9 @@
   // textDocument/publishDiagnostics), hover, signature help, document
   // highlights, code actions, semantic tokens, completion+resolve and format -
   // with no UI code here.
+  // Not gated on aceConfig.luaLsp itself: that flag is the .lua-file path only
+  // (checked in _lspEligible), and the PROC LUA path shares this same worker.
   function ensureLuaLinters() {
-    if (getAceConfig().luaLsp === false) return Promise.resolve(null);
     if (ssExt._luaLintersStarting) return ssExt._luaLintersStarting;
 
     ssExt._luaLintersStarting = (async () => {
@@ -2503,6 +2509,10 @@
 
   function sessionLuaRanges(session) {
     if (!session || session.$modeId !== "ace/mode/sas") return null;
+    // The one gate for every PROC LUA feature: no ranges means no sync, no
+    // completer, no hover, no format, and syncProcLuaDoc closing whatever
+    // document was already open (turning it off mid-session cleans up).
+    if (getAceConfig().procLuaLsp !== true) return null;
     // The same line limit the language servers themselves honour: this pushes
     // the whole (blanked) file on every edit, which is exactly what that limit
     // is about.
