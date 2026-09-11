@@ -240,6 +240,10 @@
       <li><code>map/nmap/imap/vmap &lt;lhs&gt; &lt;rhs&gt;</code></li>
       <li><code>noremap/nnoremap/inoremap/vnoremap &lt;lhs&gt; &lt;rhs&gt;</code> (same, non-recursive)</li>
       <li><code>unmap/nunmap/iunmap/vunmap &lt;lhs&gt;</code></li>
+      <li>
+       in <code>&lt;rhs&gt;</code>, use <code>&lt;Cmd&gt;&lt;name&gt;</code> (the trailing <code>&lt;CR&gt;</code> optional)
+        runs the Ace command <code>&lt;name&gt;</code>, e.g. <code>nmap gd &lt;Cmd&gt;gotoDefinition</code>
+      </li>
     </ul>
     <p class="note">
       Invalid syntax is skipped with a console warning.
@@ -264,19 +268,14 @@
 
     <h2 id="snippets">Snippets</h2>
     <p class="note">
-      Native Ace snippet format (<code>snippet trigger</code> / tab-indented body), one set per language, additive
-      over Ace's own built-in snippets for that language. The editor uses Ace's snippet-file mode for syntax highlighting;
-      the language select chooses which language's snippet set is being edited. Text words and Ace's snippet-authoring
-      templates are offered as you type and with <code>Ctrl+Space</code>. Definitions under the <strong>Snippets</strong>
-      language are added to those templates when you switch away, and remain available whichever target language is
-      selected. They remain marked unsaved until Save is clicked.
+      Your own snippets, one set per language (Ace mode), added on top of Ace's built-in ones.
     </p>
-    <p class="note">
-      Switching language keeps whatever is in the box - the text follows the language you left it on and comes back
-      when you return to it, and one Save writes every language at once. <code>*</code> in the list marks a language
-      with unsaved edits, <code>•</code> one that has snippets saved. Undo history does not cross a language switch.
-      Live-applies to open SAS Studio tabs on Save.
-    </p>
+    <ul class="note">
+      <li>Syntax: <code>snippet &lt;trigger&gt;</code> followed by a tab-indented body.</li>
+      <li>Pick the language to edit below:
+      <code>*</code> marks unsaved edits, <code>•</code> marks snippets saved</li>
+      <li>Click <strong>Save snippets</strong> to save for all languages, live-applied to open SAS Studio tabs</li>
+    </ul>
     <label>Language <select id="snippet-lang"></select></label>
     <div id="snippets-editor"></div>
     <button id="save-snippets">Save snippets</button>
