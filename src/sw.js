@@ -15,7 +15,8 @@
  *    without a prior toggle.
  *
  * 2. Live snippet apply: when chrome.storage.local's `snippets` changes, push
- *    the new text into every open SASStudio tab via window.__ssExt.applySnippets.
+ *    the new scope -> text map into every open SASStudio tab via
+ *    window.__ssExt.applySnippets.
  *
  * 3. Live ace config apply: when chrome.storage.local's `aceConfig` changes
  *    (from the in-page settings panel via relay.js, or from options.html),
@@ -47,10 +48,16 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
 });
 
-// Unset storage -> defaults; a saved value wins even when empty (user cleared).
-async function getSnippetsText() {
+// A map of ace snippet scope -> snippet file text (see DEFAULT_SNIPPETS).
+// Unset storage -> defaults, per language; a saved value wins even when empty
+// (that language was cleared).
+function mergeSnippets(stored) {
+  return Object.assign({}, DEFAULT_SNIPPETS, stored || {});
+}
+
+async function getSnippets() {
   const { snippets } = await chrome.storage.local.get("snippets");
-  return snippets && typeof snippets.sas === "string" ? snippets.sas : DEFAULT_SAS_SNIPPETS;
+  return mergeSnippets(snippets);
 }
 
 // Stored value wins per-key over DEFAULT_ACE_CONFIG (shallow merge of the top
@@ -202,7 +209,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // it needs to load the Ace lib on demand. Seeded BEFORE __ssf.init() so the
     // aceEditorOnLoad patch has libPath when it fires.
     const libPath = chrome.runtime.getURL(LIB_PATH);
-    const snippetsText = await getSnippetsText();
+    const snippets = await getSnippets();
     const aceConfig = await getAceConfig();
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -241,7 +248,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       // host (like the browse history/bookmarks) and only this host's are seeded.
       args: [
         libPath,
-        snippetsText,
+        snippets,
         aceConfig,
         (browsePaths || {})[new URL(tab.url).host] || {},
         browseKeys || {},
@@ -270,8 +277,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName !== "local") return;
 
   if (changes.snippets) {
-    const newValue = changes.snippets.newValue;
-    const text = newValue && typeof newValue.sas === "string" ? newValue.sas : DEFAULT_SAS_SNIPPETS;
+    const snippets = mergeSnippets(changes.snippets.newValue);
 
     try {
       const tabs = await chrome.tabs.query({ url: "*://*/SASStudio/*" });
@@ -280,10 +286,10 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
           chrome.scripting
             .executeScript({
               target: { tabId: tab.id },
-              func: (snippetsText) => {
-                window.__ssExt && window.__ssExt.applySnippets && window.__ssExt.applySnippets(snippetsText);
+              func: (map) => {
+                window.__ssExt && window.__ssExt.applySnippets && window.__ssExt.applySnippets(map);
               },
-              args: [text],
+              args: [snippets],
               world: "MAIN",
             })
             .catch(() => {}), // no-op if editor-swap.js isn't loaded in that tab

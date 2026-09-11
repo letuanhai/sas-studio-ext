@@ -13,10 +13,11 @@
     return tab;
   }
 
-  // Same semantics as sw.js: unset -> defaults, saved value wins even when empty.
-  async function getSnippetsText() {
+  // Same semantics as sw.js: unset -> defaults per language, saved value wins
+  // even when empty. A map of ace snippet scope -> snippet file text.
+  async function getSnippets() {
     const { snippets } = await chrome.storage.local.get("snippets");
-    return snippets && typeof snippets.sas === "string" ? snippets.sas : window.DEFAULT_SAS_SNIPPETS || "";
+    return Object.assign({}, window.DEFAULT_SNIPPETS, snippets || {});
   }
 
   async function injectAndRun(tabId, files, func, args) {
@@ -63,12 +64,12 @@
     if (!tab || tab.id === undefined) return;
     try {
       const libPath = chrome.runtime.getURL(LIB_PATH);
-      const snippetsText = await getSnippetsText();
+      const snippets = await getSnippets();
       const result = await injectAndRun(
         tab.id,
         ["src/ace-patches.js", "src/editor-swap.js"],
         (path, snippets) => window.__ssExt.toggle(path, snippets),
-        [libPath, snippetsText],
+        [libPath, snippets],
       );
       setToggleState(result && result.active);
       await chrome.action.setBadgeText({ tabId: tab.id, text: result && result.active ? "ON" : "" });

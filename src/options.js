@@ -1,6 +1,7 @@
 /**
  * Options page: patches (on/off), hotkeys (record/clear), editor config (theme
- * pair/keyboard handler/generic ace options), snippets (Ace editor + save).
+ * pair/keyboard handler/generic ace options), snippets (Ace editor + language
+ * select + save).
  * Everything persists to chrome.storage.local; ss-fixes.js/editor-swap.js read
  * it back via sw.js's tabs.onUpdated injection and storage.onChanged pushes.
  */
@@ -431,6 +432,7 @@
 
     const snippetsEditor = ace.edit("snippets-editor");
     snippetsEditor.session.setMode("ace/mode/snippets");
+    const languageTools = ace.require("ace/ext/language_tools");
 
     // Ace status bar overlay (same as the SAS editors - see editor-swap.js),
     // pinned to the snippet editor's bottom-right; font size tracks the config.
@@ -454,6 +456,14 @@
     function applyToSnippetsEditor() {
       snippetsEditor.setTheme(darkMql.matches ? current.darkTheme : current.lightTheme);
       snippetsEditor.setOptions(current.options);
+      // A snippet FILE needs its own words and Ace's snippet-authoring
+      // templates, not the selected target language's keyword completer.
+      snippetsEditor.completers = [languageTools.snippetCompleter, languageTools.textCompleter];
+      snippetsEditor.setOptions({
+        enableBasicAutocompletion: true,
+        enableLiveAutocompletion: true,
+        enableSnippets: true,
+      });
       const fs = current.options && current.options.fontSize;
       if (statusEl && fs) statusEl.style.fontSize = typeof fs === "number" ? fs + "px" : fs;
     }
@@ -554,17 +564,106 @@
   }
 
   // -- Snippets ---------------------------------------------------------------------
+  // One editor, one language at a time: `snippets` is a map of ace snippet scope
+  // (the mode id's last segment, which is what snippetManager registers against)
+  // -> snippet file text, and the select says which entry is in the box. The
+  // languages come from ace/ext/modelist, so the list stays in step with ace -
+  // including our own SAS/SAS Log entries, which ace-patches.js puts there.
+  //
+  // Switching language never loses anything and never writes anything: the text
+  // of every language stays in `drafts` for the page's lifetime (marked "*" in
+  // the select until saved), and Save writes them all at once.
 
   async function initSnippets(editor) {
-    const { snippets } = await chrome.storage.local.get("snippets");
-    // Unset -> defaults; a saved value wins even when empty (user cleared).
-    const text = snippets && typeof snippets.sas === "string" ? snippets.sas : window.DEFAULT_SAS_SNIPPETS || "";
-    editor.setValue(text, -1);
-
+    const select = document.getElementById("snippet-lang");
     const status = document.getElementById("save-status");
+    const { snippets } = await chrome.storage.local.get("snippets");
+    // Unset -> defaults, per language; a saved value wins even when empty.
+    let saved = Object.assign({}, window.DEFAULT_SNIPPETS, snippets || {});
+    const drafts = Object.assign({}, saved);
+    let scope = "sas";
+    const snippetManager = ace.require("ace/snippets").snippetManager;
+    let editorSnippets = [];
+
+    function applyEditorSnippets(text) {
+      snippetManager.unregister(editorSnippets, "snippets");
+      editorSnippets = text ? snippetManager.parseSnippetFile(text) : [];
+      snippetManager.register(editorSnippets, "snippets");
+    }
+
+    const options = {}; // scope -> <option>, for the unsaved/has-snippets marker
+    function addLanguage(name, caption) {
+      if (options[name]) return;
+      options[name] = new Option(caption, name);
+      options[name].dataset.caption = caption;
+      select.appendChild(options[name]);
+    }
+
+    ace
+      .require("ace/ext/modelist")
+      .modes.slice()
+      .sort((a, b) => a.caption.localeCompare(b.caption))
+      .forEach((m) => addLanguage(m.mode.split("/").pop(), m.caption));
+    // A saved language modelist doesn't know (a mode that went away) still has to
+    // be editable, or its snippets would be stuck in storage with no way back.
+    Object.keys(drafts).forEach((s) => addLanguage(s, s));
+
+    function mark(s) {
+      const opt = options[s];
+      if (!opt) return;
+      const unsaved = (drafts[s] || "") !== (saved[s] || "");
+      // Suffix, never prefix: a <select> type-ahead prefix-matches the option's
+      // TEXT, and with 193 languages typing "s" for SAS is the only practical way
+      // to reach one - a leading marker would take that away from exactly the
+      // entries that have snippets.
+      opt.textContent = opt.dataset.caption + (unsaved ? " *" : drafts[s] ? " •" : "");
+    }
+
+    function show(next) {
+      scope = next;
+      select.value = scope;
+      editor.session.setMode("ace/mode/snippets");
+      editor.setValue(drafts[scope] || "", -1);
+      // One session holds every language in turn, so the swap itself is an
+      // undoable delta: without this, Ctrl+Z in the box you just switched to
+      // pulls in the PREVIOUS language's text, and the change handler saves it
+      // as that language's snippets (measured). Undo history therefore does not
+      // survive a language switch - same trade as the editor toggle in the page.
+      editor.session.getUndoManager().reset();
+    }
+
+    // The box always uses ace/mode/snippets: the select chooses the registration
+    // scope, not the syntax of the snippet body. The snippet mode has no worker,
+    // but keep this explicit so a mode changed through Ace's settings menu does
+    // not start a program-language worker against snippet-file syntax.
+    editor.session.setUseWorker(false);
+
+    editor.on("change", () => {
+      drafts[scope] = editor.getValue();
+      mark(scope);
+    });
+    select.addEventListener("change", () => {
+      // Leaving the Snippets scope is also its local preview step: keep the
+      // draft unsaved, but make its definitions usable in the snippet editor.
+      if (scope === "snippets") applyEditorSnippets(drafts.snippets || "");
+      show(select.value);
+    });
+
+    show(scope);
+    Object.keys(options).forEach(mark);
+    applyEditorSnippets(saved.snippets || "");
+
     document.getElementById("save-snippets").addEventListener("click", async () => {
-      const text = editor.getValue();
-      await chrome.storage.local.set({ snippets: { sas: text } });
+      const map = {};
+      Object.keys(drafts).forEach((s) => {
+        // A deliberately emptied language that HAS a default is stored as "", so
+        // the default doesn't come back; an empty one without is just dropped.
+        if (drafts[s] || window.DEFAULT_SNIPPETS[s]) map[s] = drafts[s] || "";
+      });
+      await chrome.storage.local.set({ snippets: map });
+      saved = Object.assign({}, map);
+      applyEditorSnippets(saved.snippets || "");
+      Object.keys(options).forEach(mark);
       status.textContent = "Saved.";
       setTimeout(() => (status.textContent = ""), 2000);
     });

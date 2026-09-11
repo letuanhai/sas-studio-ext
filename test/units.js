@@ -923,3 +923,48 @@ function runWorker(defs) {
 
   console.log("PASS  lua worker derives workspace roots from open documents");
 })();
+
+// ---------------------------------------------------------------------------
+// src/editor-swap.js - user snippets, one set per ace snippet SCOPE. The whole
+// of the logic is register/unregister bookkeeping against ace's snippetManager,
+// so a stand-in for it is enough.
+(function () {
+  const ssExt = global.window.__ssExt;
+  const registered = {}; // scope -> parsed set currently registered
+  const sm = {
+    parseSnippetFile: (text) => ({ text }),
+    register: (parsed, scope) => {
+      assert.ok(!registered[scope], "double register for " + scope);
+      registered[scope] = parsed;
+    },
+    unregister: (parsed, scope) => {
+      assert.equal(registered[scope], parsed, "unregister of what was registered");
+      delete registered[scope];
+    },
+  };
+  const scopes = () => Object.keys(registered).sort();
+
+  ssExt.newLib = { ace: { require: (id) => (id === "ace/snippets" ? { snippetManager: sm } : {}) } };
+
+  // Nothing to apply against until the ace lib is loaded.
+  ssExt.applySnippets({ sas: "a" });
+  assert.deepEqual(scopes(), []);
+  ssExt.newAceLoaded = true;
+
+  ssExt.applySnippets({ sas: "a", lua: "b", text: "" }); // an empty language registers nothing
+  assert.deepEqual(scopes(), ["lua", "sas"]);
+  assert.equal(registered.sas.text, "a");
+
+  // Re-applying replaces every scope's set (no leak, no double register), and a
+  // language dropped from the map is unregistered.
+  ssExt.applySnippets({ sas: "a2", saslog: "c" });
+  assert.deepEqual(scopes(), ["sas", "saslog"]);
+  assert.equal(registered.sas.text, "a2");
+
+  // Nothing seeded yet (ssExt.userSnippets' own default) unregisters the lot.
+  ssExt.applySnippets({});
+  assert.deepEqual(scopes(), []);
+  assert.deepEqual(ssExt.userSnippets, {});
+
+  console.log("PASS  per-language user snippets");
+})();

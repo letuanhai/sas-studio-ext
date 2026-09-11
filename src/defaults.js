@@ -44,6 +44,15 @@ snippet sqlpass
 `;
 
 /**
+ * Snippets are stored as a map of ace snippet SCOPE -> snippet file text, where
+ * the scope is the mode id's last segment ("sas", "lua", "text", "saslog") -
+ * exactly what ace's snippetManager registers against and what the options
+ * page's language selector picks. Only SAS ships a default; storage wins per
+ * language, including an empty string (that language was deliberately cleared).
+ */
+var DEFAULT_SNIPPETS = { sas: DEFAULT_SAS_SNIPPETS };
+
+/**
  * Dark mode for SAS Studio's OWN interface (the Dojo/dijit app chrome), backed
  * by chrome.storage.local.darkMode and applied as a static stylesheet - see
  * sw.js's syncDarkInjection() and tools/gen-dark-css.js.
@@ -144,8 +153,8 @@ var DEFAULT_DIFF_PREFS = { mode: "split", layout: 0 };
  * ("Let SAS Studio decide" / Ctrl+Shift+Enter does it for one file, whatever the map says.)
  *
  * Stored value REPLACES this map rather than merging with it, so an entry can
- * be removed from the options page (same reason `snippets`/`vimrc` work that
- * way).
+ * be removed from the options page (same reason `vimrc` works that way;
+ * `snippets` is the exception - see DEFAULT_SNIPPETS, merged per language).
  */
 var DEFAULT_BROWSE_FILE_ACTIONS = {
   sas: "open",

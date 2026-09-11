@@ -661,8 +661,8 @@
     newAceLoaded: false,
     patchesInstalled: false,
     newLib: null, // { ace } - our ace library (window.__ssAce), never SAS's
-    userSnippets: "", // stashed by toggle()/browse() before the ace lib loads
-    _userSnippetsParsed: null, // previously-registered parsed snippets, for unregister
+    userSnippets: {}, // scope -> snippet file text, stashed by toggle()/browse() before the ace lib loads
+    _userSnippetsParsed: null, // scope -> previously-registered parsed snippets, for unregister
     _textViewers: [], // live { pane, tabHolder, adapter, item, textarea, origSet, origResize, editable, dirty, buttons } entries
     libPath: null, // stashed by loadNewAce() so the palette's editor-toggle command can call toggle(ssExt.libPath)
     aceConfig: null, // seeded by sw.js (tabs.onUpdated) and refreshed by applyAceConfig()
@@ -1350,27 +1350,31 @@
   }
 
   // -- User-configurable snippets -------------------------------------------------
-  // Additive over ace's built-in SAS snippets - parseSnippetFile + register don't
-  // replace anything. ponytail: duplicate triggers appear twice in the completion
-  // list; dedupe-by-trigger is the upgrade path if that ever bites someone.
-  function applySnippets(text) {
+  // A map of ace snippet SCOPE ("sas"/"lua"/"text", i.e. the mode id's last
+  // segment - what snippetManager registers against) -> snippet file text, so the
+  // options page can configure a set per language. Additive over ace's built-in
+  // snippets for that scope - parseSnippetFile + register don't replace anything.
+  // ponytail: duplicate triggers appear twice in the completion list;
+  // dedupe-by-trigger is the upgrade path if that ever bites someone.
+  function applySnippets(snippets) {
     if (!ssExt.newAceLoaded) return; // nothing to apply against yet
-    ssExt.userSnippets = text || "";
+    ssExt.userSnippets = snippets || {};
 
     try {
       ssExt.newLib.ace.require("ace/ext/language_tools"); // ensure snippet manager is wired up
       const sm = ssExt.newLib.ace.require("ace/snippets").snippetManager;
 
-      if (ssExt._userSnippetsParsed) {
-        sm.unregister(ssExt._userSnippetsParsed, "sas");
-        ssExt._userSnippetsParsed = null;
-      }
+      const previous = ssExt._userSnippetsParsed || {};
+      Object.keys(previous).forEach((scope) => sm.unregister(previous[scope], scope));
 
-      if (text) {
-        const parsed = sm.parseSnippetFile(text);
-        sm.register(parsed, "sas");
-        ssExt._userSnippetsParsed = parsed;
-      }
+      const parsed = {};
+      Object.keys(ssExt.userSnippets).forEach((scope) => {
+        const text = ssExt.userSnippets[scope];
+        if (!text) return;
+        parsed[scope] = sm.parseSnippetFile(text);
+        sm.register(parsed[scope], scope);
+      });
+      ssExt._userSnippetsParsed = parsed;
     } catch (e) {
       console.error("[SS Ext] Failed to apply user snippets:", e);
     }

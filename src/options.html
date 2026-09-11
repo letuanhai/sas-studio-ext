@@ -89,12 +89,14 @@
 
     <h2 id="appearance">Appearance</h2>
     <p class="note">
-      Dark theme for SAS Studio's own interface. Applies to open tabs immediately, in both directions. With "Always
-      on" the Ace editor also switches to its dark theme regardless of the OS setting; "Follow system" and "Off"
-      both leave the editor following the OS as before. This is a pre-generated static stylesheet, so it costs
-      nothing at runtime - unlike a browser dark-mode extension, which has to re-parse SAS Studio's ~95 stylesheets
-      on every load and slows the editor down noticeably when the SAS language server is on.
+      Dark theme for SAS Studio's own interface, the Ace editor dark/light theme always follow OS darkmode setting.
+      Applies to open SAS Studio tabs immediately.
     </p>
+    <ul class="note">
+      <li><strong>Always on</strong> - always uses dark theme regardless of the OS setting</li>
+      <li><strong>Follow system</strong> - follows OS darkmode setting</li>
+      <li><strong>Off</strong> - uses SAS Studio default theme</li>
+    </ul>
     <label
       >Dark mode
       <select id="dark-mode">
@@ -130,7 +132,7 @@
     <div id="patches-list"></div>
 
     <h2 id="hotkeys">Hotkeys</h2>
-    <p class="note">Applies on next page reload.</p>
+    <p class="note">SS Ext global hotkeys. Reload SAS Studio pages to apply.</p>
     <table>
       <thead>
         <tr>
@@ -144,8 +146,9 @@
 
     <h2 id="browse-keys">Browse prompt keys</h2>
     <p class="note">
-      Keys inside the file / library / tab browser (Alt+P, Alt+O, Alt+T). Applies to the next prompt you open, no
-      reload needed. "Clear" leaves the action unbound; "Default" restores the built-in key.
+      Keys inside the file / library / tab browser). Applies to the next prompt you open, no reload needed.
+      <br>
+      <strong>Clear</strong> leaves the action unbound. <strong>Default</strong> restores the built-in key.
     </p>
     <table>
       <thead>
@@ -160,8 +163,10 @@
 
     <h3 id="browse-file-actions">File browser config</h3>
     <p class="note">
-      Configure the behavior of File browser "Open item" action (default hotkey is "Enter").
-      File extensions are separated by commas (and optionally spaces), e.g. "lua, sh, log".
+      Configure the behavior of File browser <strong>Open item</strong> action (default hotkey is "Enter").
+      <br>
+      File extensions are separated by commas (and optionally spaces), e.g. <code>lua, sh, log</code>
+      <br>
       The default fallback behavior is to reveal the file in file tree.
       Saved on change; applies to the next prompt you open.
     </p>
@@ -179,64 +184,78 @@
 
     <h2 id="editor">Editor</h2>
     <p class="note">
-      Defaults for every Ace editor in SAS Studio (code editor, text viewer) and for the snippet editor below.
-      Live-applies to open SAS Studio tabs on change. Theme is a dark/light pair (auto-switches with OS preference) -
-      configured only here. Every other setting - including the keyboard handler (None/Vim/Emacs/Sublime/VSCode) -
-      is configured from Ace's own stock settings panel (<code>Ctrl-,</code> in any editor, or the "Show settings
-      menu" entry in the command palette when one is focused); changes made there now persist as the default for
-      new editors and live-apply to open ones, same as this page.
+      Configuration for Ace editor in SAS Studio (code editor, text viewer).
+      Also applies to the snippet editor below.
+    </p>
+    <p class="note">
+      Aside from the settings below, every other settings is configured from Ace's own stock settings panel
+      ("<code>Ctrl-,</code>" in any editor, or the "Show settings menu" entry in the command palette when one is focused).
+      Any change made there is persisted as the default for new editors and live-apply to open ones.
+      <br>
+      <i>Note</i>: setting of the snippet editor on this page is in sync with all Ace editors in all SAS Studio pages.
+    </p>
+    <hr>
+    <h4>Editor themes</h4>
+    <p class="note">
+      Ace themes to use in dark/light mode (follows OS darkmode setting).
+      <br>
+      Live-applies to all applicable Ace editors.
     </p>
     <label>Dark theme <select id="ace-dark-theme"></select></label>
     <label>Light theme <select id="ace-light-theme"></select></label>
+    <h4>Language servers</h4>
+    <p class="note">Applies next time the Ace editor is activated.</p>
+
     <h5>SAS</h5>
-    <label
-      ><input type="checkbox" id="ace-lsp" /> SAS language server (completions, hover,
-      diagnostics)</label
-    >
-    <label
-      >Disable for files over <input type="number" id="ace-lsp-max-lines" min="0" step="1" style="width: 5em" />
-      lines (0 = no limit)</label
-    >
+    <label><input type="checkbox" id="ace-lsp" /> SAS language server (completions, hover, diagnostics)</label>
+    <label>
+      Disable for files over
+        <input type="number" id="ace-lsp-max-lines" min="0" step="1" style="width: 5em" />
+      lines (0 = no limit)
+    </label>
+
     <h5>Lua</h5>
-    <label
-      ><input type="checkbox" id="ace-lua-lsp" /> Lua language server for
-      <code>.lua</code> files opened as text (completions, diagnostics, hover,
-      formatting)</label
-    >
-    <label
-      ><input type="checkbox" id="ace-proc-lua-lsp" /> Lua language server inside
-      <code>proc lua</code> <code>submit;...endsubmit;</code> blocks</label
-    >
+    <label>
+      <input type="checkbox" id="ace-lua-lsp" />
+      Lua language server for <code>.lua</code> files opened as text (completions, diagnostics, hover, formatting)
+    </label>
+    <label>
+      <input type="checkbox" id="ace-proc-lua-lsp" />
+      Lua language server inside <code>proc lua</code> <code>submit;...endsubmit;</code> blocks
+    </label>
     <p class="note">
       <i>Note</i>: the language server never reads the SAS filesystem, so <code>require</code> resolves only against the
       <code>.lua</code> files currently open in the SAS Studio session, not being aware of the <code>fileref LUAPATH</code>
       of the environment variable <code>LUA_PATH</code>.
     </p>
-    <p class="note">Applies next time the Ace editor is activated.</p>
 
     <h3 id="vim">Vim Keymap</h3>
     <p class="note">
-      Applied to the shared vim keyboard handler (only takes effect once "Vim" is the active keyboard handler).
-      One mapping per line, <code>"</code> starts a comment. Supported:
-      <code>map</code>/<code>nmap</code>/<code>imap</code>/<code>vmap &lt;lhs&gt; &lt;rhs&gt;</code>,
-      <code>noremap</code>/<code>nnoremap</code>/<code>inoremap</code>/<code>vnoremap</code> (same, non-recursive),
-      and <code>unmap</code>/<code>nunmap</code>/<code>iunmap</code>/<code>vunmap &lt;lhs&gt;</code>. Anything else is
-      skipped with a console warning. Removing a line here doesn't undo the mapping until the page is reloaded.
+      Applied to the Ace editors' vim keyboard handler (only takes effect once "Vim" is the active keyboard handler).
     </p>
     <p class="note">
-      A leader key works: map a sequence such as <code>nmap &lt;Space&gt;w :w&lt;CR&gt;</code> and the built-in
-      one-key shortcut for that key (<code>&lt;Space&gt;</code> normally just moves right) is dropped so the
-      sequence can be reached — ace's vim has no <code>timeoutlen</code>, so the two cannot coexist as they do in
-      real vim. Operator keys are never dropped, so a mapping starting with <code>d</code>, <code>c</code> or
-      <code>y</code> stays unreachable.
+      Syntax: One mapping per line, <code>"</code> starts a comment.
+    </p>
+    <ul class="note">
+      <li><code>map/nmap/imap/vmap &lt;lhs&gt; &lt;rhs&gt;</code></li>
+      <li><code>noremap/nnoremap/inoremap/vnoremap &lt;lhs&gt; &lt;rhs&gt;</code> (same, non-recursive)</li>
+      <li><code>unmap/nunmap/iunmap/vunmap &lt;lhs&gt;</code></li>
+    </ul>
+    <p class="note">
+      Invalid syntax is skipped with a console warning.
+      Removing a line here doesn't undo the mapping until the SAS Studio page is reloaded.
     </p>
     <p class="note">
-      Custom ex-commands (work in both code tabs and text-view tabs):
-      <code>:w</code> save, <code>:w &lt;path&gt;</code> save-as,
-      <code>:q</code> close tab, <code>:wq</code> save &amp; close,
-      <code>:x</code> <strong>run</strong> the program/selection (like F3, not vim's save-and-close),
-      <code>:marks</code> list the marks that are set (they also show in the gutter; delete them with
-      ace's own <code>:delmarks a</code> / <code>:delmarks a-z</code>, the <code>!</code> form isn't implemented).
+      Custom ex-commands:
+    </p>
+    <ul class="note">
+      <li><code>:w</code> save, <code>:w &lt;path&gt;</code> save-as</li>
+      <li><code>:q</code> close tab, <code>:wq</code> save &amp; close</li>
+      <li><code>:x</code> <strong>run</strong> the program/selection (like SAS Studio F3)</li>
+      <li><code>:marks</code> list the marks that are set (they also show in the gutter)</li>
+      <li>ace provides <code>:delmarks a</code> / <code>:delmarks a-z</code> (the <code>!</code> form isn't implemented)</li>
+    </ul>
+    <p class="note">
       To see every vim mapping (built-in ones included), run "Show vim key mappings" from the command palette.
     </p>
     <textarea id="vimrc-editor" spellcheck="false"></textarea>
@@ -245,9 +264,20 @@
 
     <h2 id="snippets">Snippets</h2>
     <p class="note">
-      Native Ace snippet format (<code>snippet trigger</code> / tab-indented body). Additive over the built-in SAS
-      snippets. Live-applies to open SAS Studio tabs on Save.
+      Native Ace snippet format (<code>snippet trigger</code> / tab-indented body), one set per language, additive
+      over Ace's own built-in snippets for that language. The editor uses Ace's snippet-file mode for syntax highlighting;
+      the language select chooses which language's snippet set is being edited. Text words and Ace's snippet-authoring
+      templates are offered as you type and with <code>Ctrl+Space</code>. Definitions under the <strong>Snippets</strong>
+      language are added to those templates when you switch away, and remain available whichever target language is
+      selected. They remain marked unsaved until Save is clicked.
     </p>
+    <p class="note">
+      Switching language keeps whatever is in the box - the text follows the language you left it on and comes back
+      when you return to it, and one Save writes every language at once. <code>*</code> in the list marks a language
+      with unsaved edits, <code>•</code> one that has snippets saved. Undo history does not cross a language switch.
+      Live-applies to open SAS Studio tabs on Save.
+    </p>
+    <label>Language <select id="snippet-lang"></select></label>
     <div id="snippets-editor"></div>
     <button id="save-snippets">Save snippets</button>
     <span id="save-status"></span>
@@ -261,6 +291,7 @@
          its bundled ace/ext/options snapshots modelist.modes at load into the
          settings-menu Mode dropdown, so SAS must exist first. -->
     <script src="../lib/ace/src-noconflict/ext-modelist.js"></script>
+    <script src="../lib/ace/src-noconflict/ext-language_tools.js"></script>
     <script src="../lib/ace/src-noconflict/ext-statusbar.js"></script>
     <script src="ace-patches.js"></script>
     <script src="ace-seed.js"></script>
