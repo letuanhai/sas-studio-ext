@@ -3134,13 +3134,25 @@
   // this is Lua only, and a .lua tab and a PROC LUA block differ in nothing but
   // which document uri the caret resolves to.
   //
-  // ponytail: no default keybindings. Every key a VS Code user would reach for is
-  // either the browser's (F12) or already ace's (F2 toggleFoldWidget, Alt-Left
-  // gotolinestart), and ss-fixes binds Alt+letter globally in the capture phase,
-  // so a "convenient" default would have to steal something that works today.
-  // They are ace COMMANDS, so the command palette lists them whenever an editor
-  // is focused and a vimrc can map them (`nmap gd <Cmd>gotoDefinition`), which is
-  // the workflow they belong to anyway. Give them keys when a free one is agreed.
+  // Keys are Ctrl-Alt-<letter>, which is the only block wide enough to hold four:
+  // Alt+letter is the ss-fixes namespace (bound globally in the capture phase),
+  // plain Ctrl+letter is all but exhausted by ace's own defaults, and ace claims
+  // only Ctrl-Alt-A/E/K/S plus the arrows. The VS Code keys are all unavailable:
+  // F12 is the browser's, F2 is ace's toggleFoldWidget, Alt-Left its gotolinestart
+  // - and MEASURED on the author's laptop, a modified F12 never reaches the page
+  // at all (the Ctrl/Shift/Alt keydown arrives, then a BARE F12, modifier flag
+  // stripped), so Ctrl-F12/Shift-F12 were not an option either. Ctrl-Alt-F<n> is
+  // out for a different reason: on Linux that range switches virtual consoles.
+  // The mac strings are Ctrl-OPTION-<letter>, i.e. the same physical chord and
+  // the same ctrl-alt-<letter> id, NOT the usual Command-for-Ctrl swap: Chrome
+  // for mac takes Command-Option-B for its bookmark manager and macOS itself
+  // takes Command-Option-D for the Dock, so that swap would have killed two of
+  // the four outright.
+  // Known cost: on layouts where AltGr IS Ctrl+Alt these type a character
+  // instead, and on macOS Ctrl+Option is VoiceOver's VO modifier when VoiceOver
+  // is on; that is what the settings menu and a vimrc (`nmap gd
+  // <Cmd>gotoDefinition`) are for, and they remain the vim-mode path regardless,
+  // the vim handler swallowing Alt combos before ace's keybindings see them.
   //
   // Also deliberately absent: workspace symbols, call hierarchy, and opening a
   // file that is not already open. The only files this server knows are the ones
@@ -3555,23 +3567,27 @@
       {
         name: "gotoDefinition",
         description: "Go to definition (language server)",
+        bindKey: { win: "Ctrl-Alt-D", mac: "Ctrl-Option-D" },
         exec: guard("gotoDefinition", gotoLuaDefinition),
         readOnly: true,
       },
       {
         name: "findReferences",
         description: "Find references (language server)…",
+        bindKey: { win: "Ctrl-Alt-R", mac: "Ctrl-Option-R" },
         exec: guard("findReferences", findLuaReferences),
         readOnly: true,
       },
       {
         name: "renameSymbol",
         description: "Rename symbol (language server)…",
+        bindKey: { win: "Ctrl-Alt-N", mac: "Ctrl-Option-N" },
         exec: guard("renameSymbol", renameLuaSymbol),
       },
       {
         name: "gotoLastJump",
         description: "Go back to the last jump origin",
+        bindKey: { win: "Ctrl-Alt-B", mac: "Ctrl-Option-B" },
         exec: gotoLastLuaJump,
         readOnly: true,
       },

@@ -292,8 +292,23 @@ All of it goes down `ssExt._luaRaw`;
 
 Four ace COMMANDS carry them (`gotoDefinition`, `findReferences`, `renameSymbol`, `gotoLastJump`), registered on every
 adapter like the diff commands, so ace's settings menu binds them and a vimrc maps them (`nmap gd <Cmd>gotoDefinition`).
-**None has a default keybinding**: F12 is the browser's, F2 is ace's `toggleFoldWidget`, `Alt-Left` is its
-`gotolinestart`, and `ss-fixes.js` binds Alt+letter globally in the capture phase.
+Their keys are `Ctrl-Alt-D` (definition), `Ctrl-Alt-R` (references), `Ctrl-Alt-N` (rename) and `Ctrl-Alt-B` (back) —
+on mac the same chord, written `Ctrl-Option-<letter>`, and NOT the usual Command-for-Ctrl swap:
+Chrome for mac takes `Command-Option-B` for its bookmark manager and macOS takes `Command-Option-D` for the Dock, so
+that swap would have killed two of the four.
+`Ctrl-Alt` is the only block wide enough to hold four: Alt+letter is the `ss-fixes.js` namespace, bound globally in the
+capture phase;
+plain Ctrl+letter is all but exhausted by ace's own defaults;
+and ace claims only `Ctrl-Alt-A`/`E`/`K`/`S` and the arrows.
+**None of the VS Code keys was available**: F12 is the browser's, F2 is ace's `toggleFoldWidget`, `Alt-Left` its
+`gotolinestart` — and a modified F12 was measured never to reach the page at all (the `Ctrl`/`Shift`/`Alt` keydown
+arrives, then a bare `F12` with the modifier flag stripped), which ruled out `Ctrl-F12`/`Shift-F12` too.
+`Ctrl-Alt-F<n>` is out separately: on Linux that range switches virtual consoles.
+The known cost is AltGr — on layouts where it IS Ctrl+Alt these type a character instead — and on macOS Ctrl+Option is
+VoiceOver's VO modifier whenever VoiceOver is on;
+the settings menu and a vimrc are the way round both.
+Vim mode is unaffected either way: its handler swallows Alt combos before ace's keybindings see them, so `nmap gd
+<Cmd>gotoDefinition` stays the mapping path there.
 The palette lists them whenever an editor is focused, which costs nothing.
 The three server-backed ones report "no Lua language server for this position" rather than declining through
 `isAvailable` — a command missing from the palette is indistinguishable from one that is broken.
