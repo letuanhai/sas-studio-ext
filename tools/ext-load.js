@@ -31,13 +31,12 @@ const root = path.resolve(__dirname, "..");
 // dormant after ~30s idle, and a missing target then reads as "not loaded".
 const mode = process.argv[2];
 
-// The files a page reload CANNOT pick up, i.e. the ones worth reloading the
-// extension for. Everything else under src/ is live on a page reload, and
-// reloading for an editor-swap.js edit would restart the service worker while
-// you type. Grouped by directory because that is what gets watched.
+// Watch files requiring an extension reload, plus the options and popup pages.
+// Grouped by directory because that is what gets watched.
 const WATCHED = {
 	".": ["manifest.json"],
-	src: ["sw.js", "relay.js", "dark-inject.js", "dark-media-auto.js"],
+	src: ["sw.js", "relay.js", "dark-inject.js", "dark-media-auto.js",
+		"options.html", "options.js", "popup.html", "popup.js"],
 };
 
 async function loadUnpacked() {
@@ -73,17 +72,21 @@ function watch() {
 	const chromePid = Number(process.env.CHROME_PID) || 0;
 	let timer = null;
 	let running = false;
+	const changedFiles = new Set();
 
 	const reload = async () => {
 		if (running) return;
+		const files = [...changedFiles].join(", ");
+		changedFiles.clear();
 		running = true;
 		try {
 			const id = await loadUnpacked();
-			log(`reloaded ${id} - reload the SAS Studio tab to re-inject`);
+			log(`reloaded ${id} (changed: ${files}) - reload the SAS Studio tab to re-inject`);
 		} catch (err) {
-			log(`reload failed: ${err.message}`);
+			log(`reload failed (changed: ${files}): ${err.message}`);
 		}
 		running = false;
+		if (changedFiles.size) schedule();
 	};
 
 	// One save can produce several events (and a rename plus a change); coalesce.
@@ -94,7 +97,10 @@ function watch() {
 
 	for (const [dir, names] of Object.entries(WATCHED)) {
 		fs.watch(path.join(root, dir), (_event, name) => {
-			if (names.includes(name)) schedule();
+			if (names.includes(name)) {
+				changedFiles.add(path.join(dir, name));
+				schedule();
+			}
 		});
 	}
 
