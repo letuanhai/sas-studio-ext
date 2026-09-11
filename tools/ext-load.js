@@ -31,12 +31,14 @@ const root = path.resolve(__dirname, "..");
 // dormant after ~30s idle, and a missing target then reads as "not loaded".
 const mode = process.argv[2];
 
-// Watch files requiring an extension reload, plus the options and popup pages.
-// Grouped by directory because that is what gets watched.
+// The files a page reload CANNOT pick up, i.e. the ones worth reloading the
+// extension for. Everything else under src/ is live on a page reload (the
+// options and popup pages included), and reloading for an editor-swap.js edit
+// would restart the service worker while you type. Grouped by directory
+// because that is what gets watched.
 const WATCHED = {
 	".": ["manifest.json"],
-	src: ["sw.js", "relay.js", "dark-inject.js", "dark-media-auto.js",
-		"options.html", "options.js", "popup.html", "popup.js"],
+	src: ["sw.js", "relay.js", "dark-inject.js", "dark-media-auto.js"],
 };
 
 async function loadUnpacked() {
@@ -73,6 +75,12 @@ function watch() {
 	let timer = null;
 	let running = false;
 	const changedFiles = new Set();
+
+	const watched = Object.entries(WATCHED).flatMap(([dir, names]) =>
+		names.map((n) => (dir === "." ? n : path.join(dir, n))));
+	console.log(`watch:    ${watched.join(", ")}`);
+	console.log("          each reload reports the changed file paths");
+	console.log("          Ctrl-C to stop the browser and exit");
 
 	const reload = async () => {
 		if (running) return;

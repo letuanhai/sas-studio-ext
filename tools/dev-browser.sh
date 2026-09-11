@@ -42,8 +42,7 @@
 # src/relay.js and any other declared content script, the dark-inject.js /
 # dark-media-auto.js pair registered via chrome.scripting, and src/sw.js.
 #
-# A foreground run reloads for those files, plus options.html/options.js and
-# popup.html/popup.js.
+# A foreground run does that reload for you, watching exactly those files.
 # `dev-browser.sh reload` is the same thing on demand, from another shell.
 #
 # The reload is Extensions.loadUnpacked over CDP,
@@ -276,9 +275,5 @@ fi
 # fire-and-forget behaviour, for an agent that wants its shell back.
 trap 'echo; stop; echo "stopped"; exit 0' INT TERM HUP
 
-echo "watch:    manifest.json, sw.js, relay.js, dark-inject.js, dark-media-auto.js"
-echo "          options.html, options.js, popup.html, popup.js"
-echo "          each reload reports the changed file paths"
-echo "          Ctrl-C to stop the browser and exit"
 CHROME_PID=$(cat "$PIDFILE") PORT=$PORT node "$ROOT/tools/ext-load.js" --watch || true
 stop
