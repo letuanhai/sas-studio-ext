@@ -148,7 +148,7 @@ up calling `window.__ssExt.toggle(libPath)`:
 ## Browsing
 
 The file/library/tab browsers are `ss-fixes.js` actions (`browseFiles` /
-`browseLibrary` / `browseTabs`, default **Alt+P** / **Alt+O** / **Alt+T**) —
+`browseLibrary` / `browseTabs`, default **Alt+P** / **Alt+O** / **Alt+Q**) —
 rebindable in the options page like any other action, and listed as
 `SS-Ext: Browse …` entries in the command palette.
 
@@ -185,8 +185,36 @@ mac too — Alt+B is flaky there) pins/unpins the selected entry as a bookmark
 without losing your place in the list. The tab browser has neither (open tabs
 are already the whole list).
 
+### The tab browser is an alt+tab
+
+Tabs are listed **most recently used first**, with the current tab last, so the
+first row is always the tab you were on before this one.
+Tabs you haven't visited yet this page load follow the visited ones, in tab-bar
+order.
+
+Opened with its hotkey (**Alt+Q**) it behaves like Windows' alt+tab for as long
+as you keep the modifier down:
+
+| While Alt is held | |
+|-----|---|
+| `Q` again | move down the list (wraps) |
+| `Shift+Q` | move back up |
+| release `Alt` | jump to the selected tab |
+| any letter | start searching instead — the jump on release is off from then on |
+| `Esc` | close, staying on the current tab |
+
+So a tap of Alt+Q and release is "back to the last tab", and holding Alt while
+tapping Q walks further back.
+Opened any other way (the command palette, the extension popup) the list is the
+same but the prompt is an ordinary one: there is no held key to watch, so
+`Enter` jumps.
+A hotkey rebound onto a combination that includes Shift can't step backwards —
+its Shift release jumps instead.
+
 Each browser reopens at the path it was last closed on (per page load — after a
-reload it starts at its root path again). The root is the project tree root /
+reload it starts at its root path again);
+the tab browser is the exception and always opens empty, since reopening onto
+the last search would hide the tab you just came from. The root is the project tree root /
 `libraries/` by default; the popup's **Browse roots** fields override it for the
 SAS Studio instance in the active tab (they name folders on that server, so
 they're stored per host, like the bookmarks and history). A change reaches open

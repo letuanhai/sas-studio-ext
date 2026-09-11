@@ -3393,6 +3393,120 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   await sw.evaluate(() => chrome.storage.local.remove("browseFileActions"));
   await page.waitForTimeout(300);
 
+  // -- The tabs browser as alt+tab -------------------------------------------
+  // Needs at least three tabs to tell "previous" from "the one before that";
+  // the suite has several open by here, and the order is seeded explicitly.
+  const seededTabs = await page.evaluate(async () => {
+    const tabs = window.appDMS.tabs;
+    const all = tabs.getAllTabObjects();
+    if (all.length < 3) return null;
+    // Oldest to newest, so [0] is the least recently used of the three.
+    for (const t of [all[0], all[1], all[2]]) {
+      tabs.selectTab(t);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    const name = (t) => t.tabTitle ?? t.title;
+    return { previous: name(all[1]), beforeThat: name(all[0]), current: name(all[2]) };
+  });
+  if (!seededTabs) {
+    check("tabs browser alt+tab setup - three tabs open (skipped)", false, { seededTabs });
+  } else {
+    const holdRows = async () =>
+      page.evaluate(() => {
+        const p = window._browseSsLastPrompt;
+        return { row: p.popup.getRow(), values: p.popup.data.map((d) => d.value) };
+      });
+    // The hold behaviour is the HOTKEY path only: it needs the opening event to
+    // know which modifiers are down. Alt+Q is browseTabs' default binding.
+    await page.evaluate(() => (window._browseSsLastPrompt = null));
+    await page.keyboard.down("Alt");
+    await page.keyboard.press("q");
+    await page.waitForFunction(() => window._browseSsLastPrompt?.popup?.data?.length > 0, null, { timeout: 15000 });
+    const opened = await holdRows();
+    check(
+      "the tabs browser lists most-recently-used first, current tab last",
+      opened.row === 0 &&
+        opened.values[0].includes(seededTabs.previous) &&
+        opened.values[1].includes(seededTabs.beforeThat) &&
+        opened.values.at(-1).includes(seededTabs.current),
+      { opened, seededTabs }
+    );
+    // Repeat the hotkey's own key with Alt still down: steps down the list,
+    // Shift steps back up.
+    await page.keyboard.press("q");
+    await page.waitForTimeout(200);
+    const stepped = await holdRows();
+    await page.keyboard.press("Shift+q");
+    await page.waitForTimeout(200);
+    const steppedBack = await holdRows();
+    check("a repeat of the hotkey steps down the list, Shift steps back", stepped.row === 1 && steppedBack.row === 0, {
+      stepped: stepped.row,
+      steppedBack: steppedBack.row,
+    });
+    // Releasing the modifier jumps to the selected tab and closes the prompt.
+    await page.keyboard.up("Alt");
+    await page.waitForTimeout(1200);
+    const jumped = await page.evaluate(() => {
+      const f = window.appDMS.tabs.getFocusedTab();
+      return {
+        focused: f && (f.tabTitle ?? f.title),
+        closed: !document.querySelector(".ace_browse_ss_container"),
+      };
+    });
+    check(
+      "releasing the modifier jumps to the selected tab",
+      jumped.focused === seededTabs.previous && jumped.closed,
+      { jumped, seededTabs }
+    );
+
+    // Typing with the modifier still held is a search, not a hold: the
+    // characters go into the box (Alt+<letter> inserts nothing by itself) and a
+    // later release must NOT jump.
+    await page.evaluate(() => (window._browseSsLastPrompt = null));
+    await page.keyboard.down("Alt");
+    await page.keyboard.press("q");
+    await page.waitForFunction(() => window._browseSsLastPrompt?.popup?.data?.length > 0, null, { timeout: 15000 });
+    const typed = seededTabs.current.slice(0, 3).toLowerCase();
+    await page.keyboard.type(typed);
+    await page.waitForTimeout(400);
+    const searched = await page.evaluate(() => window._browseSsLastPrompt.cmdLine.getValue());
+    await page.keyboard.up("Alt");
+    await page.waitForTimeout(800);
+    const afterSearch = await page.evaluate(() => {
+      const f = window.appDMS.tabs.getFocusedTab();
+      return {
+        focused: f && (f.tabTitle ?? f.title),
+        open: !!document.querySelector(".ace_browse_ss_container"),
+      };
+    });
+    check(
+      "typing searches and takes the jump-on-release with it",
+      searched.toLowerCase() === typed && afterSearch.open && afterSearch.focused === seededTabs.previous,
+      { searched, typed, afterSearch, seededTabs }
+    );
+    // Esc closes with no jump, and the next open starts empty rather than on
+    // that filter text.
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(400);
+    await page.evaluate(() => (window._browseSsLastPrompt = null));
+    await page.evaluate(() => window.__ssf.run("browseTabs"));
+    await page.waitForFunction(() => window._browseSsLastPrompt?.popup?.data?.length > 0, null, { timeout: 15000 });
+    const reopened = await page.evaluate(() => ({
+      value: window._browseSsLastPrompt.cmdLine.getValue(),
+      focused: (() => {
+        const f = window.appDMS.tabs.getFocusedTab();
+        return f && (f.tabTitle ?? f.title);
+      })(),
+    }));
+    check(
+      "Esc leaves the tab alone and the tabs browser reopens unfiltered",
+      reopened.value === "" && reopened.focused === seededTabs.previous,
+      { reopened, seededTabs }
+    );
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+  }
+
   // The other half of that guard: with no prompt open, the global Alt+C hotkey
   // (copy current tab URI) must still fire - and copy through the same
   // execCommand fallback, since this origin has no navigator.clipboard.

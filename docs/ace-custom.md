@@ -109,7 +109,9 @@ so you can jump to a saved item by typing a path fragment.
 The tab browser deliberately has neither.
 
 **Where a prompt opens.** Each browser reopens at the path it was closed on (module-level `lastPaths`, keyed by
-`historyKey || 'tabs'`, written in `done()` — in-memory, so a page reload falls back to `options.startPath`).
+`historyKey`, written in `done()` — in-memory, so a page reload falls back to `options.startPath`).
+The TABS browser has no `historyKey` and so neither saves nor restores one:
+it is an alt+tab list, and reopening onto the previous switch's filter text would hide the tab you just came from.
 The empty prompt lists the focused tab's own item first (tagged `Current tab`;
 the library one keeps `meta: '>'` so accepting it lists the table's columns) and `options.startPath` last (tagged
 `Root`).
@@ -169,3 +171,33 @@ actually bound.
 The two copy bindings go through `window.__ssf.copyTextWithNotice`, which is why they show the same notification as the
 "Copy Path" actions and work on the insecure origin.
 Its prompt/popup font size comes from the configured `fontSize` rather than the 14/15 it used to hardcode.
+
+**The tabs browser as alt+tab.**
+Its list comes from `__ssf.tabsByAccess()` (see [ss-fixes.md](ss-fixes.md)), i.e. most recently selected first with the
+current tab last, so row 0 — the row `setData` leaves selected — is the previously used tab.
+
+The alt+tab part is the `hold` option, and only the `browseTabs` HOTKEY sets it: that is the one entry point holding the
+opening `KeyboardEvent`, which is where the modifiers to watch and the key to repeat come from (`{key, mods}`, recorded
+by ss-fixes' `noteTabHold` and left on `window.__ssfTabHold` for `browse_tabs` to consume and clear).
+`noteTabHold` also watches for those modifiers being RELEASED before the prompt is up: the first open of a page loads
+the ace library first, which takes long enough that they usually are, and a hold prompt waiting for a keyup that already
+happened would never jump.
+Such an open falls back to an ordinary prompt.
+
+While the hold lasts, two window listeners in the CAPTURE phase own the keyboard (ss-fixes' own hotkeys already stand
+down while a prompt is open):
+
+- the hotkey's own key with the modifiers still down steps the selection, `Shift` reversing it, wrapping by arithmetic
+  rather than `popup.goTo` — ace's `goTo("down")` wraps through `-1` (no selection), which is a dead row in a list you
+  are stepping around.
+- a keyup of any of the required modifiers accepts the selected row.
+  Only the RECORDED modifiers, so a binding without Shift can use Shift to step back.
+  One with Shift in it can't, and jumps on its release instead.
+
+Any other CHARACTER key means a search, which retires the jump-on-release for good (and with it the step key, or a
+search could not contain one).
+Those characters are inserted by hand and go on being inserted while the modifiers are down: the command line would
+otherwise be receiving Alt+&lt;letter&gt;, which inserts nothing and may be an ace command.
+Keys that produce no text are left to the prompt's own bindings, and a key pressed once the modifiers are gone is left
+alone entirely — the command line handles it perfectly well, and taking it over would break its editing bindings
+(Ctrl+V among them).

@@ -968,3 +968,31 @@ function runWorker(defs) {
 
   console.log("PASS  per-language user snippets");
 })();
+
+// ---------------------------------------------------------------------------
+// src/ss-fixes.js - the tabs browser's most-recently-used order. The file is a
+// MAIN-world IIFE too, and nothing at load time touches more than `window`.
+(function () {
+  require(path.join(__dirname, "..", "src", "ss-fixes.js"));
+  const tabMruOrder = global.window.__ssf._tabMruOrder;
+
+  const a = { n: "a" }, b = { n: "b" }, c = { n: "c" }, cur = { n: "cur" };
+  const seen = new Map([
+    [a, 3],
+    [cur, 9],
+    [c, 5],
+  ]);
+  const names = (list) => list.map((t) => t.n);
+
+  // Selected tabs first, newest first; never-selected ones keep tab-bar order
+  // below them; the current tab is always last however recently it was used.
+  assert.deepEqual(names(tabMruOrder([a, b, c, cur], cur, (t) => seen.get(t))), ["c", "a", "b", "cur"]);
+  // Nothing selected yet: tab-bar order, current tab still last.
+  assert.deepEqual(names(tabMruOrder([a, b, cur], cur, () => undefined)), ["a", "b", "cur"]);
+  // A current tab that isn't in the list (none focused) doesn't get appended.
+  assert.deepEqual(names(tabMruOrder([a, b], null, (t) => seen.get(t))), ["a", "b"]);
+  // Single tab: just it.
+  assert.deepEqual(names(tabMruOrder([cur], cur, (t) => seen.get(t))), ["cur"]);
+
+  console.log("PASS  tab MRU order");
+})();

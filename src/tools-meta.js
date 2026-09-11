@@ -259,7 +259,10 @@ Add a prefix to the path for different option:
       kind: "action",
       label: "Browse tabs",
       title: "Switch between open SAS Studio tabs",
-      hotkey: { key: "t", altKey: true },
+      // Alt+Q rather than Alt+T so the alt+tab-style hold mode (see
+      // docs/ace-custom.md) sits on a key that is comfortable to repeat with
+      // the modifier held down.
+      hotkey: { key: "q", altKey: true },
     },
     {
       name: "showVimMappings",

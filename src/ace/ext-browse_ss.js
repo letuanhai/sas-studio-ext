@@ -120,6 +120,7 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
      * @property {(item: DataItem, ...options: any[]) => void} openItem  Function to open the selected item
      * @property {(() => void)=} onClose             Called when the prompt closes, accepted or dismissed
      * @property {Boolean=} fileActions               Whether a plain Enter honours the per-extension action map (files browser only)
+     * @property {{key: string, mods: string[]}=} hold  Alt+tab-style hold mode: the key and the modifiers held open it (tabs browser only)
      * @property {(itemPath: String) => Promise<Partial<DataItem>>} queryItemPath Function to query item path for DataItem
      * @property {Function} scrollTreeToItem          Function to scroll the tree to the selected item
      */
@@ -141,10 +142,12 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             openPrompt.close();
         }
 
-        // Resume where this browser was left off; first open of the page (or a
-        // browser without a historyKey sharing the 'tabs' slot) uses startPath.
-        const lastPathKey = options.historyKey || 'tabs';
-        const last = lastPaths[lastPathKey];
+        // Resume where this browser was left off; the first open of the page
+        // uses startPath. The TABS browser (no historyKey) deliberately doesn't
+        // resume: it is an alt+tab list, and reopening it onto the filter text
+        // of the last switch would hide the tab you just came from.
+        const lastPathKey = options.historyKey;
+        const last = lastPathKey ? lastPaths[lastPathKey] : null;
         const startPath = (last && last.root === options.startPath ? last.path : options.startPath) ?? DEFAULT_PATH;
 
         // Initialize prompt
@@ -397,6 +400,75 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         cmdLine.commands.bindKeys(keys);
         // Add event listener
         cmdLine.on("input", function () { updateCompletions(); });
+
+        // --- Alt+tab-style hold mode ---------------------------------------
+        // Only the tabs browser, and only when it was opened by its hotkey with
+        // the modifiers still down (see ss-fixes' noteTabHold). While they are
+        // held, another press of the hotkey's own key steps DOWN the list (with
+        // Shift, up), wrapping at both ends, and releasing any of them accepts
+        // the selected row - Windows alt+tab. The row starts at 0, which in the
+        // tabs list is the previously used tab.
+        // The listeners are on window in the capture phase, so the repeat press
+        // never reaches the command line as input (ss-fixes' own hotkeys already
+        // stand down while a prompt is open).
+        // ponytail: a binding whose modifiers include Shift can't step BACK -
+        // its Shift release jumps instead. Rebind to a Shift-less key if you
+        // want both directions.
+
+        // Set once a search has started: the jump on release is off for good,
+        // but characters typed with the modifiers still down keep going into
+        // the command line (see onHoldKeyDown).
+        let holdSearching = false;
+        function cancelHold() {
+            window.removeEventListener("keydown", onHoldKeyDown, true);
+            window.removeEventListener("keyup", onHoldKeyUp, true);
+        }
+        function onHoldKeyDown(/** @type {KeyboardEvent} */ e) {
+            const hold = options.hold;
+            if (!hold) return;
+            const key = String(window.ssfEventKey(e));
+            const held = hold.mods.every((/** @type {string} */ m) => e.getModifierState(m));
+            if (held && !holdSearching && key.toLowerCase() === String(hold.key).toLowerCase()) {
+                e.preventDefault();
+                e.stopPropagation();
+                const rows = popup.data.length;
+                if (!rows) return;
+                const step = e.shiftKey && !hold.mods.includes("Shift") ? -1 : 1;
+                popup.setRow((popup.getRow() + step + rows) % rows);
+                return;
+            }
+            // Any other CHARACTER key is the start of a search, and a search is
+            // not a hold: the jump on release goes away for good (the step key
+            // becomes an ordinary letter with it, or the search couldn't
+            // contain one). The text has to be inserted by hand and this keeps
+            // running while the modifiers are down - the command line would
+            // otherwise receive Alt+<letter>, which inserts nothing and may be
+            // an ace command.
+            // Keys that produce no text (arrows, Enter, Escape, the modifiers
+            // themselves) are left alone: they reach the prompt's own bindings,
+            // and stepping on with them still held is the whole point.
+            if (key.length !== 1) return;
+            if (!holdSearching) {
+                holdSearching = true;
+                window.removeEventListener("keyup", onHoldKeyUp, true);
+            }
+            // Modifiers already let go (or a different one, e.g. Ctrl+V): the
+            // command line receives the key perfectly well itself, and taking
+            // it over here would break every editing binding it has.
+            if (!held) return;
+            e.preventDefault();
+            e.stopPropagation();
+            cmdLine.insert(e.shiftKey ? key.toUpperCase() : key);
+        }
+        function onHoldKeyUp(/** @type {KeyboardEvent} */ e) {
+            if (!options.hold || !options.hold.mods.includes(e.key)) return;
+            cancelHold();
+            accept();
+        }
+        if (options.hold) {
+            window.addEventListener("keydown", onHoldKeyDown, true);
+            window.addEventListener("keyup", onHoldKeyUp, true);
+        }
 
         // Finalizing prompt creation
         cmdLine.resize(true);
@@ -689,7 +761,8 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
 
         // Cleanup
         function done() {
-            lastPaths[lastPathKey] = { path: cmdLine.getValue(), root: options.startPath };
+            if (lastPathKey) lastPaths[lastPathKey] = { path: cmdLine.getValue(), root: options.startPath };
+            cancelHold();
             overlay.close();
             openPrompt = null;
             // Runs on an accept too (accept() calls done() in its finally), so a
@@ -803,7 +876,14 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
     }
 
     browse_ss.browse_tabs = function () {
+        // Hold mode is offered by the hotkey path only, and only while those
+        // keys are still down - loading the ace library on the first open of a
+        // page takes long enough that they usually aren't. Consumed here, so a
+        // second open (palette, popup, click) can't inherit it.
+        const hold = window.__ssfTabHold;
+        window.__ssfTabHold = null;
         browse_ss({
+            hold: hold && !hold.released ? hold : undefined,
             startPath: SsTabs.defaultPath,
             placeholder: SsTabs.placeholder,
             openItem: SsTabs.openTab,
@@ -812,11 +892,12 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         });
     }
 
-    // Primary entry points are the chrome.commands shortcuts (Alt-P/Alt-O/Alt-T,
-    // wired up in sw.js -> editor-swap.js's ssExt.browse()). These ace bindKeys
-    // are only an in-editor fallback for when the chrome shortcut has been
-    // unbound/reassigned by the user - when Chrome owns the key, the page never
-    // sees the keydown, so there is no double-fire between the two.
+    // Primary entry points are ss-fixes' page-level hotkeys (Alt+P/Alt+O/Alt+Q
+    // by default, rebindable in the options page), which run in the capture
+    // phase and stop propagation - so these ace bindings only ever fire when
+    // the page-level one has been unbound, and the two can't double-fire.
+    // Note that only the page-level hotkey opens the tabs browser in alt+tab
+    // hold mode: it is the one that has the opening keyboard event.
     // @ts-ignore
     config.loadModule("ace/commands/default_commands", function (module) {
         module.commands.push({
@@ -846,7 +927,7 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         module.commands.push({
             name: "browseSsTabs",
             description: "Select SAS Studio tabs",
-            bindKey: { win: "Alt-t", mac: "Option-t" },
+            bindKey: { win: "Alt-q", mac: "Option-q" },
             readOnly: true,
             exec: function () {
                 // @ts-ignore
@@ -1333,8 +1414,10 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
          */
         static getTabDataItem(tabItemPath) {
             return new Promise((resolve, reject) => {
+                // Most-recently-selected first, current tab last (ss-fixes'
+                // tabAccessOrder patch keeps the order) - the alt+tab list.
                 /** @type {(SsTabItem & SsFileItem & SsLibraryItem)[]} */
-                const sSTabItems = window.appDMS.tabs.getAllTabObjects();
+                const sSTabItems = window.__ssf.tabsByAccess();
 
                 /** @type Partial<DataItem> */
                 const dataItem = { uri: '' };

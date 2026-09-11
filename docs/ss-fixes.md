@@ -42,6 +42,26 @@ Four actions do:
   un-maximizing on the user's behalf would be a surprising side effect.
   Max view is a SERVER-SIDE preference, so the smoke checks for it take it off for the duration and put it back.
 
+## Tab access order
+
+`tabsByAccess()` is the tabs browser's list (see [ace-custom.md](ace-custom.md)): most recently selected first, tabs
+never selected this page load below them in tab-bar order (their sequence is 0 and the sort is stable), and the CURRENT
+tab last — in an alt+tab list the tab you are already on is the least interesting row.
+The ordering itself is the pure `tabMruOrder(allTabs, current, seqOf)`, which is what `test/units.js` drives.
+
+The sequence numbers live in a WeakMap, not on the tab: SAS Studio JSON-stringifies every tab object into the user's tab
+preferences on each change, and an own property would ride along into that.
+They are written by the `tabAccessOrder` patch, which wraps `StackContainer.prototype._transition` — the same hook, and
+for the same reason, as the pane-mark clearing at the end of `runFocus` (see the comment there for why a `selectChild`
+or `onTabSelect` wrap misses every tab built before we patch anything).
+Tab CONTAINERS are `StackContainer`s too, so the one wrap covers tab selection;
+a pane switch inside a tab reaches it as well and bumps the tab that is current anyway, which is what "accessed" should
+mean.
+
+`noteTabHold(event)` is the other half of the alt+tab behaviour, recording the modifiers held when the `browseTabs`
+HOTKEY fired — the reason `bindKey` passes its event to the action at all, and `run(name, event)` with it.
+Every other caller (the popup, the palette, the smoke tests) runs an action with no event and gets an ordinary prompt.
+
 ## Tab and pane groups
 
 SAS Studio has at most two tab GROUPS: `tabs.mainTabContainer` plus a `secondaryTabContainer` that `_dropTab` creates on

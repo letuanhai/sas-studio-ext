@@ -79,7 +79,9 @@
         event.preventDefault();
         event.stopPropagation();
 
-        callback();
+        // The event goes to the action: browseTabs needs to know which
+        // modifiers are being held to run its alt+tab-style hold mode.
+        callback(event);
       },
       true,
     );
@@ -106,6 +108,56 @@
     const nextTabIndex = ((currentTabIndex + (n ?? 1)) % allTabs.length + allTabs.length) % allTabs.length; // wrap array index around
     tabs.selectTab(allTabs[nextTabIndex]);
     tabs.getFocusedTab().editor?.editor?.focus?.();
+  }
+
+  // --- Tab access order (the tabs browser's alt+tab list) -------------------
+  // Which tab was selected when, as a counter per tab object. A WeakMap rather
+  // than a field on the tab: SAS Studio JSON-stringifies every tab object into
+  // the user's tab preferences on each change, and an own property would ride
+  // along into that. Closed tabs drop out with the map entry.
+  /** @type {WeakMap<object, number>} */
+  const tabAccess = new WeakMap();
+  let tabAccessSeq = 0;
+
+  /**
+   * Tabs in "most recently selected first" order, which is what the tabs
+   * browser lists: tabs never selected this session keep their tab-bar order
+   * below the ones that were (their sequence is 0 and the sort is stable), and
+   * the CURRENT tab goes last - in an alt+tab list the tab you are already on
+   * is the least interesting row.
+   * Pure, so test/units.js can drive it: the caller supplies the tabs, the
+   * current one and the accessor.
+   */
+  function tabMruOrder(allTabs, current, seqOf) {
+    const rest = allTabs.filter((t) => t !== current);
+    rest.sort((a, b) => (seqOf(b) || 0) - (seqOf(a) || 0));
+    return allTabs.includes(current) ? [...rest, current] : rest;
+  }
+
+  function tabsByAccess() {
+    const tabs = window.appDMS.tabs;
+    return tabMruOrder(tabs.getAllTabObjects(), tabs.getFocusedTab(), (t) => tabAccess.get(t));
+  }
+
+  // Alt+tab-style hold mode: which modifiers were held when the browseTabs
+  // hotkey fired, so the prompt can step on a repeat of that key and jump on
+  // their release. Also whether they are STILL held by the time the prompt
+  // opens - the first open of a page loads the ace library first, which takes
+  // long enough that the keys are usually long gone; browse_ss falls back to an
+  // ordinary prompt then. Consumed and cleared by browse_ss.browse_tabs.
+  function noteTabHold(event) {
+    window.__ssfTabHold = null;
+    if (!event) return;
+    const mods = ["Alt", "Control", "Shift", "Meta"].filter((m) => event.getModifierState(m));
+    if (!mods.length) return;
+    const hold = { key: window.ssfEventKey(event), mods, released: false };
+    const onUp = (e) => {
+      if (!mods.includes(e.key)) return;
+      hold.released = true;
+      window.removeEventListener("keyup", onUp, true);
+    };
+    window.addEventListener("keyup", onUp, true);
+    window.__ssfTabHold = hold;
   }
 
   // The pane strips of a code tab: the main one, plus the two SAS Studio creates on
@@ -1498,7 +1550,12 @@ Add a prefix to the path for different option:
       fn: () => window.__ssExt && window.__ssExt.browse && window.__ssExt.browse("library"),
     },
     browseTabs: {
-      fn: () => window.__ssExt && window.__ssExt.browse && window.__ssExt.browse("tabs"),
+      // The opening event (hotkey path only) decides whether the prompt runs in
+      // alt+tab hold mode - see noteTabHold.
+      fn: (event) => {
+        noteTabHold(event);
+        return window.__ssExt && window.__ssExt.browse && window.__ssExt.browse("tabs");
+      },
     },
     showVimMappings: {
       // Lists every vim mapping (built-in + vimrc) in an ace prompt. Same no-arg
@@ -2179,6 +2236,34 @@ Add a prefix to the path for different option:
       };
     },
 
+    // Records tab selections for the tabs browser's most-recently-used order.
+    // Not in SSF_TOOLS (always applied): it only fills a WeakMap.
+    // Same hook, and for the same reason, as the mark-clearing wrap at the end
+    // of runFocus below - StackContainer._transition is the one point on the
+    // selection path that every tab reaches, including the ones constructed
+    // before we patch anything (see that comment for the dojo.connect story).
+    // Tab CONTAINERS are StackContainers too, so one wrap covers tab selection;
+    // a pane switch inside a tab reaches it as well and bumps the tab that is
+    // current anyway, which is what "accessed" should mean.
+    tabAccessOrder: function () {
+      const StackContainer = window.require("dijit/layout/StackContainer");
+      const o_transition = StackContainer.prototype._transition;
+      StackContainer.prototype._transition = function (newPage) {
+        const r = o_transition.apply(this, arguments);
+        try {
+          const all = window.appDMS?.tabs?.getAllTabObjects?.() || [];
+          // Either the page IS a tab's widget (a tab selection), or it's a pane
+          // inside the focused tab (getFocusedTab, resolved after the original
+          // ran so it reflects this transition).
+          const tab = all.find((t) => t.tab === newPage) || window.appDMS?.tabs?.getFocusedTab?.();
+          if (tab && all.includes(tab)) tabAccess.set(tab, ++tabAccessSeq);
+        } catch (e) {
+          /* a transition on a container SAS Studio uses elsewhere: not a tab */
+        }
+        return r;
+      };
+    },
+
     // Not in SSF_TOOLS, so the options page renders no checkbox for it and
     // ssfPatchEnabled() (absent -> enabled) always applies it: what it actually
     // does is decided per call by `runFocusMode`, the three-way "runFocus" select.
@@ -2342,20 +2427,22 @@ Add a prefix to the path for different option:
 
         const keymap = Object.prototype.hasOwnProperty.call(hotkeys, name) ? hotkeys[name] : getDefaultHotkey(name);
         if (keymap && keymap.key) {
-          bindKey(() => run(name), keymap);
+          bindKey((event) => run(name, event), keymap);
         }
       });
     });
   }
 
-  function run(name) {
+  function run(name, event) {
     const action = ACTIONS[name];
     if (!action) {
       console.warn(`[SS Ext] Unknown action: ${name}`);
       return;
     }
     try {
-      action.fn();
+      // `event` is only there on the hotkey path (bindKey); every other caller
+      // - the popup, the palette, the smoke tests - runs an action with none.
+      action.fn(event);
     } catch (e) {
       console.error(`[SS Ext] action "${name}" failed:`, e);
     }
@@ -2371,6 +2458,10 @@ Add a prefix to the path for different option:
     copyText,
     copyTextWithNotice,
     notify: (message, isError) => showNotification({ message, isError }),
+    // The tabs browser's list order (browse_ss), and the same ordering as a
+    // pure function for test/units.js.
+    tabsByAccess,
+    _tabMruOrder: tabMruOrder,
     runFocus: "log",
   };
 })();
