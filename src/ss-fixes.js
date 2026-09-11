@@ -1275,16 +1275,6 @@ Add a prefix to the path for different option:
     return window.dijit.byId(`${targetTreeId}.tree`);
   }
 
-  /**
-   * Height the bottom status bar should currently have: collapsed in maximized
-   * view (that's the point of the maximizeEditor patch), except while a run is
-   * in flight - the minimized run dialog puts its Cancel link there, and it is
-   * unreachable if the bar is collapsed.
-   */
-  function statusBarHeight() {
-    return window.appDMS.inMaxView && !document.getElementById("ssf-run-cancel") ? 0 : "17.35px";
-  }
-
   /** Cleanup objects not properly destroyed in dijit registry */
   function cleanUpDijitRegistry() {
     const registry = window.dijit.registry;
@@ -1768,13 +1758,20 @@ Add a prefix to the path for different option:
     },
 
     maximizeEditor: function () {
+      // Only the banner is reclaimed. The bottom status bar used to be
+      // collapsed here too and un-collapsed again for the duration of a run
+      // (the minimized run dialog puts its Cancel chip there), so it popped
+      // into existence at submit and vanished at run end - a layout jump
+      // around every run, and no live run status in maximized view otherwise.
+      // Stock SAS Studio leaves the bar alone in maximized view, so leaving it
+      // alone too is the whole fix; 17px is worth the run status being where
+      // it always is.
       const o_setMaxView = window.appDMS.setMaxView;
       window.appDMS.setMaxView = function () {
         // Clean up abandonned objects in registry
         cleanUpDijitRegistry();
         o_setMaxView.call(this);
         document.getElementById("headContainer").style.height = 0;
-        document.getElementById("studio_status_bar").style.height = statusBarHeight();
         window.dispatchEvent(new Event("resize"));
       };
       const o_setRegularView = window.appDMS.setRegularView;
@@ -1783,7 +1780,6 @@ Add a prefix to the path for different option:
         cleanUpDijitRegistry();
         o_setRegularView.call(this);
         document.getElementById("headContainer").style.height = "40px";
-        document.getElementById("studio_status_bar").style.height = "17.35px";
         window.dispatchEvent(new Event("resize"));
       };
     },
@@ -1978,12 +1974,6 @@ Add a prefix to the path for different option:
           };
           bar.appendChild(link);
         }
-        // The maximizeEditor patch collapses the bar to 0 height; un-collapse
-        // it for the duration of the run so Cancel stays reachable.
-        if (bar) {
-          bar.style.height = statusBarHeight();
-          window.dispatchEvent(new Event("resize"));
-        }
 
         // Mark the running tab with an animated spinner icon + amber label so
         // you can see WHICH open script is executing. The run is initiated from
@@ -2004,10 +1994,6 @@ Add a prefix to the path for different option:
         if (bar) bar.classList.remove("ssf-run-bar");
         const link = document.getElementById("ssf-run-cancel");
         if (link) link.remove();
-        if (bar) {
-          bar.style.height = statusBarHeight();
-          window.dispatchEvent(new Event("resize"));
-        }
       }
 
       // Status-bar tint + spinner-icon/amber-label for the running tab, once.

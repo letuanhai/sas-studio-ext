@@ -4345,24 +4345,59 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   check("arrow keys then navigate the tree", treeAfter && treeAfter !== treeFocus.id, { treeFocus, treeAfter });
   // The side bar hidden is the one case where the action can't do its job; it says
   // so instead of silently focusing nothing.
-  const maxViewNotice = await page.evaluate(async () => {
+  // Same trip into maximized view also measures the bottom status bar across a
+  // run: it used to be collapsed there and un-collapsed only for the duration of
+  // a run (the Cancel chip lives in it), so it popped in at submit and vanished
+  // at run end. It must now be the same height throughout - and the same as in
+  // regular view. A synthetic busy dialog stands in for the run: postBusyDialog
+  // with a cancel callback is exactly what DMSEditor.submitHandler does, and
+  // destroy() is the run-end teardown, so no SAS is submitted for this.
+  const maxView = await page.evaluate(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const barHeight = () =>
+      document.getElementById("studio_status_bar").getBoundingClientRect().height;
     window.__ssf.run("toggleMaxView");
-    await new Promise((r) => setTimeout(r, 800));
+    await wait(800);
     window.__ssf.run("focusSideBarTree");
     // showNotification builds an anonymous div on <body>, so match on its text.
     const notice = [...document.querySelectorAll("body > div")].find((d) =>
       /maximized view/i.test(d.textContent || ""),
     );
     const text = notice ? notice.textContent : "";
+
+    const inMaxView = barHeight();
+    const dialog = window.appDMS.dialogs.postBusyDialog("SS Ext smoke: max-view status bar", () => {});
+    await wait(200);
+    const duringRun = barHeight();
+    const cancelReachable = !!document.getElementById("ssf-run-cancel")?.getBoundingClientRect().height;
+    dialog.destroy();
+    window.appDMS.dialogs.busyDialog = null;
+    await wait(200);
+    const afterRun = barHeight();
+
     window.__ssf.run("toggleMaxView");
-    await new Promise((r) => setTimeout(r, 800));
-    return text;
+    await wait(800);
+    return { text, inMaxView, duringRun, cancelReachable, afterRun, regularView: barHeight() };
   });
   check(
     "focusSideBarTree says so when maximized view hides the side bar",
-    /maximized view/i.test(maxViewNotice),
-    { maxViewNotice },
+    /maximized view/i.test(maxView.text),
+    { maxViewNotice: maxView.text },
   );
+  // The equality chain against regularView is the whole guard - do not trim this
+  // to the non-zero clause. A collapsed bar measures 2px, not 0 (its border and
+  // padding survive height:0), so `inMaxView > 0` passes under the OLD behaviour
+  // too; measured against the reverted code as 2 / 19.34 / 2 / 19.34.
+  check(
+    "the status bar stays visible in maximized view, before/during/after a run",
+    maxView.inMaxView > 0 &&
+      maxView.duringRun === maxView.inMaxView &&
+      maxView.afterRun === maxView.inMaxView &&
+      maxView.regularView === maxView.inMaxView,
+    maxView,
+  );
+  // Which is what the un-collapsing existed for in the first place.
+  check("...so the minimized run dialog's Cancel chip is reachable there", maxView.cancelReachable, maxView);
   if (wasMaxView) {
     await page.evaluate(() => window.__ssf.run("toggleMaxView"));
     await page.waitForTimeout(800);
