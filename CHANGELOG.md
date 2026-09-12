@@ -1,6 +1,44 @@
 # Changelog
 
 
+## 0.22
+
+- A Lua language server, emmylua compiled to wasm and shipped in `lib/`, gives
+  a `.lua` tab the same treatment the SAS one gives a `.sas` file: completion,
+  diagnostics, hover, signature help, occurrence highlights and code actions.
+- The Lua inside a `PROC LUA submit;...endsubmit;` block gets all of it too,
+  even though the tab is SAS. It has its own setting next to the `.lua` one and
+  is off by default, so neither path drags in the other's download.
+- The `sas` table PROC LUA puts in scope is known to the editor — the package
+  API (`sas.submit`, `sas.open`, the dsid methods) from shipped EmmyLua defs,
+  and every DATA step function asked of the SAS server as you type.
+- Go to definition (`Ctrl+Alt+D`), find references (`Ctrl+Alt+R`), rename
+  (`Ctrl+Alt+N`) and jump back (`Ctrl+Alt+B`) work on Lua in both kinds of
+  editor, with a rename box that lists every occurrence it is about to change.
+- `Ctrl+Shift+F` formats the document, or just the block when the caret is in
+  PROC LUA, re-indented to the depth the block sits at.
+- Semantic-token colours no longer depend on the theme happening to style the
+  right scope: an unpainted one borrows the colour of a related scope the theme
+  does paint, so `sas` and `os` finally look alike.
+- A `.log` file opened as text is coloured by severity — the whole line, note
+  through error — instead of reading as the SAS code echoed beside it.
+- Snippets are configurable per language, not only SAS. The language list comes
+  from Ace, unsaved and configured entries are marked in the dropdown, and one
+  save writes them all.
+- The tabs prompt (`Alt+Q` now) behaves like Alt+Tab: most recently used first,
+  repeat the key to step down, Shift to step back, release the modifier to
+  accept. Row 0 is the tab you came from.
+- The status bar stays visible in maximized view. It used to appear when a run
+  started and vanish when it finished, which is backwards for a status bar.
+- Save As waits up to 15s for SAS Studio's dialog instead of 3s; the first one
+  of a page could take longer and the save was silently skipped.
+- The focus hotkeys reach the plain textarea of a text tab with the Ace
+  replacement off, and say so when the side bar is hidden by maximized view
+  rather than focusing a tree nobody can see.
+- The options page's Vim Keymap section hands out a console snippet that lists
+  every Ace command id, which is what a `<Cmd>` mapping needs and what the
+  command palette (descriptions only) never showed.
+
 ## 0.21
 
 - The unsaved-change gutter marks every line you have touched since the last

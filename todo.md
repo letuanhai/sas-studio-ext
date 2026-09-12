@@ -1,1 +1,0 @@
-- assign hotkeys for lsp features (rename, find references, goto definition)
