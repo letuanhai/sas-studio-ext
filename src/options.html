@@ -71,6 +71,43 @@
       #save-vimrc {
         margin-top: 8px;
       }
+      #cmd-ids {
+        margin: 8px 0;
+      }
+      #cmd-ids summary {
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--fg-muted);
+      }
+      .snippet-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 6px 0 4px;
+      }
+      .snippet-copy {
+        border: 1px solid var(--btn-border);
+        border-radius: 4px;
+        background: var(--btn-bg);
+        color: var(--fg);
+        cursor: pointer;
+        font-size: 12px;
+        padding: 2px 8px;
+      }
+      .snippet-copy:hover {
+        background: var(--btn-hover);
+      }
+      .snippet-text {
+        width: 100%;
+        font-family: monospace;
+        font-size: 12px;
+        background: var(--btn-bg);
+        color: var(--fg);
+        border: 1px solid var(--btn-border);
+        box-sizing: border-box;
+        resize: vertical;
+      }
     </style>
   </head>
   <body>
@@ -262,6 +299,18 @@
     <p class="note">
       To see every vim mapping (built-in ones included), run "Show vim key mappings" from the command palette.
     </p>
+    <p class="note">
+      To find the <code>&lt;Cmd&gt;</code> name of an Ace command, run this in the SAS Studio page's DevTools console
+      (F12 &rarr; Console) with a code tab open. It prints every command the focused editor knows, with its current key.
+    </p>
+    <details id="cmd-ids">
+      <summary>Console snippet: list Ace command ids</summary>
+      <div class="snippet-head">
+        <span class="note">Paste into the console on the SAS Studio tab.</span>
+        <button id="cmd-ids-copy" class="snippet-copy">Copy</button>
+      </div>
+      <textarea id="cmd-ids-text" class="snippet-text" readonly spellcheck="false" rows="12"></textarea>
+    </details>
     <textarea id="vimrc-editor" spellcheck="false"></textarea>
     <button id="save-vimrc">Save vim config</button>
     <span id="vimrc-save-status"></span>

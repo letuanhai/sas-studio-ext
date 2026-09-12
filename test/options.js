@@ -382,6 +382,34 @@ const loadScript = (page, src) =>
   const dark = await paint("ace/theme/gruvbox");
   check("dark theme: the ace_dark half wins", dark.dark && dark.error === "rgb(255, 107, 107)" && dark.note === "rgb(111, 179, 255)" && dark.error !== dark.plain, dark);
 
+  // The console snippet is pasted into a page this suite never loads, so the
+  // thing worth guarding is that it is PRESENT and is valid JS - a syntax error
+  // shipped here only shows up as a red console on the user's SAS Studio tab.
+  const cmdIds = await page.evaluate(() => {
+    const box = document.getElementById("cmd-ids-text");
+    const details = document.getElementById("cmd-ids");
+    const btn = document.getElementById("cmd-ids-copy");
+    let parses = false;
+    try {
+      new Function(box.value); // parse only, never run: it needs the SAS page
+      parses = true;
+    } catch (e) {
+      parses = String(e);
+    }
+    return {
+      present: !!box && !!btn,
+      collapsedByDefault: details && !details.open,
+      mentionsCmd: /<Cmd>/.test(box.value),
+      walksHandlers: /keyBinding\.\$handlers/.test(box.value),
+      parses,
+    };
+  });
+  check(
+    "vim section ships a collapsed, valid console snippet for listing command ids",
+    cmdIds.present && cmdIds.collapsedByDefault && cmdIds.mentionsCmd && cmdIds.walksHandlers && cmdIds.parses === true,
+    cmdIds,
+  );
+
   check("no console errors on the options page", errors.length === 0, errors.slice(0, 3));
 
   console.log(failures ? `\n${failures} check(s) failed` : "\nAll checks passed");

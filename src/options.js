@@ -20,6 +20,33 @@
   // never a saved default. Must stay in sync with editor-swap.js's copy.
   const NON_PERSISTED_ACE_OPTIONS = ["theme", "mode"];
 
+  // Pasted by the user into the SAS Studio page's console, so it can assume only
+  // what that page has: appDMS for the code tabs, __ssExt for the text viewers.
+  // Deliberately not an extension feature - this answers "what is this command
+  // called" once, while writing a vimrc, and the palette stays uncluttered.
+  // Walks keyBinding.$handlers exactly like editor-swap.js's
+  // getEditorCommandsByName, which is why a mode's or an extension's commands
+  // show up and not just ace's built-ins.
+  const CMD_IDS_SNIPPET = `(() => {
+  const ed =
+    (window.appDMS?.tabs?.getAllTabObjects?.() || [])
+      .map((t) => t.editor?.editor?.aceEditor)
+      .find(Boolean) ||
+    (window.__ssExt?._textViewers || []).map((v) => v.adapter?.aceEditor).find(Boolean);
+  if (!ed) return "No Ace editor found - open a code tab with the editor toggled ON.";
+  const rows = [];
+  (ed.keyBinding.$handlers || []).forEach((h) => {
+    Object.keys(h.byName || {}).forEach((name) => {
+      let key = h.byName[name].bindKey;
+      if (typeof key !== "string") key = (key && key[h.platform]) || "";
+      rows.push({ command: name, key, description: h.byName[name].description || "" });
+    });
+  });
+  rows.sort((a, b) => a.command.localeCompare(b.command));
+  console.table(rows);
+  return rows.length + " commands - map one with: nmap gd <Cmd>" + (rows[0] || {}).command;
+})();`;
+
   function hotkeyLabel(hotkey) {
     if (!hotkey || !hotkey.key) return "(unbound)";
     let name = hotkey.key;
@@ -518,6 +545,35 @@
       current.lspMaxLines = Number.isNaN(n) || n < 0 ? 0 : n;
       lspMaxLinesInput.value = current.lspMaxLines;
       persist();
+    });
+
+    // The <Cmd> names a vimrc can map are ace command ids, and nothing in the UI
+    // shows them: the palette lists DESCRIPTIONS ("Go to definition (language
+    // server)" for gotoDefinition). Rather than crowd that list, hand over a
+    // console one-liner - it reads the same source the palette does, every
+    // handler on editor.keyBinding.$handlers, so it covers ace's own commands,
+    // ours and anything a mode added.
+    const cmdIdsText = document.getElementById("cmd-ids-text");
+    cmdIdsText.value = CMD_IDS_SNIPPET;
+    const cmdIdsBtn = document.getElementById("cmd-ids-copy");
+    // No document.execCommand("copy") fallback here, unlike ss-fixes.js: that one
+    // runs on the SAS Studio page, an INSECURE origin where navigator.clipboard
+    // does not exist at all. This page is chrome-extension://, a secure context,
+    // so writeText is always there and the deprecated call would be dead code.
+    // A refusal is still possible (it needs the document focused), and the
+    // honest answer to that is to say so rather than claim a copy that did not
+    // happen - the text is selected, so Ctrl+C finishes the job.
+    cmdIdsBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(cmdIdsText.value);
+        cmdIdsBtn.textContent = "Copied";
+      } catch (e) {
+        console.error("[SS Ext] options: clipboard write refused:", e);
+        cmdIdsText.focus();
+        cmdIdsText.select();
+        cmdIdsBtn.textContent = "Press Ctrl+C";
+      }
+      setTimeout(() => (cmdIdsBtn.textContent = "Copy"), 1600);
     });
 
     const vimrcStatus = document.getElementById("vimrc-save-status");
