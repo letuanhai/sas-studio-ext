@@ -1322,6 +1322,16 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // table, hover from both servers, the SAS server's own annotations surviving
   // alongside, and everything disappearing again when the block does.
   const procLuaState = await page.evaluate(async () => {
+    // procLuaLsp is OPT-IN (defaults.js), and sessionLuaRanges() gates every
+    // feature below on it, so without this the whole section fails with the
+    // server up and no block ever registered. An earlier block here also left
+    // aceConfig as a bare { lsp, lspMaxLines }, which drops both Lua flags.
+    window.__ssExt.aceConfig = Object.assign({}, window.__ssExt.aceConfig, {
+      lsp: true,
+      lspMaxLines: 0,
+      luaLsp: true,
+      procLuaLsp: true,
+    });
     const div = document.createElement("div");
     div.id = "ssext_smoke_proc_lua";
     div.style.cssText = "position:fixed;left:0;top:0;width:900px;height:400px;z-index:99999";
@@ -1984,6 +1994,14 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   // in ANOTHER open editor, and a rename that has to edit two documents at once.
   const luaNavState = await page.evaluate(async () => {
     if (!window.__ssExt._luaLintersProvider) return { started: false };
+    // Same opt-in as the PROC LUA section: the block half of this test
+    // (_procLuaDocs -> blockUri) is dead without it.
+    window.__ssExt.aceConfig = Object.assign({}, window.__ssExt.aceConfig, {
+      lsp: true,
+      lspMaxLines: 0,
+      luaLsp: true,
+      procLuaLsp: true,
+    });
     const dir = "/ssext-smoke/nav";
     const mk = (id, text, mode, path) => {
       const div = document.createElement("div");
