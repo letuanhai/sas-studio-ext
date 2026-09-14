@@ -1716,6 +1716,22 @@ Add a prefix to the path for different option:
       };
     },
 
+    alwaysEditTaskDefinition: function () {
+      const proto = Object.getPrototypeOf(window.appDMS.tabs);
+      const origAddFileTab = proto.addFileTab;
+      proto.addFileTab = function (item) {
+        // A .ctm opened with no `mode` makes perspectiveFileOpen post the
+        // Edit/Run/Cancel dialog, and makes _newTab hold the tab OUT of its tab
+        // container until the answer comes back - so it has no controlButton yet
+        // and middleClickCloseTab never gets to hook it. Defaulting to "edit"
+        // here - the very field the dialog's Edit button sets - skips both. An
+        // explicit mode (a task Run, a restored run tab, the ?openfile= URL
+        // parameter) is left alone.
+        if (item && !item.mode && window.appDMS.getFileType(item) === "CTM") item.mode = "edit";
+        return origAddFileTab.apply(this, arguments);
+      };
+    },
+
     projectsContextMenuCopyUri: function () {
       const projects = window.appDMS.projects;
       const _orig_populateProjectContextMenu = projects.populateProjectContextMenu;

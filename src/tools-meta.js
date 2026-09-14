@@ -306,6 +306,12 @@ Add a prefix to the path for different option:
       title: "Close a tab by middle-clicking it",
     },
     {
+      name: "alwaysEditTaskDefinition",
+      kind: "patch",
+      label: "Always edit a task definition",
+      title: "Open a .ctm task definition in the task editor instead of asking edit-or-run",
+    },
+    {
       name: "projectsContextMenuCopyUri",
       kind: "patch",
       label: "\"Copy Path\" in project tree context menu",

@@ -105,6 +105,14 @@ the SECOND such tab throws a duplicate-widget-id error mid-chain and leaves its 
 modal up for good.
 Closed-tab records carry no id, so deriving it is the fix rather than remembering it.
 
+`alwaysEditTaskDefinition` wraps `SASStudioTabs.prototype.addFileTab` and defaults a `.ctm`'s `mode` to `"edit"` — the
+very field the stock Edit-or-Run dialog's Edit button sets — so opening a task definition goes straight to the task
+editor.
+An explicit `mode` (a task Run, a restored run tab, the `?openfile=` URL parameter) is left alone.
+It also fixes middle-click close on that tab: with no `mode`, `_newTab` deliberately holds the tab OUT of its tab
+container until the dialog is answered, so it has no `controlButton` yet and `middleClickCloseTab`'s `_newTab` wrapper
+finds nothing to hook.
+
 `confirmDropFile` wraps `projects.projectTreeStore.pasteItem` (re-applied from a `createProjectsModel` wrapper, since a
 tree refresh recreates the model) and confirms ONCE PER DROP: dijit's `onDndDrop` pastes every dragged node in a single
 synchronous `forEach`, so the answer is cached for the rest of the tick and the prompt lists the whole moving set
