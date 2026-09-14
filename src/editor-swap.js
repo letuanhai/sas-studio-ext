@@ -27,8 +27,8 @@
   //   setNextFocusHandler/setPreviousFocusHandler/setLibService/promptText/
   //   enableHint/regShortcuts - DMSEditor calls these defensively (`if (fn) ...`)
   //     but never reads a return value
-  //   getContextMenu()      - returns null; the only caller (createCodeEditor's
-  //     Ace path below) already try/catches around it
+  //   getContextMenu()      - returns a no-op stub; DMSEditor's use of it is
+  //     feature-tested and try/catch'd, TaskEditor's is neither (see the method)
   //   getHTML()             - used by onPrintCode()/getSummary() for a printable
   //     export; Ace has no built-in HTML export without ext-static_highlight, so
   //     this returns escaped plain text instead of syntax-highlighted markup.
@@ -50,6 +50,10 @@
     } catch (e) {}
     return "ace/mode/sas";
   }
+
+  // What getContextMenu() hands back - see the comment there. A Proxy rather than
+  // a three-method object so a menu call we never audited for is a no-op too.
+  const CONTEXT_MENU_STUB = new Proxy({}, { get: () => () => undefined });
 
   class AceEditorAdapter {
     // filePath is the file's path on the SAS server (item.uri), when there is
@@ -636,7 +640,15 @@
 
     // -- Misc stubs -------------------------------------------------------------------
     getContextMenu() {
-      return null;
+      // Ace has its own context menu, so there is nothing to hand back - but this
+      // cannot be null. TaskEditor.createCodeEditor leaves two PERMANENT
+      // dojo.connects on the tab container that do
+      // `this.editor.getContextMenu().modifyItem(...)` on every tab add/remove,
+      // and nothing unregisters them when its editor is swapped out from under
+      // them, so a task tab that has ever held the stock editor would throw on
+      // the next tab opened. A no-op stub is the one shape that satisfies every
+      // caller (DMSEditor's own use is feature-tested and just no-ops too).
+      return CONTEXT_MENU_STUB;
     }
     setNextFocusHandler() {}
     setPreviousFocusHandler() {}
@@ -3620,30 +3632,24 @@
     }
 
     installCreateFileViewPatch();
+    installTaskEditorPatch();
+    installXmlEditorPatch();
 
     const tabs = appDMS.getCurrentPerspectiveSASStudioTabs();
     installTextViewerCloseConfirm(tabs);
+    // Ask the module loader by name, never `someTab.editor.constructor`: a tab's
+    // editor is whatever class owns that tab, and a .ctm tab's is a TaskEditor -
+    // so a session restored with a task tab first handed back the wrong class
+    // entirely, and a session restored with only text viewers (or no tabs at all)
+    // handed back none, bailing here so every tab opened afterwards got the STOCK
+    // editor for the rest of the page's life. dojo's sync AMD form has the class
+    // either way: AppDMS depends on the module, so it is loaded by the time we
+    // run. (Same lookup ss-fixes.js's runFocus patch uses, for the same reason.)
     let DMSEditor = null;
-    if (tabs && tabs.mainTabs) {
-      for (const tab of tabs.mainTabs) {
-        if (tab.editor) {
-          DMSEditor = tab.editor.constructor;
-          break;
-        }
-      }
-    }
-    // No code tab to take the class off - a session restored with only text
-    // viewers (or none at all) has none, and then this bailed and never patched
-    // createCodeEditor, so every tab opened afterwards got the STOCK editor for
-    // the rest of the page's life. dojo's sync AMD form has the class either
-    // way: AppDMS depends on the module, so it is loaded by the time we run.
-    // (Same lookup ss-fixes.js's runFocus patch uses, for the same reason.)
-    if (!DMSEditor) {
-      try {
-        DMSEditor = window.require("webdms/DMSEditor");
-      } catch (e) {
-        console.warn("[SS Ext] require('webdms/DMSEditor') failed:", e);
-      }
+    try {
+      DMSEditor = window.require("webdms/DMSEditor");
+    } catch (e) {
+      console.warn("[SS Ext] require('webdms/DMSEditor') failed:", e);
     }
 
     if (!DMSEditor || !DMSEditor.prototype.createCodeEditor) {
@@ -3778,6 +3784,133 @@
 
     DMSEditor.prototype._aceReplacementPatched = true;
     ssExt.patchesInstalled = true;
+  }
+
+  // The task-definition tab (TaskEditor.js, the "Edit" half of a .ctm) builds its
+  // editor from its own `CodeEditor` module binding - a snapshot of SAS.Editor
+  // taken at import time - so the EditorDispatcher above never sees it. Wrap its
+  // createCodeEditor the same way DMSEditor's is. Everything the original does to
+  // the context menu is dropped (the adapter has none, and TaskEditor - unlike
+  // DMSEditor - calls getContextMenu() unguarded, which is why the original can't
+  // simply be called through); the rest is mirrored. The mode is XML outright
+  // rather than aceModeFor(name), because a task definition is always XML even
+  // before it has a .ctm file name to go by.
+  function installTaskEditorPatch() {
+    let TaskEditor = null;
+    try {
+      TaskEditor = window.require("webdms/TaskEditor");
+    } catch (e) {
+      console.warn("[SS Ext] require('webdms/TaskEditor') failed:", e);
+    }
+    if (!TaskEditor || !TaskEditor.prototype.createCodeEditor) {
+      console.warn("[SS Ext] Could not find TaskEditor class to patch");
+      return;
+    }
+    if (TaskEditor.prototype._aceReplacementPatched) return;
+    TaskEditor.prototype._aceReplacementPatched = true;
+
+    const originalCreateCodeEditor = TaskEditor.prototype.createCodeEditor;
+    TaskEditor.prototype.createCodeEditor = function () {
+      if (!ssExt.active) return originalCreateCodeEditor.call(this);
+
+      const lang = require("dojo/_base/lang");
+      this.editor = new AceEditorAdapter(this.editorPane.id, this.editorContent, "ace/mode/xml");
+      appDMS.applyOptionsToEditor(this.editor, true);
+
+      this.editor.bind("textChanged", lang.hitch(this, this.editorChanged));
+      this.editor.bind("caretMoved", lang.hitch(this, this.editorCaretMoved));
+
+      this.setButtonStates();
+      this.editor.gotoLine(1);
+      setTimeout(lang.hitch(this, this.setInitialFocus), 100);
+      this.gotoInput.setAttribute("constraints", { min: 1, max: this.editor.lineCount() });
+
+      this.editor.activate();
+      this.setFinalized(true);
+    };
+    // TaskEditor's createCodeEditor builds ONLY the editor, so the toggle can just
+    // call it again - see the $ssExtRebuildEditor contract above installXmlEditorPatch.
+    TaskEditor.prototype.$ssExtRebuildEditor = function (text) {
+      this.editorContent = text;
+      this.createCodeEditor();
+    };
+  }
+
+  // Editor hosts with no `editorDiv` declare how to rebuild THEIR editor for the
+  // current toggle state as `$ssExtRebuildEditor(text)`, which swapTabsToAce and
+  // restoreTabsToOriginal both call instead of reaching for the container id and
+  // handler names themselves. One hook rather than one boolean because the hosts
+  // genuinely differ: TaskEditor.createCodeEditor builds only the editor and can
+  // simply be re-run, while XMLEditor's also builds the tab's toolbar, status bar
+  // and editor pane - running that twice would duplicate their dijit ids.
+  //
+  // XMLEditor is what a .xml file (AppDMS.perspectiveXMLOpen/createXMLView) and
+  // "New XML file" open into. It imports the same CodeEditor module under the same
+  // module-eval snapshot of SAS.Editor as the other two, so the dispatcher never
+  // saw it either, and an XML tab kept the stock editor while every tab beside it
+  // was Ace. Unlike TaskEditor it touches no context menu and registers no
+  // dojo.connect, and every editor method it uses is on the adapter - so the
+  // original runs untouched and only the editor it made is replaced.
+  function installXmlEditorPatch() {
+    let XMLEditor = null;
+    try {
+      XMLEditor = window.require("webdms/XMLEditor");
+    } catch (e) {
+      console.warn("[SS Ext] require('webdms/XMLEditor') failed:", e);
+    }
+    if (!XMLEditor || !XMLEditor.prototype.createCodeEditor) {
+      console.warn("[SS Ext] Could not find XMLEditor class to patch");
+      return;
+    }
+    if (XMLEditor.prototype._aceReplacementPatched) return;
+    XMLEditor.prototype._aceReplacementPatched = true;
+
+    XMLEditor.prototype.$ssExtRebuildEditor = function (text) {
+      const lang = require("dojo/_base/lang");
+      // Stock side deliberately goes through OriginalSASEditor, not SAS.Editor:
+      // the latter is our dispatcher and would hand back an adapter again.
+      this.editor = ssExt.active
+        ? new AceEditorAdapter(this.editorPane.id, text, "ace/mode/xml")
+        : new ssExt.OriginalSASEditor(
+            this.editorPane.id,
+            text,
+            ssExt.OriginalSASEditor.LanguageMode.Xml,
+          );
+      // Bound after construction, as the original does, so seeding the initial
+      // content can't fire textChanged and mark an untouched tab dirty.
+      this.editor.bind("textChanged", lang.hitch(this, this.onEditorChange));
+      this.editor.bind("caretMoved", lang.hitch(this, this.onEditorCaretMove));
+      this.editor.activate();
+      this.editor.gotoLine(1);
+    };
+
+    const originalCreateCodeEditor = XMLEditor.prototype.createCodeEditor;
+    XMLEditor.prototype.createCodeEditor = function (tab) {
+      if (!ssExt.active) return originalCreateCodeEditor.call(this, tab);
+      // The original body, minus the stock editor. Calling it through and then
+      // replacing the editor does NOT work here: the stock editor repaints into
+      // its container LAZILY (first layout/resize, after this returns), which
+      // rips out the Ace DOM that replaced it. The symptom is nasty - the
+      // adapter object is alive and answers getText()/lineCount(), the tab even
+      // marks itself dirty, while the pane shows an EMPTY stock editor - so
+      // assert on rendering, not just on the adapter being there.
+      // The chrome is built by calling the host's own helpers rather than
+      // reimplementing them; only the `new CodeEditor(...)` line is ours.
+      const lang = require("dojo/_base/lang");
+      const ContentPane = require("dijit/layout/ContentPane");
+      this.createAndPopulateToolbar(tab);
+      this.createStatusBar(tab);
+      this.editorPane = new ContentPane({ id: tab.id + "_editorPane", region: "center" });
+      tab.addChild(this.editorPane);
+
+      this.$ssExtRebuildEditor(this.editorContent);
+
+      this.setButtonStates();
+      setTimeout(lang.hitch(this, this.setInitialFocus), 100);
+      this.gotoInput.setAttribute("constraints", { min: 1, max: this.editor.lineCount() });
+      this.setFinalized(true);
+      this.editorActive = true;
+    };
   }
 
   // -- "View file as text" -> read-only Ace ----------------------------------------
@@ -4544,10 +4677,26 @@
 
     tabs.mainTabs.forEach((tabObj) => {
       const dmsEditor = tabObj.editor;
-      if (!dmsEditor || !dmsEditor.editor || !dmsEditor.editorDiv) return;
+      if (!dmsEditor || !dmsEditor.editor) return;
 
       const oldEditor = dmsEditor.editor;
       if (oldEditor._isAceEditorAdapter) return;
+
+      // An editor host with no editorDiv (TaskEditor, XMLEditor) rebuilds its own
+      // editor through the $ssExtRebuildEditor hook its patch installed - see the
+      // contract there. A host we never patched has no hook and is left alone.
+      if (!dmsEditor.editorDiv) {
+        if (typeof dmsEditor.$ssExtRebuildEditor !== "function") return;
+        try {
+          const wasDirty = dmsEditor.editorContentChanged;
+          dmsEditor.$ssExtRebuildEditor(oldEditor.getText());
+          dmsEditor.editorContentChanged = wasDirty;
+          swapped++;
+        } catch (e) {
+          console.error("[SS Ext] Failed to swap tab to Ace:", e);
+        }
+        return;
+      }
 
       let content = "";
       try {
@@ -4622,8 +4771,14 @@
 
         adapter.dispose(); // destroys ace instance, clears container in place
 
-        dmsEditor.editorContent = text;
-        dmsEditor.createCodeEditor(); // dispatcher routes to the original method
+        // Same hook the swap-to-Ace direction uses, for the same reason: a host
+        // with no editorDiv knows how to rebuild its editor and this walk doesn't.
+        if (typeof dmsEditor.$ssExtRebuildEditor === "function") {
+          dmsEditor.$ssExtRebuildEditor(text);
+        } else {
+          dmsEditor.editorContent = text;
+          dmsEditor.createCodeEditor(); // dispatcher routes to the original method
+        }
 
         // createCodeEditor doesn't touch editorContentChanged itself, but restore
         // it explicitly as a safety net against future changes to that method.

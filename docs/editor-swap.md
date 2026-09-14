@@ -16,6 +16,8 @@ Installed once on first injection (`installAceReplacementPatches`, guarded by `_
   It is the one method every code-tab save path ends in, and always called as `this.successfulSave(...)`, so unlike
   `saveFile` — which the toolbar button hitches at construction — a prototype wrap also covers pre-existing tabs.
 - `appDMS.createFileView` is wrapped (`_createFileViewPatched`) for text viewers.
+- `TaskEditor.prototype.createCodeEditor` is wrapped the same way as `DMSEditor`'s (`installTaskEditorPatch`).
+- `XMLEditor.prototype.createCodeEditor` is wrapped call-through-then-replace (`installXmlEditorPatch`).
 
 `activate()`/`deactivate()` never touch the `window.ace` global;
 they walk every open tab converting its editor in place and re-binding `textChanged`/`selectionChanged`/`caretMoved`.
@@ -95,6 +97,93 @@ conversion goes through the same `convertTextViewerToAce(item, tabHolder)` the w
 `deactivate()` disposes the adapter, clears the dirty marker, unhides the textarea, restores its original `.set`.
 Consequence for the smoke test: `_textViewers` is not empty just because a viewer was closed, so its registry-cleanup
 check is baseline-relative.
+
+## The editor hosts
+
+`DMSEditor` has no subclasses.
+Seven independent classes each `import` the same `CodeEditor` module — under two different AMD ids,
+`sas-commons/controls/CodeEditor` and `CodeEditor/controls/CodeEditor` — and that module ends in
+`export default SAS.Editor`, a snapshot taken at module-eval time.
+**So replacing `SAS.Editor` reaches none of them, and every host needs its own wrap.**
+
+| Host | Opens | Patched |
+|---|---|---|
+| `DMSEditor` | code tabs | yes |
+| `TaskEditor` | the Edit half of a `.ctm` | yes |
+| `XMLEditor` | a `.xml` file, and "New XML file" | yes |
+| `SASStudioInteractiveConsole` | the `interactivePP` perspective | no — perspective not offered |
+| `SASStudioCASConsole` | the `CASPP` perspective | no — perspective not offered |
+| `MobileEditor` | the separate mobile app shell | no — not a target |
+| `MobileDMSLibraries` | — | imports it, never constructs one |
+
+The last four are lazily loaded by their perspective/entry point;
+on this deployment the perspective menu offers only SAS Programmer and Visual Programmer, and `require`ing any of those
+modules answers `undefinedModule`.
+Visual Programmer drives `SASStudioTabs`, so it routes through the same three patched hosts.
+
+A generic patch is not available, and would not be wanted if it were.
+The constructor call carries only `(containerId, content, langMode)`, so swapping it wholesale would lose everything
+the host knows — `DMSEditor`'s per-extension mode (`aceModeFor(this.name)`), its log pane, its `interactivePP`
+read-only rule — and hooking the module loader to intercept the id would trade the current zero load-order
+requirements for a race at `document_start`.
+The hosts also need genuinely different treatment, below.
+
+### The task editor (`.ctm`)
+
+A task-definition tab is a `TaskEditor`, not a `DMSEditor`, and it builds its editor from its own
+`import CodeEditor from "CodeEditor/controls/CodeEditor"` — a binding snapshotted from `SAS.Editor` at module-eval time
+— so the `EditorDispatcher` never sees it.
+`installTaskEditorPatch()` wraps `TaskEditor.prototype.createCodeEditor` the way `DMSEditor`'s is wrapped, guarded by
+the same `_aceReplacementPatched` flag on its own prototype.
+
+- The mode is `ace/mode/xml` outright, not `aceModeFor(name)`: a task definition is always XML, including before it has
+  a `.ctm` file name to go by.
+  (`.ctm` maps to XML in modelist too — see [ace-custom.md](ace-custom.md) — which is what a `.ctm` opened as a plain
+  code tab or a text viewer goes by.)
+- Everything the original does to the context menu is DROPPED (the adapter has none).
+  That is also why the original can't simply be called through and its editor replaced afterwards: unlike `DMSEditor`,
+  `TaskEditor` calls `getContextMenu()` unguarded.
+  It is also why `getContextMenu()` returns a no-op stub rather than `null`: the original `createCodeEditor` leaves two
+  PERMANENT `dojo.connect`s on the tab container that call `this.editor.getContextMenu().modifyItem(...)` on every tab
+  add/remove, and nothing unregisters them when the editor underneath is swapped — so a task tab that has ever held the
+  stock editor would otherwise throw on the next tab opened.
+- Bindings are `textChanged` → `editorChanged` and `caretMoved` → `editorCaretMoved`;
+  there is no `selectionChanged` on a `TaskEditor`.
+  `editorChanged` is what puts the `*` on the tab title, and every save path reads `this.editor.getText()`.
+
+### The XML editor (`.xml`, "New XML file")
+
+`XMLEditor.createCodeEditor` builds the tab's toolbar, status bar and editor pane as well as the editor, and is called
+from the constructor.
+The wrapper therefore mirrors that body minus the `new CodeEditor(...)` line, calling the host's OWN
+`createAndPopulateToolbar(tab)` and `createStatusBar(tab)` rather than reimplementing them.
+It is always `ace/mode/xml`, and `appDMS.applyOptionsToEditor` is deliberately NOT called — the stock
+`createCodeEditor` doesn't call it either.
+
+**Calling the original through and replacing its editor afterwards does not work here**, which is worth knowing before
+anyone tries it again as the smaller diff.
+The stock editor repaints into its container LAZILY — on the first layout/resize, after `createCodeEditor` has
+returned — so it rips out the Ace DOM that replaced it.
+The failure is near-invisible from script: the adapter object is alive and answers `getText()`/`lineCount()`, the tab
+even marks itself dirty on an edit, while the pane shows an EMPTY stock editor (`textview sce sce-xml`).
+Measured, that state reads `content.isConnected: false`, `characterWidth: 0`.
+**So assert on RENDERING, not on the adapter existing** — `test/smoke.js`'s `rendersOf()` checks the text layer is
+attached, font metrics are non-zero and the pane holds ace's own DOM;
+it was verified to fail against the call-through build and pass against this one.
+`rendersOf()` selects the tab first, because an unselected tab is `display: none` and measures zero for everything —
+an editor rebuilt while hidden has no font metrics at all, and both recover the moment the tab is shown.
+
+### `$ssExtRebuildEditor`
+
+Each patched host with no `editorDiv` puts a `$ssExtRebuildEditor(text)` on its prototype saying how to rebuild ITS
+editor for the current toggle state;
+`swapTabsToAce()` and `restoreTabsToOriginal()` both call it instead of reaching for a container id and handler names
+they'd have to know per host.
+A host we never patched has no hook and is skipped.
+
+- `TaskEditor`'s sets `editorContent` and re-runs `createCodeEditor()` — its body builds only the editor.
+- `XMLEditor`'s constructs the editor alone into the pane that already exists, picking `AceEditorAdapter` or
+  `ssExt.OriginalSASEditor` (NOT `SAS.Editor`, which is our dispatcher and would hand back an adapter again).
 
 ## Prompts and the command palette
 

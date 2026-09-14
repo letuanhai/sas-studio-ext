@@ -22,6 +22,9 @@ Each patch is independently try/catch'd and idempotency-guarded.
 3. `ace/ext/modelist` gets a SAS entry pushed onto it (`Mode` isn't exported, so this clones an existing instance's
    prototype instead of `new Mode(...)`), and its `log` entry is retargeted at `ace/mode/saslog` — modelist's own
    `ace/mode/log` has no file in this build and silently 404s.
+   `ctm` is appended to the XML entry's extensions (SAS Studio task definitions are XML);
+   its `extRe` is rebuilt off its own `source` rather than off `extensions`, so whatever prefix ace's `Mode`
+   constructor put there survives.
 4. `ace/ext/statusbar` — `StatusBar.prototype.updateStatus` fully replaced with the fork's
    `" Line r/total (n selected), Col c "` 1-based format (skipped when `ext-statusbar` isn't loaded).
 

@@ -99,6 +99,23 @@ const loadScript = (page, src) =>
   });
   check("the language list comes from ace/ext/modelist, our own modes included", langs.count > 100 && langs.sas && langs.lua && langs.saslog, langs);
 
+  // ace-patches.js appends "ctm" to modelist's XML entry by rewriting its extRe -
+  // so check both that .ctm lands on XML and that the extensions already there
+  // survived the rewrite.
+  const ctm = await page.evaluate(() => {
+    const modelist = window.__ssAce.require("ace/ext/modelist");
+    return {
+      ctm: modelist.getModeForPath("MyTask.ctm").mode,
+      xml: modelist.getModeForPath("some.xml").mode,
+      sas: modelist.getModeForPath("prog.sas").mode,
+    };
+  });
+  check(
+    ".ctm is XML, and the XML entry's own extensions still are",
+    ctm.ctm === "ace/mode/xml" && ctm.xml === "ace/mode/xml" && ctm.sas === "ace/mode/sas",
+    ctm,
+  );
+
   const start = await page.evaluate(() => ({
     lang: document.getElementById("snippet-lang").value,
     mode: window.__ssAce.edit("snippets-editor").session.getMode().$id,

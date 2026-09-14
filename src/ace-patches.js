@@ -184,6 +184,15 @@
       modelist.modesByName.log.mode = "ace/mode/saslog";
       modelist.modesByName.log.caption = "SAS Log";
     }
+    // .ctm - SAS Studio's task definitions, which are XML. Without an entry they
+    // fall through modelist to no match, and aceModeFor()'s fallback is SAS.
+    // extRe is rebuilt off its own source rather than from `extensions`, so
+    // whatever prefix ace's Mode constructor put there survives.
+    var xml = modelist.modesByName.xml;
+    if (xml && xml.extensions.split("|").indexOf("ctm") === -1) {
+      xml.extensions += "|ctm";
+      xml.extRe = new RegExp(xml.extRe.source.replace(/\)\$$/, "|ctm)$"), "gi");
+    }
   }
 
   function patchStatusbar(ace) {
