@@ -104,14 +104,32 @@ const openFirstSasFile = (page) =>
 // left behind, .lua text viewers included. Select the fixture (or any code tab)
 // first; without it those blocks read .editor off a viewer and report "found:
 // false" or throw, in a different place on every run.
+// `editorDiv`, not `sasSuiteTabContainer`, is the "this is a DMSEditor code tab"
+// marker: a TaskEditor (the .ctm task-definition tab) has a sasSuiteTabContainer
+// too, so that test could select one - and a task tab has no submit button, no
+// log pane and no diff, so the blocks downstream failed somewhere further on
+// instead. Only DMSEditor sets editorDiv, which is the same discriminator
+// editor-swap.js uses to tell the hosts apart.
+// A SAVED code tab is preferred over any code tab: a session that restores with
+// no tabs at all gets a blank "Program 1" from AppDMS, and that tab has no uri,
+// so blocks that diff or save against the tab's own file had nothing to run from.
+// The .sas fixture opened earlier is the one with a uri.
 const selectCodeTab = async (page) => {
-  const ok = await page.evaluate(() => {
-    const tabs = window.appDMS.tabs;
-    const t = tabs.getAllTabObjects().find((x) => x.editor && x.editor.sasSuiteTabContainer);
-    if (t) tabs.selectTab(t);
-    return !!t;
-  });
-  if (!ok) throw new Error("no code tab open - the .sas fixture never opened");
+  const pick = () =>
+    page.evaluate(() => {
+      const tabs = window.appDMS.tabs;
+      const code = tabs.getAllTabObjects().filter((x) => x.editor && x.editor.editorDiv);
+      const t = code.find((x) => x.uri) || code[0];
+      if (t) tabs.selectTab(t);
+      return !!t;
+    });
+  if (!(await pick())) {
+    // A session can restore with NO code tab at all - only text viewers, or a
+    // .ctm task tab, or an XML tab, none of which are one. That used to abort the
+    // whole run from here. Open the fixture and try again instead.
+    await openFirstSasFile(page);
+    if (!(await pick())) throw new Error("no code tab open - the .sas fixture never opened");
+  }
   await page.waitForTimeout(600);
 };
 
@@ -149,6 +167,22 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       )
       .catch(() => {});
     await page.waitForTimeout(1000);
+    // Stop the run writing its tab set back to the server. SAS Studio keeps the
+    // open-tab set in the USER's server-side preferences, shared with whoever has
+    // the app open in a browser - so a run that persists its tabs edits their
+    // session, and seeds the next run's starting state (measured: the stored
+    // preference was found holding a blank "Program 1" left by a previous run).
+    // `persistTabs` is SAS Studio's own switch for this and saveTabPreferences
+    // returns early on it; its own "test" perspective ships with it false.
+    // This is what makes a teardown unnecessary rather than DESTRUCTIVE: a
+    // teardown that closed every tab would delete the live user's working set,
+    // since it is the same preference. Re-applied on every load, reloads included.
+    await page
+      .evaluate(() => {
+        const tabs = window.appDMS && window.appDMS.tabs;
+        if (tabs) tabs.persistTabs = false;
+      })
+      .catch(() => {});
   };
 
   await page.goto(URL, { waitUntil: "load", timeout: 30000 });
@@ -172,6 +206,29 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     console.log("note: dismissed autosave-recovery dialog left by a previous run");
     await page.waitForTimeout(1000);
   }
+
+  // The open-tab set the USER will come back to. Read at both ends of the run and
+  // compared at the end: this run must not have edited it (see persistTabs in
+  // waitForPatches). Read from the server, not appDMS.getPreference, which
+  // answers out of cachedPreferences - i.e. with whatever this page last wrote.
+  const readTabPref = () =>
+    page
+      .evaluate(() => {
+        const a = window.appDMS;
+        const url =
+          a.baseURL + "/sasexec/" + a.sessionId + "/preferences/get?key=" + encodeValue("SWE.lastTabs") + ".key";
+        return new Promise((res) => {
+          dojo.xhrGet({
+            url,
+            handleAs: "json",
+            preventCache: true,
+            load: (d) => res(JSON.stringify(d)),
+            error: () => res(null),
+          });
+        });
+      })
+      .catch(() => null);
+  const tabPrefAtStart = await readTabPref();
 
   // -- injection + init ---------------------------------------------------------
   const state = await page.evaluate(() => ({
@@ -3412,8 +3469,27 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
   await page.waitForTimeout(300);
 
   // -- The tabs browser as alt+tab -------------------------------------------
-  // Needs at least three tabs to tell "previous" from "the one before that";
-  // the suite has several open by here, and the order is seeded explicitly.
+  // Needs at least three tabs to tell "previous" from "the one before that".
+  // It used to just hope the suite had three open by here, which made the whole
+  // block - five checks - silently skip whenever it didn't: the count depends on
+  // what the SERVER-side tab preferences restored, so a session last left with
+  // few tabs skipped it on every run until someone opened some by hand. Top up
+  // with blank program tabs instead, the same way the middle-click block opens
+  // its own fixture. They are empty and unsaved, so they close without a prompt.
+  const toppedUp = await page.evaluate(async () => {
+    const tabs = window.appDMS.tabs;
+    const made = [];
+    while (tabs.getAllTabObjects().length < 3) {
+      const before = tabs.getAllTabObjects().length;
+      tabs.addNewProgramTab();
+      await new Promise((r) => setTimeout(r, 800));
+      if (tabs.getAllTabObjects().length === before) break; // refuses to grow - don't spin
+      made.push(tabs.getAllTabObjects().at(-1).name);
+    }
+    return { made, total: tabs.getAllTabObjects().length };
+  });
+  check("tabs browser alt+tab setup - three tabs open", toppedUp.total >= 3, toppedUp);
+
   const seededTabs = await page.evaluate(async () => {
     const tabs = window.appDMS.tabs;
     const all = tabs.getAllTabObjects();
@@ -3427,7 +3503,7 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     return { previous: name(all[1]), beforeThat: name(all[0]), current: name(all[2]) };
   });
   if (!seededTabs) {
-    check("tabs browser alt+tab setup - three tabs open (skipped)", false, { seededTabs });
+    check("tabs browser alt+tab - could not seed three tabs (skipped)", false, { seededTabs, toppedUp });
   } else {
     const holdRows = async () =>
       page.evaluate(() => {
@@ -3523,6 +3599,29 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     );
     await page.keyboard.press("Escape");
     await page.waitForTimeout(300);
+  }
+  // Close whatever the top-up opened. The open-tab set lives in the user's
+  // SERVER-side preferences, so a tab left behind is inherited by the next run
+  // (and by anyone else on the instance) - which is how the starting state
+  // drifts until unrelated blocks start picking the wrong fixture tab.
+  if (toppedUp.made.length) {
+    await page.evaluate(async (made) => {
+      const tabs = window.appDMS.tabs;
+      for (const name of made) {
+        const t = tabs.getAllTabObjects().find((x) => x.name === name);
+        if (!t) continue;
+        try {
+          if (t.editor) t.editor.editorContentChanged = false; // blank anyway; no save prompt
+          tabs.closeTab(t);
+          await new Promise((r) => setTimeout(r, 400));
+        } catch (e) {}
+      }
+    }, toppedUp.made);
+    const leftover = await page.evaluate(
+      (made) => window.appDMS.tabs.getAllTabObjects().filter((t) => made.includes(t.name)).length,
+      toppedUp.made,
+    );
+    check("tabs browser alt+tab cleans up the tabs it opened", leftover === 0, { made: toppedUp.made, leftover });
   }
 
   // The other half of that guard: with no prompt open, the global Alt+C hotkey
@@ -4180,6 +4279,215 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
     );
     check("Save As re-baselines the unsaved-change gutter", saveAs.before.dirty > 0 && saveAs.dirty === 0, saveAs);
     check("save-as test cleans up its own tab", saveAs.closed, saveAs);
+  }
+
+  // -- The other editor hosts: .ctm (TaskEditor) and .xml (XMLEditor) ---------------
+  // Neither is a DMSEditor, and neither goes through the SAS.Editor dispatcher -
+  // they hold their own module-eval snapshot of it - so each needs its own
+  // createCodeEditor wrap and each is a separate way for a tab to silently keep
+  // the stock editor. Covered here: the .ctm opens straight into the task editor
+  // (no Edit/Run dialog, which is also what leaves the tab out of its container
+  // with no controlButton for middle-click to hook), both hosts hold an Ace
+  // adapter in XML mode, and both survive a toggle round trip through their
+  // $ssExtRebuildEditor hook.
+  const hosts = await page.evaluate(async () => {
+    const a = window.appDMS;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const workspace = (path) =>
+      a.baseURL + "/sasexec/sessions/" + a.sessionId + "/workspace/" + encodeValue(path, false, "/", false);
+    const uri = "/folders/myfolders/__ssext_smoke_task.ctm";
+    const out = { uri };
+
+    // A task definition is XML; this is the minimum SAS Studio will open as one.
+    const body =
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<Task schemaVersion="5.4" runNLS="never">\n' +
+      "  <Registration><Name>ssext smoke</Name><Description>fixture</Description>" +
+      "<GUID>11111111-2222-3333-4444-555555555555</GUID><Procedures>TBD</Procedures>" +
+      "<Version>3.8</Version></Registration>\n" +
+      "  <Metadata><DataSources/><Options/></Metadata>\n  <UI/>\n" +
+      "  <CodeTemplate><![CDATA[\nproc print data=sashelp.class;run;\n]]></CodeTemplate>\n</Task>\n";
+    out.written = await new Promise((res) =>
+      dojo.xhrPost({
+        postData: body,
+        url: workspace(uri),
+        contentType: "text/file",
+        handleAs: "json",
+        headers: { ObjectType: "" },
+        preventCache: true,
+        load: () => res(true),
+        error: (err) => res(err && err.status === 499),
+      }),
+    );
+    if (!out.written) return out;
+
+    // No `mode` on the item - that is the case the Edit/Run dialog exists for.
+    a.handleWebOneEvent("FileOpen", {
+      uri,
+      name: "__ssext_smoke_task.ctm",
+      id: uri.replaceAll("/", "~ps~"),
+    });
+    await sleep(6000);
+
+    const TaskEditor = window.require("webdms/TaskEditor");
+    const XMLEditor = window.require("webdms/XMLEditor");
+    const ctm = a.tabs.getAllTabObjects().find((t) => t.uri === uri);
+    const adapterOf = (t) => t && t.editor && t.editor.editor;
+    // "Is there an adapter" is NOT enough, and this is the bug that taught us:
+    // an XMLEditor built by calling the stock createCodeEditor through kept a
+    // live adapter - getText(), lineCount(), the dirty marker all worked - while
+    // the stock editor repainted over the pane and ripped Ace's DOM out, so the
+    // user saw an EMPTY editor. Assert the editor is actually on screen: its
+    // text layer attached, font metrics measured (0 means ace never got to
+    // measure, which is what a detached container looks like) and its own DOM,
+    // not `textview sce`, in the pane.
+    // SELECT the tab first. An unselected tab is display:none, so ace measures
+    // zero for everything and an editor rebuilt while hidden has no font metrics
+    // at all - both recover the moment the tab is shown (measured: charWidth
+    // 0 -> 9.03, content height 0 -> 956). Measuring a hidden tab would fail on
+    // a perfectly good editor; selecting first is also what the user does.
+    const rendersOf = async (t) => {
+      if (t) {
+        a.tabs.selectTab(t);
+        await sleep(1200);
+      }
+      const ad = adapterOf(t);
+      const ed = ad && ad.aceEditor;
+      if (!ed) return { ok: false, why: "no ace editor" };
+      const pane = t.editor.editorPane || t.editor.editorDiv;
+      return {
+        ok:
+          ed.renderer.content.isConnected &&
+          ed.renderer.characterWidth > 0 &&
+          ed.renderer.content.getBoundingClientRect().height > 0,
+        connected: ed.renderer.content.isConnected,
+        charWidth: ed.renderer.characterWidth,
+        contentH: Math.round(ed.renderer.content.getBoundingClientRect().height),
+        paneChildren: pane ? [...(pane.domNode || pane).children].map((c) => c.className) : null,
+      };
+    };
+    out.ctm = {
+      opened: !!ctm,
+      mode: ctm && ctm.mode,
+      isTaskEditor: !!(ctm && ctm.editor instanceof TaskEditor),
+      // The dialog is the thing we skip; a live one would still be in the registry.
+      decisionDialogOpen: !!(a.taskDecisionDialog && a.taskDecisionDialog.open),
+      // What middle-click needs and what the dialog path withheld: the tab in a
+      // container, with the close button dijit builds on addChild.
+      inContainer: !!(ctm && ctm.tab && ctm.tab.getParent()),
+      hasControlButton: !!(ctm && ctm.tab && ctm.tab.controlButton),
+      isAdapter: !!(adapterOf(ctm) && adapterOf(ctm)._isAceEditorAdapter),
+      aceMode: adapterOf(ctm) && adapterOf(ctm).aceEditor && adapterOf(ctm).aceEditor.session.$modeId,
+      renders: await rendersOf(ctm),
+    };
+
+    a.tabs.addNewXMLTab();
+    await sleep(2500);
+    const xml = a.tabs.getAllTabObjects().find((t) => t.type === "newxml");
+    out.xml = {
+      opened: !!xml,
+      isXmlEditor: !!(xml && xml.editor instanceof XMLEditor),
+      isAdapter: !!(adapterOf(xml) && adapterOf(xml)._isAceEditorAdapter),
+      aceMode: adapterOf(xml) && adapterOf(xml).aceEditor && adapterOf(xml).aceEditor.session.$modeId,
+      renders: await rendersOf(xml),
+    };
+
+    // Toggle round trip. Text is compared across it: the rebuild hook carries the
+    // live text over, and losing it would look like a working swap otherwise.
+    const textBefore = { ctm: adapterOf(ctm) && adapterOf(ctm).getText() };
+    await window.__ssExt.toggle();
+    out.off = {
+      active: window.__ssExt.active,
+      ctmAdapter: !!(adapterOf(ctm) && adapterOf(ctm)._isAceEditorAdapter),
+      xmlAdapter: !!(adapterOf(xml) && adapterOf(xml)._isAceEditorAdapter),
+      ctmText: adapterOf(ctm) && adapterOf(ctm).getText(),
+    };
+    await window.__ssExt.toggle();
+    out.on = {
+      active: window.__ssExt.active,
+      ctmAdapter: !!(adapterOf(ctm) && adapterOf(ctm)._isAceEditorAdapter),
+      xmlAdapter: !!(adapterOf(xml) && adapterOf(xml)._isAceEditorAdapter),
+      ctmMode: adapterOf(ctm) && adapterOf(ctm).aceEditor && adapterOf(ctm).aceEditor.session.$modeId,
+      xmlMode: adapterOf(xml) && adapterOf(xml).aceEditor && adapterOf(xml).aceEditor.session.$modeId,
+      ctmText: adapterOf(ctm) && adapterOf(ctm).getText(),
+      ctmRenders: await rendersOf(ctm),
+      xmlRenders: await rendersOf(xml),
+    };
+    out.textKept = !!textBefore.ctm && out.off.ctmText === textBefore.ctm && out.on.ctmText === textBefore.ctm;
+
+    // Middle-click the .ctm tab shut, through the same auxclick listener the
+    // real button fires. (The trusted-input path is covered by the earlier
+    // middle-click block; what is new here is that this tab HAS a button.)
+    const btn = ctm && ctm.tab && ctm.tab.controlButton && ctm.tab.controlButton.domNode;
+    if (btn) {
+      btn.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }));
+      await sleep(1200);
+    }
+    out.ctmClosedByMiddleClick = !a.tabs.getAllTabObjects().some((t) => t === ctm);
+
+    // Leave nothing behind: the XML tab, then the fixture file.
+    if (xml) {
+      try {
+        xml.editor.editorContentChanged = false;
+        a.tabs.closeTab(xml);
+        await sleep(600);
+      } catch (e) {}
+    }
+    out.xmlClosed = !a.tabs.getAllTabObjects().some((t) => t === xml);
+    out.deleted = await new Promise((res) =>
+      dojo.xhrDelete({ url: workspace(uri), preventCache: true, load: () => res(true), error: () => res(false) }),
+    );
+    return out;
+  });
+  if (!hosts.written) {
+    check("editor-hosts test setup - wrote the .ctm fixture", false, hosts);
+  } else {
+    check(
+      "a .ctm opens straight into the task editor, no Edit/Run dialog",
+      hosts.ctm.opened && hosts.ctm.mode === "edit" && hosts.ctm.isTaskEditor && !hosts.ctm.decisionDialogOpen,
+      hosts.ctm,
+    );
+    check(
+      "...so the task tab is in its container with a close button (middle-click can hook it)",
+      hosts.ctm.inContainer && hosts.ctm.hasControlButton,
+      hosts.ctm,
+    );
+    check(
+      "the task editor holds an Ace adapter in XML mode",
+      hosts.ctm.isAdapter && hosts.ctm.aceMode === "ace/mode/xml",
+      hosts.ctm,
+    );
+    check("...and it is the editor actually on screen", hosts.ctm.renders.ok, hosts.ctm.renders);
+    check(
+      "an XML tab holds an Ace adapter in XML mode",
+      hosts.xml.opened && hosts.xml.isXmlEditor && hosts.xml.isAdapter && hosts.xml.aceMode === "ace/mode/xml",
+      hosts.xml,
+    );
+    check("...and it is the editor actually on screen", hosts.xml.renders.ok, hosts.xml.renders);
+    check(
+      "both hosts go back to the stock editor when the toggle goes off",
+      hosts.off.active === false && !hosts.off.ctmAdapter && !hosts.off.xmlAdapter,
+      hosts.off,
+    );
+    check(
+      "...and back to Ace, in XML mode, when it goes on again",
+      hosts.on.active === true &&
+        hosts.on.ctmAdapter &&
+        hosts.on.xmlAdapter &&
+        hosts.on.ctmMode === "ace/mode/xml" &&
+        hosts.on.xmlMode === "ace/mode/xml",
+      hosts.on,
+    );
+    check(
+      "...both rendering, not just re-attached",
+      hosts.on.ctmRenders.ok && hosts.on.xmlRenders.ok,
+      { ctm: hosts.on.ctmRenders, xml: hosts.on.xmlRenders },
+    );
+    check("...with the text carried across both directions", hosts.textKept, {
+      len: hosts.on.ctmText && hosts.on.ctmText.length,
+    });
+    check("middle-click closes a task editor tab", hosts.ctmClosedByMiddleClick, hosts);
+    check("editor-hosts test cleans up its tab and fixture", hosts.xmlClosed && hosts.deleted, hosts);
   }
 
   // -- Dark mode (src/dark.css via a registered CSS content script) -----------------
@@ -5096,6 +5404,17 @@ const shutdown = () => closeBrowser(ctx, () => page && releaseSession(page));
       await new Promise((r) => setTimeout(r, 700));
     }
   }, baseTitles);
+
+  // The invariant that makes a teardown unnecessary: whatever tabs the person
+  // using this instance had open, they still have. A null on either end means the
+  // preference could not be read, which is not evidence of anything - fail rather
+  // than pass two nulls as "equal".
+  const tabPrefAtEnd = await readTabPref();
+  check(
+    "the run leaves the user's saved tab set untouched",
+    !!tabPrefAtStart && !!tabPrefAtEnd && tabPrefAtStart === tabPrefAtEnd,
+    { start: (tabPrefAtStart || "").slice(0, 200), end: (tabPrefAtEnd || "").slice(0, 200) },
+  );
 
   await shutdown();
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed");

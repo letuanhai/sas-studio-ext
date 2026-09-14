@@ -61,6 +61,18 @@ Scripts: `dev`, `test` (= units, options, smoke — cheapest and most portable f
 - `npm run test:smoke` — headless Chromium with the unpacked extension against the live instance.
   See the file header for `SS_URL`/`CHROME_BIN`.
   **Run it single-threaded** — not because the instance is rate-limited but because it runs on a 995 MB box.
+
+  **The starting state is not the run's to assume.** SAS Studio keeps the open-tab set and the selection in the user's
+  SERVER-side preferences, so a run inherits whatever the last run — or a person with the instance open — left behind,
+  and anything it leaves open is inherited in turn.
+  Two consequences the suite has to handle, and did not always:
+  a block that needs particular tabs must OPEN them (`openFirstSasFile`, the alt+tab top-up) rather than hope, and must
+  close what it opened;
+  and `selectCodeTab` picks the fixture tab by `editor.editorDiv` — the DMSEditor-only marker — preferring one with a
+  `uri`, because `sasSuiteTabContainer` also matches a `.ctm` task tab and a no-tab session restores as a blank,
+  uri-less `Program 1`.
+  Symptoms of getting this wrong are never local: the block that picked the wrong tab passes, and something unrelated
+  further down fails instead.
 - `node test/browser-guard-check.js` — regression guard for `tools/browser-guard.js`, run when you touch that file.
   No alias, since both other tests already exercise it.
 
