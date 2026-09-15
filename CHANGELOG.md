@@ -1,6 +1,17 @@
 # Changelog
 
 
+## 0.23
+
+- The Ace replacement now reaches the task editor (the Edit half of a `.ctm`)
+  and XML tabs (a `.xml` file, "New XML file"). Those hosts snapshot SAS
+  Studio's editor at load time, so each needed its own patch. A `.ctm` opened
+  any other way is highlighted as XML too.
+- A new "Always edit a task definition" patch opens a `.ctm` straight in the
+  task editor instead of asking edit-or-run first, and as a side effect makes
+  middle-click close work on that tab.
+
+
 ## 0.22
 
 - A Lua language server, emmylua compiled to wasm and shipped in `lib/`, gives
