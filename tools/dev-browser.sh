@@ -251,11 +251,14 @@ fi
 # Note each load of the app creates a workspace session on the server, and its
 # own cleanup is dead code (see the session-leak note above), so this leaks one
 # per launch until the server times it out.
+# Opened AFTER the extension loads (below), not on chrome's command line: a tab
+# that loads before Extensions.loadUnpacked never gets the content scripts
+# (measured in chrome-smart-zoom - absent until the page is reloaded).
 URL=${URL-https://sas.lth0.net/SASStudio/38/}
 
 "$CHROME" --remote-debugging-port="$PORT" --user-data-dir="$DATA" \
 	--no-first-run --no-default-browser-check \
-	"$@" ${URL:+"$URL"} >"$DATA/chrome.log" 2>&1 &
+	"$@" >"$DATA/chrome.log" 2>&1 &
 echo $! >"$PIDFILE"
 printf %s "$DISPLAY" >"$DISPFILE"
 
@@ -286,6 +289,8 @@ if [ -z "$ID" ]; then
 	fi
 	exit 1
 fi
+
+[ -n "$URL" ] && curl -s --max-time 5 -X PUT "http://localhost:$PORT/json/new?$URL" >/dev/null
 
 echo "mode:     $MODE"
 echo "cdp:      http://localhost:$PORT"
