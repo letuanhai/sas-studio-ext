@@ -1408,6 +1408,15 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         ]);
 
         /**
+         * What identifies a tab in the list: a file tab's full path (titles
+         * collide across folders), a table tab's id, else its title.
+         * @param {SsTabItem & SsFileItem & SsLibraryItem} t
+         */
+        static tabKey(t) {
+            return t.uri ? Utils.normalizeItemPath(t.uri) : (t.id ?? t.tabTitle ?? t.title ?? '');
+        }
+
+        /**
          * Get DataItem from provided tabs
          * @param {String} tabItemPath Absolute item path
          * @returns {Promise<Partial<DataItem>>}
@@ -1426,12 +1435,14 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
                     const prefix = tabItem.type?.toLowerCase() === 'file' ?
                         (SsFiles.fileIconMap.get(tabItem.fileType?.toLocaleLowerCase() ?? '') ?? '📝 ') :
                         (SsTabs.tabTypeIconMap.get(tabItem.type?.toLowerCase() ?? '') ?? '');
+                    const key = SsTabs.tabKey(tabItem);
                     return {
                         value: prefix + (tabItem.tabTitle ?? tabItem.title),
                         prefix: prefix,
-                        uri: tabItem.tabTitle ?? tabItem.title ?? '',
+                        uri: key,
                         keepPrompt: false,
-                        meta: `${tabItem.fileType ?? ''} ${tabItem.type}`,
+                        // A file tab's full path, so same-named files tell apart.
+                        meta: tabItem.uri ? key : `${tabItem.fileType ?? ''} ${tabItem.type}`,
                     };
                 });
                 resolve(dataItem)
@@ -1447,12 +1458,7 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             const tabs = window.appDMS.tabs;
             /** @type {(SsTabItem & SsFileItem & SsLibraryItem)[]} */
             const allTabs = tabs.getAllTabObjects();
-            const [tabFileType, tabType] = tabDataItem.meta?.split(' ') ?? [];
-            const n = allTabs.findIndex(
-                t => (t.tabTitle ?? t.title) === tabDataItem.uri &&
-                    t.type === tabType && (t.fileType ?? '') === tabFileType
-            );
-            tabs.selectTab(allTabs[n]);
+            tabs.selectTab(allTabs.find(t => SsTabs.tabKey(t) === tabDataItem.uri));
             tabs.getFocusedTab().editor?.editor?.focus?.();
         }
 
