@@ -1205,7 +1205,12 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
                 const dataItem = {
                     uri: item.uri,
                 };
-                dataItem.children = item.children?.map(childItem => {
+                // Folders first, like SAS Studio's own tree: the server's order
+                // varies by locale (its tree store moves folders to the front
+                // only for a non-en_US locale). Stable, so each group keeps it.
+                dataItem.children = item.children?.toSorted(
+                    (a, b) => Number(b.isDirectory) - Number(a.isDirectory)
+                ).map(childItem => {
                     const prefix = childItem.isDirectory ? '📁 ' :
                         (SsFiles.fileIconMap.get(childItem.name.split('.').at(-1)?.toLocaleLowerCase() ?? '') ?? '');
                     return {

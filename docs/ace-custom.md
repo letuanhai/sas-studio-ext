@@ -123,6 +123,11 @@ That start path is `getStartPath()`, which prefers `__ssExt.browsePaths.files`/`
 `lastPaths` entries record the root they were saved under (`{path, root}`), so a changed root supersedes the remembered
 wandering point instead of being masked by it.
 
+**Folder order.** `getFileDataItem` lists a folder's children folders first, otherwise in the server's order (a stable
+partition).
+The raw `projectTreeStore.query` order varies by locale — SAS Studio's own tree store moves folders to the front
+itself, only when `initLocale` isn't `en_US` — so the browser can't rely on it.
+
 **Sorting.** `getFilteredCompletions` sorts ace's `filterCompletions` output (which scores but never sorts) so exact
 name
 matches rank first, then prefix matches, ties keeping collection order.
