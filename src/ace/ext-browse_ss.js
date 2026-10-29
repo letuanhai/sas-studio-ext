@@ -237,6 +237,8 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             tl.element.childNodes.forEach((/** @type {HTMLElement} */ node, /** @type {number} */ i) => {
                 const data = popup.getData(tl.config.firstRow + i);
                 node.title = (data && !data.error && data.value) || "";
+                // the subtext can be truncated (see .ace_completion-meta below)
+                if (node.title && data.meta && data.meta !== ">") node.title += "\n" + data.meta;
             });
         });
 
@@ -250,10 +252,11 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         // renderer rebuilds row DOM (every setData/resize), we re-wrap the
         // focused row: a row change animates to the end, a same-row rebuild
         // (typing) jumps to the end without animating so refiltering doesn't
-        // replay the scroll each keystroke.
+        // replay the scroll each keystroke. The subtext (.ace_completion-meta,
+        // capped in CSS) scrolls the same way, inside its own clip box.
         const SCROLL_SPEED_PX_PER_S = 100; // ~5s for 600px of overflow
         /** @type {number} */ let ssRow = -1;
-        /** @type {HTMLElement|null} */ let ssPrevInner = null;
+        /** @type {HTMLElement[]} */ let ssPrevInners = [];
         /** @param {number} row @returns {HTMLElement|null} */
         function rowNode(row) {
             const tl = popup.renderer.$textLayer;
@@ -277,6 +280,17 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             node.insertBefore(wrap, spacer);
             return inner;
         }
+        /** @param {HTMLElement} node @returns {HTMLElement|null} */
+        function wrapMeta(node) {
+            const meta = /** @type {HTMLElement?} */ (node.querySelector(".ace_completion-meta"));
+            if (!meta) return null;
+            const inner = document.createElement("span");
+            inner.className = "ace_browse_ss_caption-inner";
+            while (meta.firstChild) inner.appendChild(meta.firstChild);
+            meta.appendChild(inner);
+            meta.classList.add("ace_browse_ss_caption-wrap");
+            return inner;
+        }
         /** @param {HTMLElement} inner */ function resetInner(inner) {
             inner.style.transition = "none";
             inner.style.transform = "translateX(0)";
@@ -292,23 +306,23 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
             const row = popup.getRow();
             const prevRow = ssRow;
             ssRow = row;
-            if (row !== prevRow && ssPrevInner) resetInner(ssPrevInner);
+            if (row !== prevRow) ssPrevInners.forEach(resetInner);
             const node = row >= 0 ? rowNode(row) : null;
-            if (!node) { ssPrevInner = null; return; }
+            if (!node) { ssPrevInners = []; return; }
             // Same row and its wrap survived this render: the DOM wasn't rebuilt,
             // so leave the in-flight animation (or resting position) alone.
             if (row === prevRow && node.querySelector(".ace_browse_ss_caption-inner")) return;
-            const inner = wrapCaption(node);
-            if (!inner) { ssPrevInner = null; return; }
-            resetInner(inner);
-            const dist = Math.max(0, inner.scrollWidth - (inner.parentElement?.clientWidth ?? 0));
-            ssPrevInner = inner;
-            if (row !== prevRow) {
-                // focus moved to a new row: animate to the end, and leave it there
-                requestAnimationFrame(() => animateInner(inner, dist));
-            } else {
-                // same row rebuilt (keystroke/refilter): jump to the end, no animation
-                inner.style.transform = `translateX(${-dist}px)`;
+            ssPrevInners = /** @type {HTMLElement[]} */ ([wrapCaption(node), wrapMeta(node)].filter(Boolean));
+            for (const inner of ssPrevInners) {
+                resetInner(inner);
+                const dist = Math.max(0, inner.scrollWidth - (inner.parentElement?.clientWidth ?? 0));
+                if (row !== prevRow) {
+                    // focus moved to a new row: animate to the end, and leave it there
+                    requestAnimationFrame(() => animateInner(inner, dist));
+                } else {
+                    // same row rebuilt (keystroke/refilter): jump to the end, no animation
+                    inner.style.transform = `translateX(${-dist}px)`;
+                }
             }
         }
         popup.renderer.on("afterRender", applyCaptionScroll);
@@ -799,6 +813,16 @@ __ssAce.define("ace/ext/browse_ss", [], function (require, exports, module) {
         Re-enable pointer events on this popup's rows only. */
         .ace_browse_ss_container .ace_autocomplete .ace_text-layer > .ace_line {
         pointer-events: auto;
+        }
+        /* The subtext (a tab's full path) would otherwise take its full width
+        (ace gives it flex 0 0 auto) and squeeze the caption: cap it at 55% of
+        the row, truncating with an ellipsis past that (the focused row's
+        scrolls instead, via the caption-wrap/-inner rules below). */
+        .ace_browse_ss_container .ace_autocomplete .ace_line .ace_completion-meta {
+        flex: 0 1 auto;
+        max-width: 55%;
+        overflow: hidden;
+        text-overflow: ellipsis;
         }
         /* Caption auto-scroll: the focused row's caption spans are grouped into
         one clipped wrapper (so the clip lives on one box, not per span), and the

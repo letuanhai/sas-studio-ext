@@ -137,7 +137,10 @@ Long paths truncate on the right, with two per-item tail reveals: the focused ro
 clipped box whose inner box is `translateX`-animated left to the end (~100px/s, re-applied on every renderer
 `afterRender` since ace rebuilds row DOM each render — a same-row render whose wrap survived is left alone so the
 in-flight animation isn't cancelled, while a same-row DOM rebuild, i.e. typing, jumps to the end without animating), and
-every visible row gets a native `title` tooltip with its full value.
+every visible row gets a native `title` tooltip with its full value (plus its subtext, unless that's `>`).
+The subtext (`.ace_completion-meta`, e.g. a tab's full path) is capped at 55% of the row and ellipsis-truncated past
+that, so it can't squeeze the caption;
+on the focused row it gets the same tail-reveal scroll, in its own clip box.
 All rows, not just the focused one — ace recycles row nodes, so a focused-only title would go stale;
 it needs the scoped `pointer-events:auto` rule because ace's `.ace_layer{pointer-events:none}` Safari workaround
 otherwise keeps rows from ever being the hover target.
