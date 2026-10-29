@@ -1,6 +1,16 @@
 # Changelog
 
 
+## 0.25
+
+- In the tabs browser (`Alt+Q`) a long file path no longer squeezes the tab
+  name: it takes at most 55% of the row, scrolls to its end on the selected
+  row, and shows in full in the row's tooltip.
+- The file browser always lists folders before files, as SAS Studio's own
+  tree does. It used to keep the server's order, which on some machines (seen
+  on macOS) put folders at the bottom.
+
+
 ## 0.24
 
 - The tabs browser (`Alt+Q`) tells open files with the same name apart: each
