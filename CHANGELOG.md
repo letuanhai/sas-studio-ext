@@ -1,6 +1,13 @@
 # Changelog
 
 
+## 0.24
+
+- The tabs browser (`Alt+Q`) tells open files with the same name apart: each
+  file shows its full path underneath, and picking one now switches to that
+  file instead of always the first tab with that name.
+
+
 ## 0.23
 
 - The Ace replacement now reaches the task editor (the Edit half of a `.ctm`)
