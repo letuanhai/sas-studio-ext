@@ -69,8 +69,21 @@ PIDFILE=$DATA/.launcher.pid
 DISPFILE=$DATA/.display
 
 # Kill by pid, not `pkill -f`: the pattern would match this script's own cmdline.
+# Wait for it to actually exit before forgetting the pid: chrome's graceful
+# shutdown takes seconds, and can stall outright (seen on a VNC display, which
+# unlike a forwarded one does not vanish and take chrome with it) - extension
+# already unloaded, CDP still on $PORT, pidfile gone, so the next launch can
+# only call the port "in use by something else". KILL after 10s.
 stop() {
-	[ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null || true
+	if [ -f "$PIDFILE" ]; then
+		pid=$(cat "$PIDFILE")
+		kill "$pid" 2>/dev/null || true
+		for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+			[ -d "/proc/$pid" ] || break
+			sleep 0.5
+		done
+		kill -9 "$pid" 2>/dev/null || true
+	fi
 	rm -f "$PIDFILE" "$DISPFILE"
 }
 
