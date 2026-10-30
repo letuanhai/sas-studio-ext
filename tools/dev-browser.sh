@@ -208,12 +208,19 @@ mkdir -p "$DATA"
 if [ -n "$VNC" ]; then
 	DISPLAY=${VNC_DISPLAY:-:5}
 	export DISPLAY
-	if ! xdpyinfo >/dev/null 2>&1; then
+	# A wedged Xvnc (seen: 100% CPU in its dispatch loop after a server reset,
+	# hence -noreset below) accepts the connection and never answers, so an
+	# unbounded probe hangs this script with it. Ours, and useless: replace it.
+	if ! timeout 3 xdpyinfo >/dev/null 2>&1; then
+		if pkill -9 -f "^Xvnc $DISPLAY "; then
+			echo "Xvnc on $DISPLAY was not responding - restarted it" >&2
+			sleep 1
+		fi
 		Xvnc "$DISPLAY" -geometry "${VNC_GEOMETRY:-1920x1080}" -depth 24 \
-			-localhost -SecurityTypes None -AlwaysShared \
+			-localhost -SecurityTypes None -AlwaysShared -noreset \
 			>"$DATA/xvnc.log" 2>&1 &
-		for _ in 1 2 3 4 5 6 7 8 9 10; do xdpyinfo >/dev/null 2>&1 && break; sleep 0.3; done
-		xdpyinfo >/dev/null 2>&1 || { echo "Xvnc failed - see $DATA/xvnc.log" >&2; exit 1; }
+		for _ in 1 2 3 4 5 6 7 8 9 10; do timeout 3 xdpyinfo >/dev/null 2>&1 && break; sleep 0.3; done
+		timeout 3 xdpyinfo >/dev/null 2>&1 || { echo "Xvnc failed - see $DATA/xvnc.log" >&2; exit 1; }
 	fi
 	echo "vnc:      localhost:$((5900 + ${DISPLAY#:})) - from the phone: ssh -L 5900:localhost:$((5900 + ${DISPLAY#:})) <host>"
 fi
@@ -256,7 +263,7 @@ if [ -n "$DISPLAY" ]; then
 	# display (there is no WM to maximise it, and no titlebar taking space
 	# either). WINDOW=1536,960 overrides; WINDOW= leaves chrome's own default.
 	if command -v xdpyinfo >/dev/null 2>&1; then
-		dim=$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')
+		dim=$(timeout 3 xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')
 		SCRW=${dim%x*}
 		SCRH=${dim#*x}
 	fi
