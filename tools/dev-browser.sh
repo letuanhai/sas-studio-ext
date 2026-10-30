@@ -33,7 +33,8 @@
 #   WINDOW=1600,1000 ./tools/dev-browser.sh  # window size (default: fill the
 #                                          #  display; WINDOW= to opt out)
 #   VNC=1 ./tools/dev-browser.sh           # on a persistent Xvnc display (:5,
-#                                          #  VNC_DISPLAY/VNC_GEOMETRY override)
+#                                          #  VNC_DISPLAY/VNC_GEOMETRY override,
+#                                          #  VNC_AUTH=1 for a password)
 #                                          #  instead of X11 forwarding - see below
 #   ./tools/dev-browser.sh --headless=new  # extra flags pass through
 #
@@ -211,26 +212,47 @@ mkdir -p "$DATA"
 # network crawls; VNC sends compressed diffs. The display (and chrome on it)
 # outlives the phone's connection - so it no longer frees $PORT for the laptop
 # by itself: `stop` before switching. Started once, reused by later runs.
-# ponytail: no VNC auth, localhost-only - fine on a single-user box; add
-# -SecurityTypes VncAuth if that changes.
+# No VNC auth by default: it only listens on localhost, behind the ssh tunnel.
+# VNC_AUTH=1 adds a password, for macOS Screen Sharing, which cannot use a
+# server without one (it prompts anyway, then never asks for a frame). The
+# password is set once, interactively, in TigerVNC's default file.
 if [ -n "$VNC" ]; then
 	DISPLAY=${VNC_DISPLAY:-:5}
 	export DISPLAY
+	if [ -z "$VNC_AUTH" ]; then
+		SEC=None RFBAUTH=
+	else
+		SEC=VncAuth RFBAUTH=$HOME/.config/tigervnc/passwd
+		if [ ! -s "$RFBAUTH" ]; then
+			[ -t 0 ] || { echo "no VNC password yet - run 'vncpasswd $RFBAUTH' once" >&2; exit 1; }
+			echo "set a VNC password (asked by the VNC client, not by ssh):"
+			mkdir -p "${RFBAUTH%/*}"
+			vncpasswd "$RFBAUTH" || exit 1
+		fi
+	fi
 	# A wedged Xvnc (seen: 100% CPU in its dispatch loop after a server reset,
 	# hence -noreset below) accepts the connection and never answers, so an
 	# unbounded probe hangs this script with it. Ours, and useless: replace it.
+	# Same for one of ours started with the other auth - chrome on it is about
+	# to be restarted by this launch anyway.
+	why=
 	if ! timeout 3 xdpyinfo >/dev/null 2>&1; then
+		why="was not responding"
+	elif pgrep -f "^Xvnc $DISPLAY " >/dev/null && ! pgrep -f "^Xvnc $DISPLAY .*-SecurityTypes $SEC " >/dev/null; then
+		why="had other auth than SecurityTypes=$SEC"
+	fi
+	if [ -n "$why" ]; then
 		if pkill -9 -f "^Xvnc $DISPLAY "; then
-			echo "Xvnc on $DISPLAY was not responding - restarted it" >&2
+			echo "Xvnc on $DISPLAY $why - restarted it" >&2
 			sleep 1
 		fi
 		Xvnc "$DISPLAY" -geometry "${VNC_GEOMETRY:-1920x1080}" -depth 24 \
-			-localhost -SecurityTypes None -AlwaysShared -noreset \
+			-localhost -SecurityTypes "$SEC" ${RFBAUTH:+-rfbauth "$RFBAUTH"} -AlwaysShared -noreset \
 			>"$DATA/xvnc.log" 2>&1 &
 		for _ in 1 2 3 4 5 6 7 8 9 10; do timeout 3 xdpyinfo >/dev/null 2>&1 && break; sleep 0.3; done
 		timeout 3 xdpyinfo >/dev/null 2>&1 || { echo "Xvnc failed - see $DATA/xvnc.log" >&2; exit 1; }
 	fi
-	echo "vnc:      localhost:$((5900 + ${DISPLAY#:})) - from the phone: ssh -L 5900:localhost:$((5900 + ${DISPLAY#:})) <host>"
+	echo "vnc:      localhost:$((5900 + ${DISPLAY#:})) - from the client: ssh -L 5900:localhost:$((5900 + ${DISPLAY#:})) <host>"
 fi
 
 guarded_stop
