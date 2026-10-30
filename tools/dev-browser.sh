@@ -32,6 +32,9 @@
 #   URL= ./tools/dev-browser.sh            # don't open SAS Studio at startup
 #   WINDOW=1600,1000 ./tools/dev-browser.sh  # window size (default: fill the
 #                                          #  display; WINDOW= to opt out)
+#   VNC=1 ./tools/dev-browser.sh           # on a persistent Xvnc display (:5,
+#                                          #  VNC_DISPLAY/VNC_GEOMETRY override)
+#                                          #  instead of X11 forwarding - see below
 #   ./tools/dev-browser.sh --headless=new  # extra flags pass through
 #
 # Most edits need NOTHING here - just reload the SAS Studio page. What a page
@@ -194,6 +197,27 @@ CHROME=$CHROME_BIN
 [ -x "$CHROME" ] || { echo "no chrome - install google-chrome, or: npx playwright install chromium" >&2; exit 1; }
 
 mkdir -p "$DATA"
+
+# VNC=1: a persistent virtual display instead of X11 forwarding. Chrome pushes
+# uncompressed bitmaps and X11 is round-trip bound, so forwarding it over a
+# network crawls; VNC sends compressed diffs. The display (and chrome on it)
+# outlives the phone's connection - so it no longer frees $PORT for the laptop
+# by itself: `stop` before switching. Started once, reused by later runs.
+# ponytail: no VNC auth, localhost-only - fine on a single-user box; add
+# -SecurityTypes VncAuth if that changes.
+if [ -n "$VNC" ]; then
+	DISPLAY=${VNC_DISPLAY:-:5}
+	export DISPLAY
+	if ! xdpyinfo >/dev/null 2>&1; then
+		Xvnc "$DISPLAY" -geometry "${VNC_GEOMETRY:-1920x1080}" -depth 24 \
+			-localhost -SecurityTypes None -AlwaysShared \
+			>"$DATA/xvnc.log" 2>&1 &
+		for _ in 1 2 3 4 5 6 7 8 9 10; do xdpyinfo >/dev/null 2>&1 && break; sleep 0.3; done
+		xdpyinfo >/dev/null 2>&1 || { echo "Xvnc failed - see $DATA/xvnc.log" >&2; exit 1; }
+	fi
+	echo "vnc:      localhost:$((5900 + ${DISPLAY#:})) - from the phone: ssh -L 5900:localhost:$((5900 + ${DISPLAY#:})) <host>"
+fi
+
 guarded_stop
 sleep 1
 # The profile is kept across runs now (settings, history, logins). CLEAN=1 is

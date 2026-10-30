@@ -125,6 +125,15 @@ an unreachable `DISPLAY` is reported as such rather than as "extension did not l
 `URL=` empty starts on the new-tab page (written `${URL-default}`, so an empty value is a choice, not a fallback).
 Each launch costs one leaked workspace session — the browser is driven by hand, so there is no `releaseSession` here.
 
+`VNC=1` puts the browser on a TigerVNC `Xvnc` display (`:5`, `VNC_DISPLAY`/`VNC_GEOMETRY` override) instead of a
+forwarded one, started on first use and reused after.
+It listens on `127.0.0.1:5905` with no VNC auth, so it is reached through `ssh -L 5900:localhost:5905` and a VNC client
+on the phone.
+The display outlives the ssh connection, and so does chrome on it — which means it keeps holding `PORT` after the phone
+leaves:
+`stop` before the laptop's `ssh -R`.
+A foreground (watching) run still dies with its ssh session, so run it under `tmux` or with `WATCH=0`.
+
 A plain run stays in the foreground and reloads the extension on every change to the five files a page reload cannot
 pick up, until Ctrl-C.
 `WATCH=0` gives launch-and-return, which is what an agent wants.
