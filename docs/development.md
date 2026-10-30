@@ -137,6 +137,8 @@ A foreground (watching) run still dies with its ssh session, so run it under `tm
 
 A plain run stays in the foreground and reloads the extension on every change to the five files a page reload cannot
 pick up, until Ctrl-C.
+Every stop waits up to 10s for chrome to exit before killing it — a SAS Studio "leave site?" dialog holds the exit for
+that long — and a second Ctrl-C kills it at once.
 `WATCH=0` gives launch-and-return, which is what an agent wants.
 `./tools/dev-browser.sh reload` is the same reload on demand from another shell — over X11 forwarding, restarting the
 browser is the expensive part, so this is the normal way to pick up an edit.
