@@ -4127,8 +4127,8 @@
   // ~6791-6976) - just the plain "workspace" save path. No autosave/backup
   // cleanup (viewers never created a backup file), no MVS/ftp/CTK/CPK branches,
   // since text viewers only ever come from plain workspace files.
-  function saveTextViewer(entry, onSaved) {
-    const uri = entry.item && entry.item.uri;
+  // `uri` overrides the target for a save-as (ss-fixes' saveFocusedFileAtPath).
+  function saveTextViewer(entry, onSaved, uri = entry.item && entry.item.uri) {
     if (!uri) {
       console.error("[SS Ext] Cannot save text viewer: no item.uri", entry.item);
       if (typeof dojoAlert === "function") dojoAlert("Save failed: no file URI");
@@ -4171,6 +4171,8 @@
       },
     });
   }
+
+  ssExt.saveTextViewer = saveTextViewer;
 
   // -- Vim :w / :q / :wq / :x ------------------------------------------------------
   // Registered once on the shared vim module (ace/keyboard/vim), so they apply to

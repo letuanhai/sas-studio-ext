@@ -359,7 +359,7 @@ code-editor tab, so they work in both:
 | Command | Does |
 |---|---|
 | `:w`, `:wq` | save (`:wq` also closes) |
-| `:w <path>` | `ss-fixes.js`'s `saveFocusedFileAtPath(path)`, the same save-as flow as the `saveFileAtPath` action |
+| `:w <path>` | `ss-fixes.js`'s `saveFocusedFileAtPath(path)`, the same save-as flow as the `saveFileAtPath` action; in a text viewer it POSTs to the new path via `__ssExt.saveTextViewer` (confirming an overwrite) and replaces the tab with a text viewer of the new file |
 | `:q` | close the tab |
 | `:x` | remapped off save-and-close to the `runCurrentProgram` action, submitting like F3 |
 | `:marks` | the letter marks, in the bottom notification `:registers` uses |

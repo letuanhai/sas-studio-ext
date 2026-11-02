@@ -1173,7 +1173,10 @@ Add a prefix to the path for different option:
   // button would - so tab rename/uri update/dirty-clearing etc. all go through SAS
   // Studio's own code, not a reimplementation of it.
   function saveFocusedFileAtPath(targetPath) {
-    const editor = window.appDMS.tabs.getFocusedTab()?.editor;
+    const focused = window.appDMS.tabs.getFocusedTab();
+    const viewer = getTextViewerForTab(focused);
+    if (viewer) return saveTextViewerAtPath(focused, viewer, resolveFilePath(targetPath));
+    const editor = focused?.editor;
     if (!editor || typeof editor.saveFileAs !== "function") {
       showNotification({ message: "No saveable file is currently focused", isError: true });
       return;
@@ -1193,6 +1196,38 @@ Add a prefix to the path for different option:
         }),
       )
       .catch((err) => showNotification({ message: err.message, isError: true }));
+  }
+
+  // A text viewer has no Save As of its own (no DMSEditor behind it), and
+  // retargeting the tab in place would leave its Refresh button and the persisted
+  // tab on the old file. So: write the text to the new path, then swap the tab for
+  // a fresh text viewer of the new file, opened the normal way. The parent folder's
+  // listing is the overwrite guard; a missing folder lists as null (200), and the
+  // POST into it then fails with SAS's own "Physical file does not exist" alert.
+  function saveTextViewerAtPath(tab, viewer, resolved) {
+    if (resolved === viewer.item.uri) return window.__ssExt.saveTextViewer(viewer);
+    const dirPath = resolved.split("/").slice(0, -1).join("/");
+    const fileName = resolved.split("/").slice(-1)[0];
+    const a = window.appDMS;
+    window.dojo.xhrGet({
+      url: `${a.baseURL}/sasexec/sessions/${a.sessionId}/workspace/${encodeValue(dirPath)}?includeChildren=true`,
+      handleAs: "json",
+      preventCache: true,
+      load: (d) => {
+        const children = (d && d[0] && d[0].children) || [];
+        if (children.some((c) => c.name === fileName) && !window.confirm(`${resolved} already exists. Replace it?`))
+          return;
+        window.__ssExt.saveTextViewer(
+          viewer,
+          () => {
+            a.tabs.closeTab(tab);
+            openItem({ uri: resolved, name: fileName, type: "FILE", fileType: "TXT" });
+          },
+          resolved,
+        );
+      },
+      error: () => showNotification({ message: `Could not list ${dirPath}`, isError: true }),
+    });
   }
 
   function saveFileAtPath() {
