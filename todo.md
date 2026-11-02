@@ -1,1 +1,0 @@
-- [x] change ace editor default mode for unrecognise file type to txt (currently is sas), could make it configurable
