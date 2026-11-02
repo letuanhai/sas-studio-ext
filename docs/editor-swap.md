@@ -82,6 +82,8 @@ real `SimpleTextarea`, which is kept alive in the widget tree (just hidden) so A
 which indexes `pane.getChildren()[1].getChildren()[0]` rather than going through `tabHolder.simpleTextArea` — keeps
 working untouched.
 The widget's `.set("value", ...)` is patched to mirror writes into Ace.
+The mode comes from `aceModeFor(name, "ace/mode/text")`: an unrecognised extension is plain text here, whereas a code
+editor's fallback stays SAS (a new program has no extension yet).
 
 The overlay is always editable;
 an edit marks the tab dirty (`*name`, matching `applyChangedIndicationToTab`).

@@ -36,10 +36,12 @@
   //     actually complains about print output.
   // ==========================================================================
   // Pick an ace mode from a file name via ace/ext/modelist (loaded by ext-prompt,
-  // with the SAS entry added in ace-patches.js). Unknown/no extension -> sas.
+  // with the SAS entry added in ace-patches.js). Unknown/no extension ->
+  // `fallback`: SAS for the code editor (a new "Program 1" has no extension yet),
+  // text for text viewers.
   // ponytail: modelist can't distinguish ".txt" from "no match" (both -> text
-  // mode), so genuine .txt gets SAS highlighting too. Fine for SAS Studio.
-  function aceModeFor(name) {
+  // mode), so a code editor's .txt gets SAS highlighting. Fine for SAS Studio.
+  function aceModeFor(name, fallback = "ace/mode/sas") {
     try {
       // SAS Studio uniquifies tab titles by appending " <n>" (SASStudioTabs'
       // _incrementTitle), and that title is what the tab's `name` ends up being -
@@ -48,7 +50,7 @@
       const m = ace.require("ace/ext/modelist").getModeForPath(name.replace(/ \d+$/, "")).mode;
       if (m && m !== "ace/mode/text") return m;
     } catch (e) {}
-    return "ace/mode/sas";
+    return fallback;
   }
 
   // What getContextMenu() hands back - see the comment there. A Proxy rather than
@@ -3992,7 +3994,7 @@
     const adapter = new AceEditorAdapter(
       divId,
       textarea ? textarea.get("value") : "",
-      aceModeFor(item && item.name),
+      aceModeFor(item && item.name, "ace/mode/text"),
       item && item.uri,
     );
     // Always editable (like a normal editor); the dirty state drives the tab
