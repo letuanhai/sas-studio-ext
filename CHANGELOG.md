@@ -1,6 +1,16 @@
 # Changelog
 
 
+## 0.26
+
+- "View file as text" opens a file with an unrecognised extension, and a
+  plain `.txt`, as plain text instead of SAS. New programs in the code editor
+  still default to SAS, since they have no extension until saved.
+- Vim's `:w <path>` (and "Save File At Path") now saves a text viewer to a new
+  path, asking before it replaces an existing file, and reopens the tab on the
+  new file. It used to report that no saveable file was focused.
+
+
 ## 0.25
 
 - In the tabs browser (`Alt+Q`) a long file path no longer squeezes the tab
